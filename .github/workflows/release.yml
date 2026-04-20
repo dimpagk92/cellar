@@ -129,7 +129,7 @@ jobs:
           merge-multiple: true
 
       - name: Build mcp-server
-        run: pnpm --filter @cellar/mcp-server build
+        run: pnpm --filter @dimpagk92/cellar-mcp build
 
       - name: Semantic Release
         env:

@@ -1,28 +1,68 @@
 {
-  "name": "@cellar/mcp-server",
+  "name": "@dimpagk92/cellar-mcp",
   "version": "0.1.0",
-  "description": "CEL MCP server — structured computer context for AI agents",
-  "main": "dist/index.js",
+  "description": "Cellar MCP server — native computer use for AI agents (Claude Code, Cursor, any MCP client)",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "computer-use",
+    "ai-agents",
+    "claude",
+    "cursor",
+    "macos",
+    "accessibility",
+    "automation"
+  ],
+  "homepage": "https://github.com/dimpagk92/cellar",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dimpagk92/cellar.git",
+    "directory": "mcp-server"
+  },
+  "bugs": "https://github.com/dimpagk92/cellar/issues",
+  "license": "Apache-2.0",
+  "author": "dimpagk92",
+  "main": "dist/bundle.cjs",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": "./dist/index.js",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
     "./server.js": "./dist/server.js"
   },
   "bin": {
-    "cel-mcp": "dist/index.js"
+    "cellar-mcp": "dist/bundle.cjs"
   },
+  "files": [
+    "dist/bundle.cjs",
+    "dist/index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "pnpm --filter @cellar/agent build && pnpm --filter @cellar/adapter-browser build && tsc",
+    "prepack": "pnpm build",
+    "build": "pnpm --filter @cellar/agent build && pnpm --filter @cellar/adapter-browser build && tsc && pnpm bundle",
+    "bundle": "esbuild dist/index.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/bundle.cjs --external:@dimpagk92/cellar-napi --banner:js='#!/usr/bin/env node'",
     "test": "node ../tests/cortex/mcp-protocol.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@cellar/adapter-browser": "workspace:*",
-    "@cellar/agent": "workspace:*",
+    "@dimpagk92/cellar-napi": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@cellar/adapter-browser": "workspace:*",
+    "@cellar/agent": "workspace:*",
+    "esbuild": "^0.28.0",
     "typescript": "^5.5.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }

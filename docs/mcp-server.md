@@ -402,7 +402,7 @@ if (input && cel.axIsSettable(input.id)) {
 ### Starting the MCP server programmatically
 
 ```typescript
-import { createCelMcpServer } from "@cellar/mcp-server/server.js";
+import { createCelMcpServer } from "@dimpagk92/cellar-mcp/server.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 const server = createCelMcpServer();

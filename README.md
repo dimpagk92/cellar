@@ -62,7 +62,32 @@ Native macOS apps, terminals, Excel, Finder — anywhere there's an accessibilit
 | Runs offline | ❌ | ❌ | ✅ Local models (Ollama, Gemma 4) |
 | MCP-native | ❌ | ⚠ Some wrappers | ✅ First-class, ships as MCP server |
 
-## Install in two minutes
+## Install
+
+### The fast path — npm (recommended)
+
+Add Cellar to your MCP client's config. That's it.
+
+```json
+{
+  "mcpServers": {
+    "cellar": {
+      "command": "npx",
+      "args": ["-y", "@dimpagk92/cellar-mcp"],
+      "env": {
+        "CEL_LLM_PROVIDER": "gemini",
+        "CEL_LLM_API_KEY": "your-key"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Code (or your MCP client) and the four tools are live. See [docs/connect-claude-code.md](docs/connect-claude-code.md) for details on each client.
+
+### Build from source
+
+If you want to hack on Cellar, or need the CLI + full dev setup:
 
 ```bash
 git clone https://github.com/dimpagk92/cellar.git && cd cellar
@@ -72,8 +97,6 @@ cp target/release/libcel_napi.dylib cel/cel-napi/cel-napi.darwin-arm64.node
 codesign -fs - cel/cel-napi/cel-napi.darwin-arm64.node
 cellar init          # interactive setup: pick LLM provider or install local Gemma 4
 ```
-
-Then add Cellar to your MCP client — see [docs/connect-claude-code.md](docs/connect-claude-code.md) for Claude Code, Cursor, or any MCP-compatible tool.
 
 No cloud. No telemetry. Your keys stay on your machine.
 

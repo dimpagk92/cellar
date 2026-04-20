@@ -1,0 +1,30 @@
+# Cellar CODEOWNERS
+#
+# @dimpagk92 is the default reviewer for everything. When contributors open
+# PRs, GitHub auto-requests review from the listed owners.
+#
+# Precedence: later rules override earlier ones.
+
+# Default: everything requires @dimpagk92 review
+*                                           @dimpagk92
+
+# Rust core — structural review needed
+/cel/**                                     @dimpagk92
+/cellar-worker/**                           @dimpagk92
+
+# MCP server and agent — protocol-critical
+/mcp-server/**                              @dimpagk92
+/agent/**                                   @dimpagk92
+
+# Build, CI, release — sensitive
+/.github/**                                 @dimpagk92
+/Cargo.toml                                 @dimpagk92
+/Cargo.lock                                 @dimpagk92
+/package.json                               @dimpagk92
+/pnpm-workspace.yaml                        @dimpagk92
+/Makefile                                   @dimpagk92
+
+# Security files — double-check required
+/SECURITY.md                                @dimpagk92
+/LICENSE                                    @dimpagk92
+/cel/LICENSE                                @dimpagk92

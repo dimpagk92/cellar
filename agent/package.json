@@ -18,7 +18,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@cellar/cel-napi": "workspace:*",
+    "@dimpagk92/cellar-napi": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

@@ -21,7 +21,7 @@
 | `cel-planner` | Rust | Observe-plan-act loop |
 | `cel-napi` | Rust | Node.js native bindings (napi-rs) |
 | `@cellar/agent` | TypeScript | Workflow execution engine, Cel class, TypeScript types |
-| `@cellar/mcp-server` | TypeScript | MCP server (4 tools: context, action, observe, knowledge) |
+| `@dimpagk92/cellar-mcp` | TypeScript | MCP server (4 tools: context, action, observe, knowledge) |
 | `@cellar/cli` | TypeScript | `cellar` CLI tool |
 | `@cellar/adapter-browser` | TypeScript | Browser adapter (CDP-backed) |
 
@@ -45,7 +45,7 @@ cargo test -p cel-context        # Test a crate
 
 # TypeScript
 pnpm --filter @cellar/agent build
-pnpm --filter @cellar/mcp-server build
+pnpm --filter @dimpagk92/cellar-mcp build
 pnpm --filter @cellar/cli build
 ```
 

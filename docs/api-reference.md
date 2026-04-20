@@ -383,7 +383,7 @@ cortex.boot(merger, Box::new(StubAccessibility)).await?;
 
 ## Configuration File
 
-`dilipod init` writes a config file at `~/.cellar/config.toml`. Environment variables override config file values; config file values override compiled defaults.
+`cellar init` writes a config file at `~/.cellar/config.toml`. Environment variables override config file values; config file values override compiled defaults.
 
 ```toml
 [llm]

@@ -69,9 +69,9 @@ export const setupCommand = new Command("setup")
 
     console.log("\nSetup complete.");
     console.log("Next steps:");
-    console.log("  1. Run 'dilipod browser ensure' to launch CEL's dedicated browser instance.");
-    console.log("  2. Run 'dilipod browser status' to confirm CDP targets are visible.");
-    console.log("  3. Run 'dilipod context' to see what CEL detects.");
+    console.log("  1. Run 'cellar browser ensure' to launch CEL's dedicated browser instance.");
+    console.log("  2. Run 'cellar browser status' to confirm CDP targets are visible.");
+    console.log("  3. Run 'cellar context' to see what CEL detects.");
   })
   .addCommand(
     new Command("uninstall")

@@ -110,7 +110,7 @@ pub fn estimate_image_tokens(width: u32, height: u32, detail: &str) -> usize {
 /// Resolution order:
 /// 1. Env vars (`CEL_LLM_PROVIDER`, `CEL_LLM_API_KEY`, `CEL_LLM_MODEL`, `CEL_LLM_ENDPOINT`,
 ///    and provider-specific keys like `GEMINI_API_KEY`).
-/// 2. The `[llm]` section of `~/.cellar/config.toml`, written by `dilipod init`.
+/// 2. The `[llm]` section of `~/.cellar/config.toml`, written by `cellar init`.
 ///
 /// Returns `LlmError::NotConfigured` (with instructions) if neither source yields a provider.
 pub fn create_client() -> Result<LlmClient, LlmError> {

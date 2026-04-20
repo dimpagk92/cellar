@@ -15,21 +15,16 @@ members = [
     "cel/cel-signals",
     "cel/cel-cortex",
     "cel/cel-goal-runner",
-    "cel/cel-eval",
     "cel/cel-napi",
     "cellar-worker",
     "adapters/adapter-common",
-    "adapters/excel",
-    "adapters/sap-gui",
-    "adapters/bloomberg",
-    "adapters/metatrader",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/dilipod/cellar"
+repository = "https://github.com/dimpagk92/cellar"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -56,7 +51,6 @@ cel-store = { path = "cel/cel-store" }
 cel-planner = { path = "cel/cel-planner" }
 cel-cortex = { path = "cel/cel-cortex" }
 cel-goal-runner = { path = "cel/cel-goal-runner" }
-cel-eval = { path = "cel/cel-eval" }
 cel-cdp = { path = "cel/cel-cdp" }
 cel-signals = { path = "cel/cel-signals" }
 adapter-common = { path = "adapters/adapter-common" }

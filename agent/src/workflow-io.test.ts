@@ -109,13 +109,13 @@ describe("workflow-io", () => {
   });
 
   describe("exportWorkflow", () => {
-    it("should export to .dilipod format", () => {
+    it("should export to .cellar format", () => {
       const wf = makeWorkflow("export-test");
-      const outputPath = path.join(tmpDir, "export-test.dilipod");
+      const outputPath = path.join(tmpDir, "export-test.cellar");
       exportWorkflow(wf, outputPath);
 
       const data = JSON.parse(fs.readFileSync(outputPath, "utf-8"));
-      expect(data.format).toBe("dilipod-workflow");
+      expect(data.format).toBe("cellar-workflow");
       expect(data.version).toBe("1.0");
       expect(data.exported_at).toBeDefined();
       expect(data.workflow.name).toBe("export-test");
@@ -123,9 +123,9 @@ describe("workflow-io", () => {
   });
 
   describe("importWorkflow", () => {
-    it("should import from .dilipod format", () => {
+    it("should import from .cellar format", () => {
       const wf = makeWorkflow("import-test");
-      const outputPath = path.join(tmpDir, "import-test.dilipod");
+      const outputPath = path.join(tmpDir, "import-test.cellar");
       exportWorkflow(wf, outputPath);
 
       const imported = importWorkflow(outputPath);
@@ -134,19 +134,19 @@ describe("workflow-io", () => {
     });
 
     it("should reject invalid format", () => {
-      const badPath = path.join(tmpDir, "bad.dilipod");
+      const badPath = path.join(tmpDir, "bad.cellar");
       fs.writeFileSync(
         badPath,
         JSON.stringify({ format: "wrong-format", workflow: {} })
       );
-      expect(() => importWorkflow(badPath)).toThrow("Invalid .dilipod file");
+      expect(() => importWorkflow(badPath)).toThrow("Invalid .cellar file");
     });
 
     it("should handle round-trip export/import", () => {
       const original = makeWorkflow("roundtrip");
-      const dilipodPath = path.join(tmpDir, "roundtrip.dilipod");
-      exportWorkflow(original, dilipodPath);
-      const imported = importWorkflow(dilipodPath);
+      const cellarPath = path.join(tmpDir, "roundtrip.cellar");
+      exportWorkflow(original, cellarPath);
+      const imported = importWorkflow(cellarPath);
       expect(imported.name).toBe(original.name);
       expect(imported.steps.length).toBe(original.steps.length);
       expect(imported.app).toBe(original.app);

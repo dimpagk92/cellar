@@ -17,7 +17,7 @@ import {
 
 export const runCommand = new Command("run")
   .description("Execute a workflow")
-  .argument("<workflow>", "Workflow name, JSON file path, or .dilipod file")
+  .argument("<workflow>", "Workflow name, JSON file path, or .cellar file")
   .option("--priority <level>", "Queue priority (low|normal|high|critical)", "normal")
   .option("--dry-run", "Validate without executing")
   .option("--no-transcript", "Disable JSONL transcript logging")
@@ -38,7 +38,7 @@ export const runCommand = new Command("run")
       }
     }
 
-    const workflow = workflowPath.endsWith(".dilipod")
+    const workflow = workflowPath.endsWith(".cellar")
       ? importWorkflow(workflowPath)
       : loadWorkflow(workflowPath);
 

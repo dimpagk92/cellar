@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Path to the user-level config file written by `dilipod init`.
+/// Path to the user-level config file written by `cellar init`.
 fn config_file_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(std::path::PathBuf::from(home).join(".cellar").join("config.toml"))
@@ -345,7 +345,7 @@ impl LlmProviderConfig {
         }
     }
 
-    /// Load configuration from `~/.cellar/config.toml` (written by `dilipod init`).
+    /// Load configuration from `~/.cellar/config.toml` (written by `cellar init`).
     ///
     /// Returns `None` if the file is missing, unreadable, or has no `[llm]` section.
     /// Env vars always take precedence — this is only consulted when env is unset.

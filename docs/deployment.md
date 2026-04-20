@@ -17,17 +17,17 @@ This orthogonality is a design constraint: any new execution backend must work w
 
 ### Local (today, Phase 0) ✅
 
-The dilipod CLI / MCP server runs on the user's Mac. `cel-goal-runner` executes in-process. macOS AX, screen capture, CDP, adapters all run against the local machine.
+The cellar CLI / MCP server runs on the user's Mac. `cel-goal-runner` executes in-process. macOS AX, screen capture, CDP, adapters all run against the local machine.
 
 - Full access to the user's actual desktop (Excel, Slack, Finder, SAP GUI, etc.).
 - No infrastructure to manage.
 - Cannot scale horizontally or run unattended while the user is away.
 
-Current entry points: `dilipod run`, `dilipod mcp` (MCP server for Claude Code / Cursor).
+Current entry points: `cellar run`, `cellar mcp` (MCP server for Claude Code / Cursor).
 
 ### Remote worker (Phase 1) ⏳
 
-A `cellar-worker` daemon runs on a server the user controls. The user's local dilipod sends goals over HTTP; the worker executes in its own container / VM / Mac and streams results back.
+A `cellar-worker` daemon runs on a server the user controls. The user's local cellar sends goals over HTTP; the worker executes in its own container / VM / Mac and streams results back.
 
 - Runs unattended, 24/7.
 - Fans out across many workers for bulk jobs.
@@ -97,7 +97,7 @@ For any LLM field (`provider`, `model`, `endpoint`, `api_key`, `temperature`):
 1. Role-specific env var — `CEL_LLM_PLANNER_MODEL`
 2. Base env var — `CEL_LLM_MODEL`
 3. Provider-specific env var — `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, etc.
-4. `~/.cellar/config.toml` `[llm]` section — written by `dilipod init`
+4. `~/.cellar/config.toml` `[llm]` section — written by `cellar init`
 5. Provider defaults — e.g., `gemini-2.5-flash` for Gemini, `gemma4:e4b` for Ollama
 
 Runtime backend follows a parallel chain (Phase 1):
@@ -118,23 +118,22 @@ Setup: `node cli/dist/index.js init` → option 1 (Gemini) or 4 (Gemma 4 E4B).
 - Execution: Remote worker on Hetzner box
 - Model: BYOK Anthropic, keys injected into the worker's env
 
-Setup: `docker run -e ANTHROPIC_API_KEY -e CEL_LLM_PROVIDER=anthropic -p 7777:7777 cellar/worker` on the Hetzner box, then each teammate's `dilipod` points at it via config.toml.
+Setup: `docker run -e ANTHROPIC_API_KEY -e CEL_LLM_PROVIDER=anthropic -p 7777:7777 cellar/worker` on the Hetzner box, then each teammate's `cellar` points at it via config.toml.
 
 ### Shape C: Enterprise, managed + BYOK
 - Execution: Cellar Cloud (managed fleet)
 - Model: BYOK Anthropic, keys stored in the customer's Cellar vault
 
-Setup (Phase 3): log in with SSO, upload API keys once, run workflows from dilipod or the Cellar Cloud dashboard.
+Setup (Phase 3): log in with SSO, upload API keys once, run workflows from cellar or the Cellar Cloud dashboard.
 
 ### Shape D: Privacy-sensitive, fully local
 - Execution: Local Mac
 - Model: Ollama + Gemma 4 E4B
 
-Setup: `dilipod init` → option 4. Nothing leaves the machine.
+Setup: `cellar init` → option 4. Nothing leaves the machine.
 
 ## Related
 
 - [ROADMAP.md](ROADMAP.md) — phased delivery of each execution backend.
-- [oss-boundary.md](oss-boundary.md) — which parts of the above are OSS vs commercial.
 - [quickstart.md](quickstart.md) — hands-on setup for Shape A.
 - [architecture.md](architecture.md) — internal runtime architecture (Cortex / Goal Runner / Planner / Adapters).

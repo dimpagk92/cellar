@@ -2,7 +2,7 @@
 pub enum LlmError {
     #[error(
         "LLM provider not configured. Set CEL_LLM_PROVIDER + an API key env var \
-         (e.g. GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY), or run `dilipod init` \
+         (e.g. GEMINI_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY), or run `cellar init` \
          to pick a provider or install Gemma 4 locally via Ollama."
     )]
     NotConfigured,

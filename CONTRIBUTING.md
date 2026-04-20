@@ -9,7 +9,7 @@ We welcome contributions of all kinds. This guide helps you get started.
 | Area | Difficulty | What to do |
 |------|-----------|------------|
 | Documentation | Easy | Improve docs, add examples, fix typos |
-| Test coverage | Easy | Add tests for existing code (see `docs/TEST_INVENTORY.md`) |
+| Test coverage | Easy | Add tests for existing code |
 | Bug reports | Easy | File issues with reproduction steps |
 | Adapters | Medium | Build a new adapter for an application you use (see [docs/building-adapters.md](docs/building-adapters.md)) |
 | macOS accessibility | Medium-Hard | Implement AXUIElement bridge in `cel-accessibility/` |
@@ -27,7 +27,7 @@ We welcome contributions of all kinds. This guide helps you get started.
 ### Build
 
 ```bash
-git clone https://github.com/dilipod/cellar.git
+git clone https://github.com/dimpagk92/cellar.git
 cd cellar
 
 # TypeScript only (works without Rust)
@@ -65,12 +65,11 @@ cellar/
   mcp-server/           MCP server (4 tools)
   agent/                Workflow execution engine (TypeScript)
   cli/                  CLI tool
-  adapters/             Application-specific adapters
-  recorder/             Training/recording system
-  live-view/            Screen streaming server
-  registry/             Community workflow registry (planned)
+  adapters/             Application-specific adapters (browser bundled)
+  cellar-worker/        Worker daemon (remote execution, preview)
   docs/                 Documentation
-  benchmarks/           Performance benchmarks
+  examples/             Runnable examples
+  tests/                Cross-package integration tests
 ```
 
 ## Submitting Changes
@@ -128,5 +127,5 @@ The MCP server (`mcp-server/`) is new. Ideas for improvement:
 ## License
 
 By contributing, you agree that your contributions will be licensed under:
-- **Everything OSS-destined** (`cel/`, `agent/`, `cli/`, `mcp-server/`, `cellar-worker/`, `live-view/`, `recorder/`, `registry/`, `docs/`, `benchmarks/`, `examples/`, `e2e/`, `tests/`, `box/`): Apache License 2.0
+- **Core runtime** (`cel/`, `agent/`, `cli/`, `mcp-server/`, `cellar-worker/`, `docs/`, `examples/`, `tests/`): Apache License 2.0
 - **Community adapters** (`adapters/`): MIT License

@@ -18,7 +18,7 @@ import { browserCommand } from "./commands/browser.js";
 const program = new Command();
 
 program
-  .name("dilipod")
+  .name("cellar")
   .description("cellar CLI — desktop agent runtime powered by CEL")
   .version("0.1.0");
 

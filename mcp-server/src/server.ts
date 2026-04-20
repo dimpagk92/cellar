@@ -115,7 +115,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "## Requirements",
         "",
         "- macOS with Accessibility permissions granted to the host process.",
-        "- For CDP features: run 'dilipod browser ensure' or keep a Chromium browser exposing remote debugging.",
+        "- For CDP features: run 'cellar browser ensure' or keep a Chromium browser exposing remote debugging.",
         "- Knowledge store at ~/.cellar/cel-store.db (created automatically).",
       ].join("\n"),
     },

@@ -56,5 +56,5 @@ export const historyCommand = new Command("history")
           `  ${String(run.interventions).padStart(13)}  ${run.started_at}`,
       );
     }
-    console.log(`\nUse "dilipod history --run <ID>" to see step details.`);
+    console.log(`\nUse "cellar history --run <ID>" to see step details.`);
   });

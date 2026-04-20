@@ -78,7 +78,7 @@ The live-view shows three things in real-time:
 
 ## Metrics That Matter
 
-After the demo, open `benchmarks/BENCHMARKS.md`. The comparison table shows:
+The metrics that matter when comparing runtimes:
 
 | Metric | Why It Matters |
 |--------|---------------|

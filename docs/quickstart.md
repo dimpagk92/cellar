@@ -47,12 +47,12 @@ CEL reads the screen via macOS Accessibility API. The host process needs permiss
 The fastest path — run the interactive setup, which writes `~/.cellar/config.toml`:
 
 ```bash
-dilipod init
+cellar init
 ```
 
 Options offered:
 - **Gemini / Anthropic / OpenAI** — paste an API key (or reuse one already in your env).
-- **Ollama + Gemma 4 E4B (~4GB)** — runs locally, no cloud key needed. Requires Ollama installed (`brew install ollama && brew services start ollama`); `dilipod init` can auto-pull the model.
+- **Ollama + Gemma 4 E4B (~4GB)** — runs locally, no cloud key needed. Requires Ollama installed (`brew install ollama && brew services start ollama`); `cellar init` can auto-pull the model.
 
 If you'd rather configure by env var (for MCP `.mcp.json` embedding), skip `init` and continue to the Claude Code config below.
 
@@ -133,7 +133,7 @@ CDP (Chrome DevTools Protocol) gives CEL deep browser access — page content, D
 **Option A: Launch CEL's dedicated browser**
 
 ```bash
-dilipod browser ensure
+cellar browser ensure
 ```
 
 **Option B: Launch Chromium manually on CEL's port**
@@ -214,7 +214,7 @@ See [mcp-server.md](mcp-server.md) for the full tool reference with all modes, p
 |-------|-----|
 | `cel_see` returns empty context | Grant Accessibility permissions (Step 2) |
 | `CEL native module not available` | Rebuild: `cargo build --release -p cel-napi` + copy + codesign |
-| CDP not connecting | Run `dilipod browser ensure`, then confirm with `dilipod browser status` |
+| CDP not connecting | Run `cellar browser ensure`, then confirm with `cellar browser status` |
 | `cel_act` clicks wrong position | Use `ax_action` or `set_value` instead of coordinate clicks |
 | MCP server not showing in Claude Code | Check `.mcp.json` path is absolute, restart Claude Code |
 | Cortex not booting | Check stderr output: `timeout 3 node cellar/mcp-server/dist/index.js` |

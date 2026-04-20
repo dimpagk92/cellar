@@ -65,7 +65,7 @@ export const initCommand = new Command("init")
 
       writeConfig(cfg);
       console.log(`\nWrote ${CONFIG_PATH}`);
-      console.log("Next: `dilipod status` to verify, or `dilipod mcp` to start the MCP server.");
+      console.log("Next: `cellar status` to verify, or `cellar mcp` to start the MCP server.");
     } finally {
       rl.close();
     }
@@ -102,7 +102,7 @@ async function setupOllama(rl: Interface, ollamaUp: boolean): Promise<LlmConfig 
   if (!ollamaUp) {
     console.log("\nOllama isn't running. Install it first:");
     console.log("  brew install ollama && brew services start ollama");
-    console.log("Then re-run `dilipod init`.");
+    console.log("Then re-run `cellar init`.");
     return undefined;
   }
 
@@ -151,7 +151,7 @@ function pullOllamaModel(model: string): Promise<boolean> {
 
 function writeConfig(cfg: LlmConfig) {
   if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
-  const lines: string[] = ["# Written by `dilipod init`", "", "[llm]", `provider = "${cfg.provider}"`];
+  const lines: string[] = ["# Written by `cellar init`", "", "[llm]", `provider = "${cfg.provider}"`];
   if (cfg.model) lines.push(`model = "${cfg.model}"`);
   if (cfg.endpoint) lines.push(`endpoint = "${cfg.endpoint}"`);
   if (cfg.apiKey) lines.push(`api_key = "${cfg.apiKey}"`);

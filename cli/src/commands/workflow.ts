@@ -16,12 +16,12 @@ workflowCommand
   .action((name: string) => {
     console.log(`Installing workflow: ${name}...`);
     // TODO: RegistryClient.download + install
-    console.log("Registry not yet available. Use 'workflow import' with a .dilipod file.");
+    console.log("Registry not yet available. Use 'workflow import' with a .cellar file.");
   });
 
 workflowCommand
   .command("export <name>")
-  .description("Export a workflow to a portable .dilipod file")
+  .description("Export a workflow to a portable .cellar file")
   .option("-o, --output <path>", "Output file path")
   .action((name: string, opts: { output?: string }) => {
     const workflows = listWorkflows();
@@ -30,14 +30,14 @@ workflowCommand
       console.error(`Workflow '${name}' not found in ~/.cellar/workflows/`);
       process.exit(1);
     }
-    const output = opts.output ?? `./${name}.dilipod`;
+    const output = opts.output ?? `./${name}.cellar`;
     exportWf(workflow, path.resolve(output));
     console.log(`Exported '${name}' to ${output}`);
   });
 
 workflowCommand
   .command("import <file>")
-  .description("Import a workflow from a .dilipod file")
+  .description("Import a workflow from a .cellar file")
   .action((file: string) => {
     try {
       const workflow = importWf(path.resolve(file));

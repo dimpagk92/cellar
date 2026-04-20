@@ -41,11 +41,10 @@ Shipped as of April 2026.
 | MCP server exposing `cel_see` / `cel_act` / `cel_think` / `cel_perceive` | `mcp-server/` |
 | Multi-provider LLM support — OpenAI, Anthropic, Gemini, HuggingFace | `cel/cel-llm/src/config.rs` |
 | **Ollama provider** (local Gemma 4 E4B by default) | `ProviderKind::Ollama` |
-| **Interactive first-run setup** (`dilipod init`) | `cli/src/commands/init.ts` |
+| **Interactive first-run setup** (`cellar init`) | `cli/src/commands/init.ts` |
 | **Config file** at `~/.cellar/config.toml` — env vars take precedence | `LlmProviderConfig::from_config_file` |
 | Per-role LLM routing (Planner / Observer / Vision / Validator / …) | `LlmRole` enum |
-| Benchmark suite — Hybrid (5 tasks) + general web (50+) | `benchmarks/` |
-| First-party adapters — Excel, SAP GUI, Bloomberg, MetaTrader | `adapters/` |
+| Browser adapter via CDP | `adapters/browser/` |
 
 ---
 
@@ -57,7 +56,7 @@ Shipped as of April 2026.
 
 - Define a stable worker protocol mirroring the MCP tool surface.
 - Ship a `cellar/worker` Docker image — headless Linux CEL with Playwright/Chromium.
-- Add a `RuntimeBackend` abstraction so `dilipod` can target a remote worker.
+- Add a `RuntimeBackend` abstraction so `cellar` can target a remote worker.
 
 ### Deliverables
 
@@ -99,11 +98,11 @@ Shipped as of April 2026.
 
     And matching env vars (`CEL_RUNTIME_BACKEND`, `CEL_RUNTIME_URL`, `CEL_RUNTIME_TOKEN`).
 
-6. **Integration tests** — end-to-end: local dilipod → remote worker (docker-compose) → browser goal → verified outcome. Live in `e2e/remote/`.
+6. **Integration tests** — end-to-end: local cellar → remote worker (docker-compose) → browser goal → verified outcome.
 
 ### Success criteria
 
-- `docker run -p 7777:7777 cellar/worker` followed by `dilipod run <goal> --remote http://localhost:7777` succeeds on a browser task.
+- `docker run -p 7777:7777 cellar/worker` followed by `cellar run <goal> --remote http://localhost:7777` succeeds on a browser task.
 - All four MCP tools work through the remote path.
 - Latency overhead vs local: < 50 ms per tool call on localhost, < 200 ms over LAN.
 - 100% task-parity on the `general-web` benchmark subset (hybrid suite stays local-only for now — desktop apps).
@@ -128,7 +127,6 @@ Shipped as of April 2026.
 - Worker pool mode: a thin control-plane orchestrates N workers behind a load balancer
 - Per-tenant filesystem isolation + clipboard scoping
 
-Depends on [`PRODUCTION_HARDENING.md`](../PRODUCTION_HARDENING.md) landing.
 
 ---
 
@@ -139,7 +137,7 @@ Depends on [`PRODUCTION_HARDENING.md`](../PRODUCTION_HARDENING.md) landing.
 - **Control plane** (new, private repo): auth, billing, fleet orchestration, workflow registry backend.
 - **Managed LLM proxy** — bundled model access. "Use Cellar's models, one bill." Opt-in.
 - **macOS-in-cloud** — pool of EC2 Mac / MacStadium hosts for customers who need native macOS automation remotely. Same wire protocol as Docker workers.
-- **Hosted workflow marketplace** — backend for the community registry (client exists at `registry/`).
+- **Hosted workflow marketplace** — community adapter + goal registry.
 - **Wire protocol**: reuses Phase 1. Managed = Remote pointed at our infra. No new protocol.
 
 ---
@@ -156,4 +154,4 @@ To avoid over-committing:
 
 ## Changelog
 
-- 2026-04-17: initial roadmap draft. Captures the OSS + runtime backend direction after Ollama/`dilipod init` landed.
+- 2026-04-17: initial roadmap draft. Captures the OSS + runtime backend direction after Ollama/`cellar init` landed.

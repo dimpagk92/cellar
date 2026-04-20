@@ -48,7 +48,7 @@ interface ConfigFileLlm {
 }
 
 /**
- * Read `~/.cellar/config.toml` for the provider/model defaults written by `dilipod init`.
+ * Read `~/.cellar/config.toml` for the provider/model defaults written by `cellar init`.
  * Only parses the `[llm]` section's `provider` and `model` fields — keeps the reader
  * trivial so we don't need a TOML dep on the TS side.
  */

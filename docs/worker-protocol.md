@@ -1,6 +1,6 @@
 # Cellar Worker Protocol
 
-Wire protocol spoken between `dilipod` / `cel-goal-runner` (the client) and `cellar-worker` (the remote execution daemon). This is the contract that every execution backend — self-hosted Docker, Cellar Cloud, EC2 Mac pool — must honor.
+Wire protocol spoken between `cellar` / `cel-goal-runner` (the client) and `cellar-worker` (the remote execution daemon). This is the contract that every execution backend — self-hosted Docker, Cellar Cloud, EC2 Mac pool — must honor.
 
 Status: **v1-draft** — pinned during Phase 1 (Milestone 1.0). Breaking changes bump major.
 

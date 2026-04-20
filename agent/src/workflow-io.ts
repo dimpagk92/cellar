@@ -46,12 +46,12 @@ export function deleteWorkflow(name: string, dir = WORKFLOWS_DIR): boolean {
 }
 
 /**
- * Export a workflow to a portable .dilipod file.
- * A .dilipod file is just a JSON file with metadata.
+ * Export a workflow to a portable .cellar file.
+ * A .cellar file is just a JSON file with metadata.
  */
 export function exportWorkflow(workflow: Workflow, outputPath: string): void {
   const exportData = {
-    format: "dilipod-workflow",
+    format: "cellar-workflow",
     version: "1.0",
     exported_at: new Date().toISOString(),
     workflow,
@@ -60,13 +60,13 @@ export function exportWorkflow(workflow: Workflow, outputPath: string): void {
 }
 
 /**
- * Import a workflow from a .dilipod file.
+ * Import a workflow from a .cellar file.
  */
 export function importWorkflow(filePath: string): Workflow {
   const raw = fs.readFileSync(filePath, "utf-8");
   const data = JSON.parse(raw);
-  if (data.format !== "dilipod-workflow") {
-    throw new Error(`Invalid .dilipod file: expected format 'dilipod-workflow', got '${data.format}'`);
+  if (data.format !== "cellar-workflow") {
+    throw new Error(`Invalid .cellar file: expected format 'cellar-workflow', got '${data.format}'`);
   }
   return data.workflow as Workflow;
 }

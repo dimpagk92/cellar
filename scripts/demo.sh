@@ -50,14 +50,14 @@ cd "$BENCH_DIR"
 
 # ── Step 1: Start live-view in background ──────────────────────────────────
 echo -e "${BLUE}[1/4]${NC} Starting live-view server..."
-if command -v dilipod &>/dev/null; then
-  dilipod live-view --port 6080 &
+if command -v cellar &>/dev/null; then
+  cellar live-view --port 6080 &
   LIVEVIEW_PID=$!
   echo -e "  ${GREEN}Live view:${NC} http://127.0.0.1:6080"
   echo -e "  ${YELLOW}Open this URL to watch runtime decisions in real-time${NC}"
   sleep 2
 else
-  echo -e "  ${YELLOW}dilipod CLI not found — skipping live-view${NC}"
+  echo -e "  ${YELLOW}cellar CLI not found — skipping live-view${NC}"
   echo -e "  (Run 'pnpm build' in the root to build the CLI)"
   LIVEVIEW_PID=""
 fi

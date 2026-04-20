@@ -1,11 +1,11 @@
 {
   "name": "@cellar/cli",
   "version": "0.1.0",
-  "description": "dilipod CLI — developer tooling for CEL",
+  "description": "cellar CLI — developer tooling for CEL",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "dilipod": "dist/index.js"
+    "cellar": "dist/index.js"
   },
   "scripts": {
     "build": "tsc",

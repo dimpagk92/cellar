@@ -26,13 +26,13 @@ Add to your MCP client settings:
 }
 ```
 
-Or via CLI: `dilipod mcp`
+Or via CLI: `cellar mcp`
 
 ### Manual / Debugging
 
 ```bash
 # Stdio mode
-dilipod mcp
+cellar mcp
 
 # MCP Inspector (visual testing)
 npx @modelcontextprotocol/inspector node mcp-server/dist/index.js

@@ -100,10 +100,6 @@ stack is Rust).
 
 ## Required for Fork 2 (now the chosen path)
 
-See [docs/rust-port-plan.md](rust-port-plan.md) for the detailed port plan.
-Summary:
-
-- [ ] Port plan: estimate task-by-task — **done, see rust-port-plan.md**
 - [ ] Parity-test suite: identical input → identical output across TS and Rust runners
 - [ ] Feature-flag Rust path independently from tier-replan flags
 - [ ] Extended fallback window: keep TS alive for 6+ months post-cutover

@@ -3,7 +3,7 @@
 ## Project Structure
 
 - **Rust workspace** at repo root (`Cargo.toml`) — all `cel/` crates and `adapters/`
-- **TypeScript monorepo** via pnpm workspace — `agent/`, `mcp-server/`, `recorder/`, `live-view/`, `registry/`, `cli/`
+- **TypeScript monorepo** via pnpm workspace — `agent/`, `mcp-server/`, `cli/`, `adapters/browser/`
 - Rust <-> TypeScript bridge via **napi-rs** (`cel/cel-napi/`)
 
 ### Package Overview
@@ -22,10 +22,8 @@
 | `cel-napi` | Rust | Node.js native bindings (napi-rs) |
 | `@cellar/agent` | TypeScript | Workflow execution engine, Cel class, TypeScript types |
 | `@cellar/mcp-server` | TypeScript | MCP server (4 tools: context, action, observe, knowledge) |
-| `@cellar/cli` | TypeScript | `dilipod` CLI tool |
-| `@cellar/recorder` | TypeScript | Training: passive observation + explicit recording |
-| `@cellar/live-view` | TypeScript | Screen streaming server (WebSocket + SSE) |
-| `@cellar/registry` | TypeScript | Community workflow registry client |
+| `@cellar/cli` | TypeScript | `cellar` CLI tool |
+| `@cellar/adapter-browser` | TypeScript | Browser adapter (CDP-backed) |
 
 ## Build Commands
 
@@ -142,25 +140,25 @@ The server creates a single Cel instance at startup. All tool handlers share it.
 
 ```bash
 # First-run setup (interactive — picks LLM provider, writes ~/.cellar/config.toml)
-dilipod init
+cellar init
 
 # Configure macOS AX + CDP permissions
-dilipod setup
+cellar setup
 
 # See what the agent sees right now
-dilipod context --json
+cellar context --json
 
 # Watch context changes in real-time
-dilipod context --watch
+cellar context --watch
 
 # Test a single action
-dilipod action click 500 300
+cellar action click 500 300
 
 # Start MCP server for testing
-dilipod mcp
+cellar mcp
 
 # Get Claude Desktop config
-dilipod mcp install
+cellar mcp install
 ```
 
 ## LLM Provider Configuration
@@ -170,7 +168,7 @@ Resolution order for any field (provider, model, endpoint, api_key):
 1. Role-specific env var — e.g. `CEL_LLM_PLANNER_MODEL` (roles: `Planner`, `Observer`, `Vision`, `General`, `Validator`, `Localizer`, `Orchestrator`)
 2. Base env var — e.g. `CEL_LLM_MODEL`
 3. Provider-specific env var — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `HUGGINGFACE_API_KEY`
-4. `~/.cellar/config.toml` `[llm]` section (written by `dilipod init`)
+4. `~/.cellar/config.toml` `[llm]` section (written by `cellar init`)
 5. Provider defaults (e.g. `gemini-2.5-flash` for Gemini, `gemma4:e4b` for Ollama)
 
 Supported providers: `openai`, `anthropic`, `gemini`, `huggingface`, `ollama`, `custom`. Ollama defaults to `http://localhost:11434/v1/chat/completions` + `gemma4:e4b` — no API key needed. Any OpenAI-compatible endpoint works via `custom`.

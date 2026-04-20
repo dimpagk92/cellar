@@ -1,0 +1,36 @@
+name: Mark stale issues and PRs
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          days-before-issue-stale: 60
+          days-before-issue-close: 14
+          stale-issue-message: |
+            This issue has been quiet for 60 days. If it's still relevant, drop a comment or add updated repro steps and we'll reopen triage. Otherwise it'll be closed in 14 days — not because we don't care, just to keep the tracker honest about what's actively being worked on.
+          close-issue-message: |
+            Closing due to inactivity. If this is still a problem, please open a new issue with up-to-date context — we'd rather have a fresh thread than a stale one.
+          stale-issue-label: 'status/stale'
+          exempt-issue-labels: 'priority/high,status/blocked,help wanted,good first issue,type/docs'
+
+          days-before-pr-stale: 30
+          days-before-pr-close: 14
+          stale-pr-message: |
+            This PR has been inactive for 30 days. Please rebase and push, or leave a comment if you need a review. Closing in 14 days otherwise.
+          close-pr-message: |
+            Closing due to inactivity. Feel free to reopen when you're ready to continue.
+          stale-pr-label: 'status/stale'
+          exempt-pr-labels: 'priority/high,status/blocked'
+
+          operations-per-run: 100

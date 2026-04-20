@@ -1,0 +1,21 @@
+# Local dev / self-host reference.
+#
+#   cd cellar
+#   docker compose -f docker/worker/docker-compose.yml up --build
+#
+# Then from the host: curl http://localhost:7777/health
+
+services:
+  cellar-worker:
+    build:
+      context: ../..
+      dockerfile: docker/worker/Dockerfile
+    image: cellar/worker:dev
+    ports:
+      - "7777:7777"
+    environment:
+      # Set CEL_WORKER_TOKEN in your shell or a .env file alongside this file
+      # to require authentication. Leave unset for unauthenticated localhost.
+      CEL_WORKER_TOKEN: "${CEL_WORKER_TOKEN:-}"
+      RUST_LOG: info
+    restart: unless-stopped

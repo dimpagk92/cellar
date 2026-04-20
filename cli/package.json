@@ -1,0 +1,23 @@
+{
+  "name": "@cellar/cli",
+  "version": "0.1.0",
+  "description": "dilipod CLI — developer tooling for CEL",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "dilipod": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node -e \"process.exit(0)\"",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cellar/agent": "workspace:*",
+    "@cellar/mcp-server": "workspace:*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

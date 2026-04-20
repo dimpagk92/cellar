@@ -1,0 +1,18 @@
+[package]
+name = "cel-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL audio capture layer — mic + system output as a live context stream"
+
+[dependencies]
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+parking_lot = "0.12"
+cpal = "0.15"
+reqwest = { workspace = true, features = ["blocking", "multipart"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

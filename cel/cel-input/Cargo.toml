@@ -1,0 +1,16 @@
+[package]
+name = "cel-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL input layer — injection and interception of mouse/keyboard events"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+enigo = { version = "0.5", features = ["serde"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

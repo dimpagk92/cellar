@@ -1,0 +1,25 @@
+[package]
+name = "cel-cortex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Always-on perception engine for CEL — maintains a continuously-updated mental model via background event streams"
+
+[dependencies]
+cel-context = { workspace = true }
+cel-audio = { workspace = true }
+cel-accessibility = { workspace = true }
+cel-input = { workspace = true }
+cel-planner = { workspace = true }
+cel-signals = { workspace = true }
+cel-network = { workspace = true }
+cel-cdp = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+regex = "1"

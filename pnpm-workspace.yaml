@@ -1,0 +1,13 @@
+packages:
+  - "agent"
+  - "recorder"
+  - "live-view"
+  - "registry"
+  - "cli"
+  - "mcp-server"
+  - "adapters/browser"
+  - "live-view/dashboard"
+  - "e2e"
+  - "benchmarks"
+  - "cel/cel-napi"
+  - "app"

@@ -1,0 +1,27 @@
+{
+  "name": "@cellar/agent",
+  "version": "0.1.0",
+  "description": "CEL workflow execution engine",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./interfaces": "./dist/interfaces/index.js",
+    "./test-utils": "./dist/test-utils/index.js",
+    "./cortex": "./dist/cortex.js",
+    "./types": "./dist/types.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:cortex": "vitest run src/cdp-browser.test.ts src/cortex-normalize.test.ts src/cortex-insight.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cellar/cel-napi": "workspace:*",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

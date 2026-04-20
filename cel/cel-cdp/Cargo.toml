@@ -1,0 +1,16 @@
+[package]
+name = "cel-cdp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL CDP layer — Chrome DevTools Protocol client for page content extraction"
+
+[dependencies]
+cel-network = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = "0.26"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+futures-util = "0.3"

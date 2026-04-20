@@ -1,0 +1,54 @@
+# Rust
+/target/
+cel/target/
+adapters/*/target/
+**/*.rs.bk
+# Cargo.lock is tracked for reproducible builds (prevents NAPI binary loading issues)
+
+# Node.js
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+
+# Native bindings
+*.node
+*.dll
+*.dylib
+*.so
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+*.log
+
+# Benchmarks (local only, not committed)
+benchmarks/.venv/
+benchmarks/node_modules/
+benchmarks/dist/
+benchmarks/build/
+benchmarks/coverage/
+benchmarks/logs/
+benchmarks/cache/
+benchmarks/tmp/
+benchmarks/src/results/
+
+# Research / notes (not committed)
+.research/
+
+live-view/dashboard/.next

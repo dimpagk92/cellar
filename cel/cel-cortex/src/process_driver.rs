@@ -1,0 +1,308 @@
+//! Process Driver — runs community adapters as child processes.
+//!
+//! Communicates via stdin/stdout JSON lines. Any language that can
+//! read/write JSON to stdio can be a CEL adapter.
+//!
+//! Protocol:
+//! ```text
+//! ← {"method":"activate"}
+//! → {"ok":true}
+//!
+//! ← {"method":"get_context"}
+//! → {"elements":[...]}
+//!
+//! ← {"method":"execute","action":"write_cell","params":{...}}
+//! → {"success":true}
+//!
+//! ← {"method":"deactivate"}
+//! → {"ok":true}
+//! ```
+
+use async_trait::async_trait;
+use cel_context::ContextElement;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
+use tracing::{debug, warn};
+
+use crate::adapter::{ActionResult, AdapterDriver, AdapterError, AdapterManifest};
+
+/// Timeout for adapter responses in milliseconds.
+const RESPONSE_TIMEOUT_MS: u64 = 5_000;
+
+/// Max restarts before giving up.
+const MAX_RESTARTS: u32 = 3;
+
+// ── Protocol Types ─────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct Request {
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ContextResponse {
+    #[serde(default)]
+    elements: Vec<ContextElement>,
+}
+
+#[derive(Deserialize)]
+struct ExecuteResponse {
+    #[serde(default = "default_true")]
+    success: bool,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct AckResponse {
+    #[serde(default = "default_true")]
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+fn default_true() -> bool { true }
+
+// ── Process Driver ─────────────────────────────────────────────────────────
+
+/// Runs an adapter as a child process communicating via stdin/stdout JSON lines.
+pub struct ProcessDriver {
+    manifest: AdapterManifest,
+    adapter_dir: PathBuf,
+    process: Mutex<Option<ProcessHandle>>,
+    restart_count: Mutex<u32>,
+}
+
+struct ProcessHandle {
+    child: Child,
+    stdin: tokio::process::ChildStdin,
+    reader: BufReader<tokio::process::ChildStdout>,
+}
+
+impl ProcessDriver {
+    /// Create a new ProcessDriver from a manifest and adapter directory.
+    pub fn new(manifest: AdapterManifest, adapter_dir: PathBuf) -> Self {
+        Self {
+            manifest,
+            adapter_dir,
+            process: Mutex::new(None),
+            restart_count: Mutex::new(0),
+        }
+    }
+
+    /// Spawn the adapter child process.
+    async fn spawn(&self) -> Result<ProcessHandle, AdapterError> {
+        let entrypoint = self.manifest.entrypoint.as_deref().ok_or_else(|| {
+            AdapterError::Unavailable("No entrypoint in manifest".into())
+        })?;
+        let entrypoint_path = self.adapter_dir.join(entrypoint);
+
+        // Determine how to run the entrypoint based on extension
+        let (cmd, args): (&str, Vec<&str>) = if entrypoint.ends_with(".py") {
+            ("python3", vec![entrypoint_path.to_str().unwrap_or("")])
+        } else if entrypoint.ends_with(".ts") || entrypoint.ends_with(".js") {
+            ("node", vec![entrypoint_path.to_str().unwrap_or("")])
+        } else {
+            // Assume it's a binary
+            (entrypoint_path.to_str().unwrap_or(""), vec![])
+        };
+
+        debug!(adapter = %self.manifest.name, cmd = cmd, "Spawning adapter process");
+
+        let mut child = Command::new(cmd)
+            .args(&args)
+            .current_dir(&self.adapter_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit()) // adapter stderr goes to CEL's stderr for debugging
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| AdapterError::Unavailable(format!("Failed to spawn {cmd}: {e}")))?;
+
+        let stdin = child.stdin.take().ok_or_else(|| {
+            AdapterError::ProtocolError("Failed to capture stdin".into())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            AdapterError::ProtocolError("Failed to capture stdout".into())
+        })?;
+
+        Ok(ProcessHandle {
+            child,
+            stdin,
+            reader: BufReader::new(stdout),
+        })
+    }
+
+    /// Send a request and read the response line.
+    async fn call_raw(&self, request: &Request) -> Result<String, AdapterError> {
+        let mut proc = self.process.lock().await;
+        let handle = proc.as_mut().ok_or_else(|| {
+            AdapterError::Unavailable("Adapter process not running".into())
+        })?;
+
+        // Serialize request
+        let mut line = serde_json::to_string(request).map_err(|e| {
+            AdapterError::ProtocolError(format!("Serialize failed: {e}"))
+        })?;
+        line.push('\n');
+
+        // Write to stdin
+        handle.stdin.write_all(line.as_bytes()).await.map_err(|e| {
+            AdapterError::ProcessCrashed(format!("Write failed: {e}"))
+        })?;
+        handle.stdin.flush().await.map_err(|e| {
+            AdapterError::ProcessCrashed(format!("Flush failed: {e}"))
+        })?;
+
+        // Read response with timeout
+        let mut response = String::new();
+        let read_result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(RESPONSE_TIMEOUT_MS),
+            handle.reader.read_line(&mut response),
+        )
+        .await;
+
+        match read_result {
+            Ok(Ok(0)) => Err(AdapterError::ProcessCrashed("EOF — adapter exited".into())),
+            Ok(Ok(_)) => Ok(response),
+            Ok(Err(e)) => Err(AdapterError::ProcessCrashed(format!("Read error: {e}"))),
+            Err(_) => Err(AdapterError::Timeout(RESPONSE_TIMEOUT_MS)),
+        }
+    }
+
+    /// Attempt to restart the adapter process after a crash.
+    async fn try_restart(&self) -> Result<(), AdapterError> {
+        let mut count = self.restart_count.lock().await;
+        if *count >= MAX_RESTARTS {
+            return Err(AdapterError::ProcessCrashed(format!(
+                "Max restarts ({MAX_RESTARTS}) exceeded"
+            )));
+        }
+        *count += 1;
+        warn!(adapter = %self.manifest.name, restart = *count, "Restarting crashed adapter");
+
+        let handle = self.spawn().await?;
+        *self.process.lock().await = Some(handle);
+
+        // Re-activate
+        let resp = self.call_raw(&Request {
+            method: "activate".into(),
+            action: None,
+            params: None,
+        }).await?;
+        let ack: AckResponse = serde_json::from_str(&resp).map_err(|e| {
+            AdapterError::ProtocolError(format!("Invalid activate response: {e}"))
+        })?;
+        if !ack.ok {
+            return Err(AdapterError::ActivationFailed(
+                ack.error.unwrap_or_else(|| "Unknown error".into()),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AdapterDriver for ProcessDriver {
+    fn manifest(&self) -> &AdapterManifest {
+        &self.manifest
+    }
+
+    async fn activate(&mut self) -> Result<(), AdapterError> {
+        let handle = self.spawn().await?;
+        *self.process.lock().await = Some(handle);
+        *self.restart_count.lock().await = 0;
+
+        let resp = self.call_raw(&Request {
+            method: "activate".into(),
+            action: None,
+            params: None,
+        }).await?;
+
+        let ack: AckResponse = serde_json::from_str(&resp).map_err(|e| {
+            AdapterError::ProtocolError(format!("Invalid activate response: {e}"))
+        })?;
+        if !ack.ok {
+            return Err(AdapterError::ActivationFailed(
+                ack.error.unwrap_or_else(|| "Unknown error".into()),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn deactivate(&mut self) -> Result<(), AdapterError> {
+        // Best-effort: send deactivate, then kill
+        let _ = self.call_raw(&Request {
+            method: "deactivate".into(),
+            action: None,
+            params: None,
+        }).await;
+
+        let mut proc = self.process.lock().await;
+        if let Some(mut handle) = proc.take() {
+            let _ = handle.child.kill().await;
+        }
+        Ok(())
+    }
+
+    async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError> {
+        let result = self.call_raw(&Request {
+            method: "get_context".into(),
+            action: None,
+            params: None,
+        }).await;
+
+        let resp = match result {
+            Ok(r) => r,
+            Err(AdapterError::ProcessCrashed(_) | AdapterError::Timeout(_)) => {
+                self.try_restart().await?;
+                self.call_raw(&Request {
+                    method: "get_context".into(),
+                    action: None,
+                    params: None,
+                }).await?
+            }
+            Err(e) => return Err(e),
+        };
+
+        let parsed: ContextResponse = serde_json::from_str(&resp).map_err(|e| {
+            AdapterError::ProtocolError(format!("Invalid get_context response: {e}"))
+        })?;
+        Ok(parsed.elements)
+    }
+
+    async fn execute(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<ActionResult, AdapterError> {
+        let resp = self.call_raw(&Request {
+            method: "execute".into(),
+            action: Some(action.into()),
+            params: Some(params),
+        }).await?;
+
+        let parsed: ExecuteResponse = serde_json::from_str(&resp).map_err(|e| {
+            AdapterError::ProtocolError(format!("Invalid execute response: {e}"))
+        })?;
+        Ok(ActionResult {
+            success: parsed.success,
+            error: parsed.error,
+            data: parsed.data,
+        })
+    }
+
+    async fn probe(&self) -> bool {
+        self.process.lock().await.is_some()
+    }
+}

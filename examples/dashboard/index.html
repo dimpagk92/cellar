@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CEL Pipeline Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #d29922; --red: #f85149; --purple: #bc8cff;
+    --orange: #d18616;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; background: var(--bg); color: var(--text); }
+
+  .header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header .subtitle { color: var(--dim); font-size: 13px; }
+  .url-bar { flex: 1; display: flex; gap: 8px; }
+  .url-bar input { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; color: var(--text); font-size: 13px; }
+  .url-bar button, .action-btn { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 16px; cursor: pointer; font-size: 13px; font-weight: 500; }
+  .url-bar button:hover, .action-btn:hover { opacity: 0.9; }
+  .action-btn.secondary { background: var(--surface); border: 1px solid var(--border); }
+  .action-btn.green { background: var(--green); }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 24px; }
+  .grid.three { grid-template-columns: 1fr 1fr 1fr; }
+  .full-width { grid-column: 1 / -1; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .card-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .card-header h2 { font-size: 14px; font-weight: 600; }
+  .card-body { padding: 16px; }
+  .card-body.compact { padding: 8px 16px; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .badge.live { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+  .badge.simulated { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+  .badge.unavailable { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+
+  .source-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .source-row:last-child { border-bottom: none; }
+  .source-name { display: flex; align-items: center; gap: 8px; }
+  .source-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .source-dot.dom { background: var(--accent); }
+  .source-dot.a11y { background: var(--green); }
+  .source-dot.vision { background: var(--purple); }
+  .source-dot.network { background: var(--orange); }
+  .source-count { font-size: 20px; font-weight: 700; }
+  .source-meta { font-size: 11px; color: var(--dim); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 6px 8px; color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .conf-bar { display: inline-block; height: 4px; border-radius: 2px; min-width: 20px; }
+  .conf-high { background: var(--green); }
+  .conf-med { background: var(--yellow); }
+  .conf-low { background: var(--red); }
+
+  .prompt-preview { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 12px; font-family: monospace; font-size: 11px; white-space: pre-wrap; max-height: 300px; overflow-y: auto; color: var(--dim); line-height: 1.5; }
+
+  .stat { text-align: center; padding: 12px; }
+  .stat-value { font-size: 28px; font-weight: 700; }
+  .stat-label { font-size: 11px; color: var(--dim); margin-top: 4px; }
+
+  .type-bars { display: flex; flex-direction: column; gap: 4px; }
+  .type-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .type-label { width: 80px; text-align: right; color: var(--dim); }
+  .type-bar { height: 16px; border-radius: 3px; background: var(--accent); min-width: 4px; transition: width 0.3s; }
+  .type-count { width: 30px; font-size: 11px; color: var(--dim); }
+
+  .accuracy-meter { text-align: center; padding: 24px; }
+  .accuracy-value { font-size: 48px; font-weight: 700; }
+  .accuracy-label { font-size: 13px; color: var(--dim); margin-top: 4px; }
+  .accuracy-detail { font-size: 12px; color: var(--dim); margin-top: 8px; }
+
+  .history-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .history-item:last-child { border-bottom: none; }
+  .history-dot { width: 6px; height: 6px; border-radius: 50%; }
+  .history-dot.success { background: var(--green); }
+  .history-dot.fail { background: var(--red); }
+
+  .loading { display: flex; align-items: center; justify-content: center; padding: 40px; color: var(--dim); }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .actions-bar { padding: 16px 24px; display: flex; gap: 8px; align-items: center; }
+  .actions-bar .spacer { flex: 1; }
+  .extraction-time { font-size: 12px; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CEL Pipeline</h1>
+  <span class="subtitle">Context Execution Layer</span>
+  <div class="url-bar">
+    <input type="text" id="url-input" placeholder="Enter URL to analyze...">
+    <button onclick="extract()">Extract</button>
+  </div>
+</div>
+
+<div class="actions-bar">
+  <button class="action-btn green" onclick="reExecute()">Re-execute & Measure Accuracy</button>
+  <span class="extraction-time" id="extraction-time"></span>
+  <div class="spacer"></div>
+  <span id="status" class="badge live">Connected</span>
+</div>
+
+<div class="grid three" id="sources-grid">
+  <!-- Context Sources -->
+  <div class="card">
+    <div class="card-header">
+      <h2>Context Sources</h2>
+    </div>
+    <div class="card-body">
+      <div class="source-row">
+        <div class="source-name"><div class="source-dot dom"></div> DOM (CDP)</div>
+        <div style="text-align:right">
+          <div class="source-count" id="dom-count">-</div>
+          <div class="source-meta"><span class="badge live">LIVE</span> <span id="dom-time">-</span></div>
+        </div>
+      </div>
+      <div class="source-row">
+        <div class="source-name"><div class="source-dot a11y"></div> Accessibility</div>
+        <div style="text-align:right">
+          <div class="source-count" id="a11y-count">-</div>
+          <div class="source-meta"><span class="badge simulated">SIMULATED</span></div>
+        </div>
+      </div>
+      <div class="source-row">
+        <div class="source-name"><div class="source-dot vision"></div> Vision</div>
+        <div style="text-align:right">
+          <div class="source-count" id="vision-count">-</div>
+          <div class="source-meta"><span class="badge simulated">SIMULATED</span></div>
+        </div>
+      </div>
+      <div class="source-row">
+        <div class="source-name"><div class="source-dot network"></div> Network</div>
+        <div style="text-align:right">
+          <div class="source-count" id="network-count">-</div>
+          <div class="source-meta"><span class="badge live">LIVE</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="card">
+    <div class="card-header"><h2>Merged Context</h2></div>
+    <div class="card-body" style="display:grid; grid-template-columns:1fr 1fr; gap:0;">
+      <div class="stat">
+        <div class="stat-value" id="total-elements">-</div>
+        <div class="stat-label">Total Elements</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="actionable-elements">-</div>
+        <div class="stat-label">Actionable</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="avg-confidence">-</div>
+        <div class="stat-label">Avg Confidence</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="extraction-ms">-</div>
+        <div class="stat-label">Extraction (ms)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Type Distribution -->
+  <div class="card">
+    <div class="card-header"><h2>Element Types</h2></div>
+    <div class="card-body">
+      <div class="type-bars" id="type-bars"></div>
+    </div>
+  </div>
+</div>
+
+<!-- LLM Economics -->
+<div class="grid three">
+  <div class="card">
+    <div class="card-header"><h2>LLM Usage</h2><span class="badge" style="background:rgba(63,185,80,0.15);color:var(--green)">Cost Savings</span></div>
+    <div class="card-body" style="display:grid; grid-template-columns:1fr 1fr; gap:0;">
+      <div class="stat">
+        <div class="stat-value" style="color:var(--green)" id="structured-pct">-</div>
+        <div class="stat-label">LLM-Free Context</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="vision-fallback">-</div>
+        <div class="stat-label">Vision Fallback</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="prompt-tokens">-</div>
+        <div class="stat-label">Prompt Tokens</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" style="color:var(--green)" id="cost-savings">-</div>
+        <div class="stat-label">Savings vs Vision-Only</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Cost per Step</h2></div>
+    <div class="card-body">
+      <div class="source-row">
+        <div class="source-name"><span style="color:var(--green)">&#9679;</span> CEL (structured + planner)</div>
+        <div style="text-align:right">
+          <div class="source-count" id="cel-cost">-</div>
+          <div class="source-meta">per step</div>
+        </div>
+      </div>
+      <div class="source-row">
+        <div class="source-name"><span style="color:var(--red)">&#9679;</span> Vision-only (screenshot)</div>
+        <div style="text-align:right">
+          <div class="source-count" id="vision-cost">-</div>
+          <div class="source-meta">per step</div>
+        </div>
+      </div>
+      <div class="source-row" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;">
+        <div class="source-name" style="font-weight:600">10-step workflow</div>
+        <div style="text-align:right">
+          <div style="font-size:13px"><span style="color:var(--green)" id="cel-10step">-</span> vs <span style="color:var(--red)" id="vision-10step">-</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Speed per Step</h2><span class="badge" style="background:rgba(88,166,255,0.15);color:var(--accent)">Extraction</span></div>
+    <div class="card-body">
+      <div class="source-row">
+        <div class="source-name"><span style="color:var(--green)">&#9679;</span> CEL extraction</div>
+        <div style="text-align:right">
+          <div class="source-count" id="cel-extract-ms">-</div>
+          <div class="source-meta">ms</div>
+        </div>
+      </div>
+      <div class="source-row">
+        <div class="source-name"><span style="color:var(--red)">&#9679;</span> browser-use extraction</div>
+        <div style="text-align:right">
+          <div class="source-count" id="bu-extract-ms">-</div>
+          <div class="source-meta">ms (typical)</div>
+        </div>
+      </div>
+      <div class="source-row" style="border-top:1px solid var(--border); margin-top:4px; padding-top:8px;">
+        <div class="source-name"><span style="font-weight:600">Speedup</span></div>
+        <div style="text-align:right">
+          <div class="source-count" style="color:var(--green)" id="speed-multiplier">-</div>
+        </div>
+      </div>
+      <div class="source-row">
+        <div class="source-name" style="font-weight:600">Total step time</div>
+        <div style="text-align:right">
+          <div style="font-size:13px"><span style="color:var(--green)" id="cel-step-time">-</span> vs <span style="color:var(--red)" id="bu-step-time">-</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid three">
+  <div class="card full-width">
+    <div class="card-header"><h2>Context Breakdown</h2></div>
+    <div class="card-body" style="display:flex; align-items:center; gap:24px;">
+      <div style="flex:1;">
+        <div style="display:flex; width:100%; height:24px; border-radius:4px; overflow:hidden; gap:2px;" id="context-bar">
+        </div>
+        <div style="display:flex; gap:16px; margin-top:8px; font-size:11px; color:var(--dim);" id="context-legend">
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- Top Elements Table -->
+  <div class="card">
+    <div class="card-header"><h2>Top Elements (by confidence)</h2></div>
+    <div class="card-body compact">
+      <table>
+        <thead><tr><th>Conf</th><th>Type</th><th>Label</th><th>Actions</th></tr></thead>
+        <tbody id="elements-table"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Planner Prompt -->
+  <div class="card">
+    <div class="card-header"><h2>Planner Prompt Preview</h2><span class="badge" style="background:rgba(88,166,255,0.15);color:var(--accent);">LLM Input</span></div>
+    <div class="card-body">
+      <div class="prompt-preview" id="prompt-preview">Waiting for extraction...</div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <!-- Accuracy -->
+  <div class="card">
+    <div class="card-header"><h2>Re-execution Accuracy</h2></div>
+    <div class="card-body">
+      <div class="accuracy-meter" id="accuracy-section">
+        <div class="accuracy-value" id="accuracy-value">-</div>
+        <div class="accuracy-label">Click "Re-execute" to measure extraction consistency</div>
+        <div class="accuracy-detail" id="accuracy-detail"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Execution History -->
+  <div class="card">
+    <div class="card-header"><h2>Execution History</h2></div>
+    <div class="card-body" id="history-section">
+      <div style="color:var(--dim);font-size:12px;">No executions yet. Click "Re-execute" to start.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const urlInput = document.getElementById('url-input');
+
+// SSE connection
+const evtSource = new EventSource('/events');
+evtSource.onmessage = (e) => {
+  const msg = JSON.parse(e.data);
+  if (msg.type === 'snapshot') updateDashboard(msg.data);
+  if (msg.type === 're-execution') updateAccuracy(msg.data);
+};
+evtSource.onerror = () => {
+  document.getElementById('status').textContent = 'Disconnected';
+  document.getElementById('status').className = 'badge unavailable';
+};
+
+function updateDashboard(snapshot) {
+  urlInput.value = snapshot.url;
+
+  // Sources
+  document.getElementById('dom-count').textContent = snapshot.sources.dom.elements.length;
+  document.getElementById('dom-time').textContent = snapshot.sources.dom.extractionMs + 'ms';
+  document.getElementById('a11y-count').textContent = snapshot.sources.accessibility.elements.length;
+  document.getElementById('vision-count').textContent = snapshot.sources.vision.elements.length;
+  document.getElementById('network-count').textContent = snapshot.sources.network.events.length;
+
+  // Stats
+  document.getElementById('total-elements').textContent = snapshot.stats.totalElements;
+  document.getElementById('actionable-elements').textContent = snapshot.planner.actionableCount;
+  document.getElementById('avg-confidence').textContent = snapshot.planner.avgConfidence.toFixed(2);
+  document.getElementById('extraction-ms').textContent = snapshot.stats.extractionMs;
+  document.getElementById('extraction-time').textContent = 'Extracted in ' + snapshot.stats.extractionMs + 'ms';
+
+  // Type distribution
+  const typeContainer = document.getElementById('type-bars');
+  const types = Object.entries(snapshot.stats.byType).sort((a, b) => b[1] - a[1]);
+  const maxCount = types.length > 0 ? types[0][1] : 1;
+  typeContainer.innerHTML = types.slice(0, 8).map(([type, count]) => {
+    const pct = (count / maxCount * 100).toFixed(0);
+    return '<div class="type-row"><span class="type-label">' + type + '</span><div class="type-bar" style="width:' + pct + '%"></div><span class="type-count">' + count + '</span></div>';
+  }).join('');
+
+  // Elements table
+  const tableBody = document.getElementById('elements-table');
+  tableBody.innerHTML = snapshot.planner.topElements.slice(0, 15).map(el => {
+    const confClass = el.confidence >= 0.9 ? 'conf-high' : el.confidence >= 0.7 ? 'conf-med' : 'conf-low';
+    const barWidth = (el.confidence * 60).toFixed(0);
+    return '<tr><td>' + el.confidence.toFixed(2) + ' <span class="conf-bar ' + confClass + '" style="width:' + barWidth + 'px"></span></td><td>' + el.type + '</td><td>' + el.label.slice(0, 25) + '</td><td style="color:var(--dim)">' + (el.actions.join(', ') || '-') + '</td></tr>';
+  }).join('');
+
+  // Prompt preview
+  document.getElementById('prompt-preview').textContent = snapshot.planner.prompt;
+
+  // LLM Economics
+  if (snapshot.llmEconomics) {
+    const econ = snapshot.llmEconomics;
+    document.getElementById('structured-pct').textContent = econ.structuredPct.toFixed(0) + '%';
+    document.getElementById('vision-fallback').textContent = econ.visionFallbackElements;
+    document.getElementById('prompt-tokens').textContent = econ.plannerPromptTokens.toLocaleString();
+    document.getElementById('cost-savings').textContent = econ.savingsVsVisionOnly.toFixed(0) + '%';
+    document.getElementById('cel-cost').textContent = '$' + econ.estimatedCostPerStep.toFixed(5);
+    document.getElementById('vision-cost').textContent = '$' + econ.visionOnlyCostPerStep.toFixed(5);
+    document.getElementById('cel-10step').textContent = '$' + (econ.estimatedCostPerStep * 10).toFixed(4);
+    document.getElementById('vision-10step').textContent = '$' + (econ.visionOnlyCostPerStep * 10).toFixed(4);
+
+    // Context breakdown bar
+    const bar = document.getElementById('context-bar');
+    const legend = document.getElementById('context-legend');
+    const domPct = snapshot.sources.dom.elements.length;
+    const a11yPct = snapshot.sources.accessibility.elements.length;
+    const visPct = econ.visionFallbackElements;
+    const totalCtx = domPct + a11yPct + visPct || 1;
+    bar.innerHTML =
+      '<div style="flex:' + domPct + ';background:var(--accent);border-radius:3px;" title="DOM: ' + domPct + '"></div>' +
+      '<div style="flex:' + a11yPct + ';background:var(--green);border-radius:3px;" title="Accessibility: ' + a11yPct + '"></div>' +
+      (visPct > 0 ? '<div style="flex:' + visPct + ';background:var(--purple);border-radius:3px;" title="Vision (LLM): ' + visPct + '"></div>' : '');
+    legend.innerHTML =
+      '<span><span style="color:var(--accent)">&#9632;</span> DOM (' + ((domPct/totalCtx)*100).toFixed(0) + '%)</span>' +
+      '<span><span style="color:var(--green)">&#9632;</span> A11y (' + ((a11yPct/totalCtx)*100).toFixed(0) + '%)</span>' +
+      '<span><span style="color:var(--purple)">&#9632;</span> Vision/LLM (' + ((visPct/totalCtx)*100).toFixed(0) + '%)</span>';
+
+    // Speed
+    document.getElementById('cel-extract-ms').textContent = econ.celExtractionMs;
+    document.getElementById('bu-extract-ms').textContent = econ.browserUseExtractionMs.toLocaleString();
+    document.getElementById('speed-multiplier').textContent = econ.speedMultiplier.toFixed(0) + 'x';
+    document.getElementById('cel-step-time').textContent = (econ.celStepTimeMs / 1000).toFixed(1) + 's';
+    document.getElementById('bu-step-time').textContent = (econ.browserUseStepTimeMs / 1000).toFixed(1) + 's';
+  }
+}
+
+function updateAccuracy(data) {
+  const pct = (data.accuracy * 100).toFixed(1);
+  const color = data.accuracy >= 0.9 ? 'var(--green)' : data.accuracy >= 0.7 ? 'var(--yellow)' : 'var(--red)';
+  document.getElementById('accuracy-value').textContent = pct + '%';
+  document.getElementById('accuracy-value').style.color = color;
+  document.getElementById('accuracy-detail').textContent =
+    data.matched + '/' + data.total + ' elements matched | ' +
+    data.newElements + ' new | ' + data.removedElements + ' removed';
+
+  // Update history
+  if (data.history) {
+    const container = document.getElementById('history-section');
+    container.innerHTML = data.history.map(h => {
+      const dot = h.success ? 'success' : 'fail';
+      const conf = (h.confidence * 100).toFixed(0) + '%';
+      const time = new Date(h.timestamp).toLocaleTimeString();
+      return '<div class="history-item"><span class="history-dot ' + dot + '"></span><span>' + h.action + '</span><span style="color:var(--dim);margin-left:auto">' + conf + '</span><span style="color:var(--dim)">' + time + '</span></div>';
+    }).reverse().join('');
+  }
+}
+
+async function extract() {
+  const url = urlInput.value.trim();
+  if (!url) return;
+  document.getElementById('extraction-time').textContent = 'Extracting...';
+  try {
+    const res = await fetch('/api/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    document.getElementById('extraction-time').textContent = 'Error: ' + err.message;
+  }
+}
+
+async function reExecute() {
+  document.getElementById('accuracy-value').textContent = '...';
+  document.getElementById('accuracy-detail').textContent = 'Re-executing...';
+  try {
+    const res = await fetch('/api/re-execute', { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+  } catch (err) {
+    document.getElementById('accuracy-detail').textContent = 'Error: ' + err.message;
+  }
+}
+
+urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') extract(); });
+</script>
+</body>
+</html>

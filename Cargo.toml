@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "cel/cel-display",
+    "cel/cel-input",
+    "cel/cel-accessibility",
+    "cel/cel-audio",
+    "cel/cel-llm",
+    "cel/cel-vision",
+    "cel/cel-network",
+    "cel/cel-context",
+    "cel/cel-store",
+    "cel/cel-planner",
+    "cel/cel-cdp",
+    "cel/cel-signals",
+    "cel/cel-cortex",
+    "cel/cel-goal-runner",
+    "cel/cel-eval",
+    "cel/cel-napi",
+    "cellar-worker",
+    "adapters/adapter-common",
+    "adapters/excel",
+    "adapters/sap-gui",
+    "adapters/bloomberg",
+    "adapters/metatrader",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/dilipod/cellar"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+image = "0.25"
+rusqlite = { version = "0.31", features = ["bundled"] }
+reqwest = { version = "0.12", features = ["json"] }
+thiserror = "1"
+async-trait = "0.1"
+
+# CEL internal crates
+cel-llm = { path = "cel/cel-llm" }
+cel-display = { path = "cel/cel-display" }
+cel-input = { path = "cel/cel-input" }
+cel-accessibility = { path = "cel/cel-accessibility" }
+cel-audio = { path = "cel/cel-audio" }
+cel-vision = { path = "cel/cel-vision" }
+cel-network = { path = "cel/cel-network" }
+cel-context = { path = "cel/cel-context" }
+cel-store = { path = "cel/cel-store" }
+cel-planner = { path = "cel/cel-planner" }
+cel-cortex = { path = "cel/cel-cortex" }
+cel-goal-runner = { path = "cel/cel-goal-runner" }
+cel-eval = { path = "cel/cel-eval" }
+cel-cdp = { path = "cel/cel-cdp" }
+cel-signals = { path = "cel/cel-signals" }
+adapter-common = { path = "adapters/adapter-common" }
+
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2" }
+tauri-plugin-shell = "2"
+tauri-plugin-store = "2"

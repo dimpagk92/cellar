@@ -1,0 +1,24 @@
+{
+  "name": "browser",
+  "display_name": "Browser (CDP + Playwright)",
+  "app_patterns": ["(?i)google chrome", "(?i)chromium", "(?i)brave", "(?i)arc", "(?i)edge", "(?i)firefox", "(?i)safari"],
+  "platform": ["macos", "windows", "linux"],
+  "runtime": "process",
+  "entrypoint": "dist/process-driver.js",
+  "context": {
+    "element_types": ["button", "input", "link", "a", "select", "textarea", "checkbox", "radio_button", "combobox", "text", "heading", "image"],
+    "refresh_ms": 200,
+    "confidence": 0.9
+  },
+  "actions": {
+    "click": { "params": { "target_id": "string" }, "description": "Click an element" },
+    "type": { "params": { "target_id": "string", "text": "string" }, "description": "Type text into an element" },
+    "set_value": { "params": { "target_id": "string", "value": "string" }, "description": "Set value directly" },
+    "navigate": { "params": { "url": "string" }, "description": "Navigate to a URL" },
+    "evaluate": { "params": { "expression": "string" }, "description": "Execute JavaScript in the page" },
+    "screenshot": { "params": {}, "description": "Capture a screenshot" },
+    "select_option": { "params": { "target_id": "string", "value": "string" }, "description": "Select a dropdown option" },
+    "dismiss_cookie_consent": { "params": {}, "description": "Dismiss cookie consent banners" },
+    "wait_for_stable": { "params": { "timeout": "number" }, "description": "Wait for DOM to stabilize" }
+  }
+}

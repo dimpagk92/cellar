@@ -111,10 +111,10 @@ jobs:
           restore-keys: linux-cargo-
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --lib --bins --tests
 
       - name: Clippy
-        run: cargo clippy --workspace
+        run: cargo clippy --workspace --lib --bins --tests
         continue-on-error: true
 
   napi-build:

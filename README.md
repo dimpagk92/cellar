@@ -6,7 +6,14 @@
 
 **Best-in-class hybrid perception. Native macOS. MCP server for Claude Code, Cursor, and every tool that speaks the protocol.**
 
-[Quickstart](docs/quickstart.md) · [Connect to Claude Code](docs/connect-claude-code.md) · [Architecture](docs/architecture.md) · [FAQ](docs/faq.md)
+[![CI](https://github.com/dimpagk92/cellar/actions/workflows/ci.yml/badge.svg)](https://github.com/dimpagk92/cellar/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![MCP](https://img.shields.io/badge/protocol-MCP-6e40c9.svg)](https://modelcontextprotocol.io)
+[![macOS](https://img.shields.io/badge/macOS-13%2B-lightgrey.svg)]()
+[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange.svg)](https://rust-lang.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue.svg)](https://typescriptlang.org)
+
+[Quickstart](docs/quickstart.md) · [Connect to Claude Code](docs/connect-claude-code.md) · [Architecture](docs/architecture.md) · [FAQ](docs/faq.md) · [Discussions](https://github.com/dimpagk92/cellar/discussions)
 
 </div>
 

@@ -44,7 +44,7 @@
   "scripts": {
     "prepack": "pnpm build",
     "build": "pnpm --filter @cellar/agent build && pnpm --filter @cellar/adapter-browser build && tsc && pnpm bundle",
-    "bundle": "esbuild dist/index.js --bundle --platform=node --target=node20 --format=cjs --outfile=dist/bundle.cjs --external:@dimpagk92/cellar-napi --banner:js='#!/usr/bin/env node'",
+    "bundle": "node esbuild.config.mjs",
     "test": "node ../tests/cortex/mcp-protocol.mjs",
     "lint": "tsc --noEmit"
   },

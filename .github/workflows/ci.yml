@@ -22,9 +22,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action/setup@v1
-        with:
-          toolchain: stable
           components: clippy, rustfmt
 
       - name: Cache cargo registry & build
@@ -94,9 +91,6 @@ jobs:
             libjavascriptcoregtk-4.1-dev
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action/setup@v1
-        with:
-          toolchain: stable
           components: clippy, rustfmt
 
       - name: Cache cargo
@@ -127,9 +121,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action/setup@v1
-        with:
-          toolchain: stable
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -164,9 +155,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action/setup@v1
-        with:
-          toolchain: stable
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

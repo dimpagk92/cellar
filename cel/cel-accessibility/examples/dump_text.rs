@@ -1,5 +1,9 @@
 //! Dump ALL elements with text content — check what AX actually gives us for web views.
 //! Focuses on: AXValue, AXTitle, AXDescription, AXRoleDescription, AXHelp
+//!
+//! macOS-only (uses AXUIElement + ApplicationServices framework).
+
+#![cfg(target_os = "macos")]
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};

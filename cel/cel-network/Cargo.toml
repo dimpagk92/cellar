@@ -1,0 +1,15 @@
+[package]
+name = "cel-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL network layer — traffic monitoring and filtering"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

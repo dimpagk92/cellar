@@ -1,0 +1,20 @@
+[package]
+name = "cel-planner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL Planner — LLM-driven goal decomposition and step planning"
+
+[dependencies]
+cel-llm = { workspace = true }
+cel-context = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+cel-network = { workspace = true }

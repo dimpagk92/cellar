@@ -73,7 +73,7 @@ Add Cellar to your MCP client's config. That's it.
   "mcpServers": {
     "cellar": {
       "command": "npx",
-      "args": ["-y", "@dimpagk92/cellar-mcp"],
+      "args": ["-y", "@dpagk/cellar-mcp"],
       "env": {
         "CEL_LLM_PROVIDER": "gemini",
         "CEL_LLM_API_KEY": "your-key"

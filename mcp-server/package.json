@@ -1,5 +1,5 @@
 {
-  "name": "@dimpagk92/cellar-mcp",
+  "name": "@dpagk/cellar-mcp",
   "version": "0.1.0",
   "description": "Cellar MCP server — native computer use for AI agents (Claude Code, Cursor, any MCP client)",
   "keywords": [
@@ -49,7 +49,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@dimpagk92/cellar-napi": "workspace:*",
+    "@dpagk/cellar-napi": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "zod": "^3.23.0"
   },

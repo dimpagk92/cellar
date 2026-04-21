@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@cellar/agent": "workspace:*",
-    "@dimpagk92/cellar-mcp": "workspace:*",
+    "@dpagk/cellar-mcp": "workspace:*",
     "commander": "^12.1.0"
   },
   "devDependencies": {

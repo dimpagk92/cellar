@@ -145,7 +145,7 @@ export const mcpCommand = new Command("mcp")
       );
       process.exit(1);
     }
-    const { startStdioServer } = await import("@dimpagk92/cellar-mcp/server.js");
+    const { startStdioServer } = await import("@dpagk/cellar-mcp/server.js");
     await startStdioServer();
   })
   .addCommand(

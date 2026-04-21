@@ -363,7 +363,7 @@ function loadNative(): CelNative | null {
   try {
     // Try to load the napi-rs compiled module
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    _native = require("@dimpagk92/cellar-napi") as CelNative;
+    _native = require("@dpagk/cellar-napi") as CelNative;
     return _native;
   } catch {
     return null;

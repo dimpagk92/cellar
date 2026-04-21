@@ -64,7 +64,7 @@ importers:
 
   agent:
     dependencies:
-      '@dimpagk92/cellar-napi':
+      '@dpagk/cellar-napi':
         specifier: workspace:*
         version: link:../cel/cel-napi
       zod:
@@ -82,7 +82,7 @@ importers:
       '@cellar/agent':
         specifier: workspace:*
         version: link:../agent
-      '@dimpagk92/cellar-mcp':
+      '@dpagk/cellar-mcp':
         specifier: workspace:*
         version: link:../mcp-server
       commander:
@@ -95,7 +95,7 @@ importers:
 
   mcp-server:
     dependencies:
-      '@dimpagk92/cellar-napi':
+      '@dpagk/cellar-napi':
         specifier: workspace:*
         version: link:../cel/cel-napi
       '@modelcontextprotocol/sdk':

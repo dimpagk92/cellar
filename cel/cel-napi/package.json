@@ -1,5 +1,5 @@
 {
-  "name": "@dimpagk92/cellar-napi",
+  "name": "@dpagk/cellar-napi",
   "version": "0.1.0",
   "description": "Cellar native bindings via napi-rs",
   "homepage": "https://github.com/dimpagk92/cellar",

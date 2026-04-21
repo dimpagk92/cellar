@@ -84,29 +84,6 @@ if [ "$MODE" = "test" ]; then
     cd mcp-server && npx tsc --noEmit && echo "  ✓ mcp-server types OK" && cd ..
 fi
 
-# ─── Step 5: Tauri .dmg (release only) ──────────────────────────────────────
-
-if [ "$MODE" = "release" ]; then
-    echo ""
-    echo "▸ Building Tauri app (.dmg)..."
-
-    # Ensure sidecar binary placeholder exists
-    mkdir -p app/src-tauri/binaries
-    if [ ! -f app/src-tauri/binaries/cel-mcp-aarch64-apple-darwin ]; then
-        touch app/src-tauri/binaries/cel-mcp-aarch64-apple-darwin
-    fi
-
-    cd app && pnpm tauri build 2>&1 | tail -5 && cd ..
-
-    # Find the .dmg
-    DMG=$(find target/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
-    if [ -n "$DMG" ]; then
-        echo "  ✓ DMG: $DMG ($(du -h "$DMG" | cut -f1))"
-    else
-        echo "  ⚠ DMG not found — check target/release/bundle/"
-    fi
-fi
-
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""
@@ -120,6 +97,3 @@ echo "      \"command\": \"node\","
 echo "      \"args\": [\"$ROOT_DIR/mcp-server/dist/index.js\"]"
 echo "    }"
 echo "  }"
-echo ""
-echo "To run the Tauri app:"
-echo "  cd app && pnpm tauri dev"

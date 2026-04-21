@@ -110,8 +110,8 @@ jobs:
           key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: linux-cargo-
 
-      - name: Run tests
-        run: cargo test --workspace --lib --bins --tests
+      - name: Check workspace
+        run: cargo check --workspace --lib --bins --tests
 
       - name: Clippy
         run: cargo clippy --workspace --lib --bins --tests

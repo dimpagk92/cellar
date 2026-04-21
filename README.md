@@ -23,7 +23,7 @@
 
 Every agent that operates a computer today fights the same losing battle: feed screenshots to a vision model, hope it can find the button, hope it can tell when something changed, hope it doesn't loop forever when a modal pops up. It's expensive, slow, and wrong often enough that real workflows break.
 
-Cellar takes a different approach. **We read what's actually on the screen** — through accessibility trees, Chrome DevTools Protocol, and native APIs — and fall back to vision only when structure fails. The result is an agent runtime that handles the workflows screenshot-only agents can't touch.
+I built Cellar to take a different approach. **It reads what's actually on the screen** — through accessibility trees, Chrome DevTools Protocol, and native APIs — and falls back to vision only when structure fails. The result is an agent runtime that handles the workflows screenshot-only agents can't touch.
 
 ## What makes Cellar different
 
@@ -113,7 +113,7 @@ On startup, the Cortex boots automatically (screen model is warm before your fir
 
 ## Benchmarks
 
-CEL is measured on a broad mix of browser and cross-app tasks drawn from WebArena, VisualWebArena, and the hybrid suite we maintain for workflows that cross the browser-to-native boundary. We publish failure analysis, not just aggregate scores — see [docs/quickstart.md](docs/quickstart.md) to run the eval locally.
+CEL is measured on a broad mix of browser and cross-app tasks drawn from WebArena, VisualWebArena, and a hybrid suite I maintain for workflows that cross the browser-to-native boundary. Failure analysis is published alongside aggregate scores — see [docs/quickstart.md](docs/quickstart.md) to run the eval locally.
 
 Results of note:
 
@@ -178,7 +178,7 @@ The [full roadmap](docs/ROADMAP.md) tracks remote workers, worker protocol, Dock
 
 ## Contributing
 
-We welcome contributions — especially:
+Contributions welcome — especially:
 - Accessibility bridges (Windows UI Automation, mobile)
 - New application adapters — see [docs/building-adapters.md](docs/building-adapters.md)
 - MCP tool improvements

@@ -52,11 +52,11 @@ For day-to-day use, **Gemini 2.0 Flash** is the sweet spot — cheap, fast, and 
 
 For the combination of (hybrid runtime + structure-first perception + MCP-native), yes. No other OSS project does all three today.
 
-For **pure browser automation**, Browser-Use and Stagehand are state-of-the-art and we won't claim otherwise. Cellar is competitive but not demonstrably better on browser-only benchmarks.
+For **pure browser automation**, Browser-Use and Stagehand are state-of-the-art and I won't claim otherwise. Cellar is competitive but not demonstrably better on browser-only benchmarks.
 
-For **crossing the browser-to-native boundary** (hybrid workflows), Cellar is the only OSS runtime we know of that handles the full pipeline.
+For **crossing the browser-to-native boundary** (hybrid workflows), Cellar is the only OSS runtime I know of that handles the full pipeline.
 
-We publish benchmark methodology, not just numbers — run the eval yourself to verify.
+Benchmark methodology is published alongside the numbers — run the eval yourself to verify.
 
 ## How fast is it?
 
@@ -69,8 +69,8 @@ End-to-end action latency (see screen → plan → execute) depends on the LLM. 
 Honest list:
 - **Mobile automation** (iOS, Android) — not on the roadmap
 - **Windows** — planned, not shipped
-- **Anything captcha-gated** — agents bypassing captchas is a dead end we're not pursuing
-- **"Browse the web like a human"** for 30 minutes unattended — long-horizon autonomy is still an open research problem; we're honest about the 70–80% success rate on complex goals
+- **Anything captcha-gated** — agents bypassing captchas is a dead end I'm not pursuing
+- **"Browse the web like a human"** for 30 minutes unattended — long-horizon autonomy is still an open research problem; the 70–80% success rate on complex goals is a real ceiling today
 - **Replace deterministic scripts** for well-understood repetitive tasks — if you have a selector-stable workflow, Playwright is faster and more reliable
 
 ## How do I build a custom adapter?
@@ -87,7 +87,7 @@ The commercial plans (managed cloud, hosted workers) are separate code that depe
 
 ## Can I use Cellar in a commercial product?
 
-Yes. Apache 2.0 permits commercial use. You can fork, modify, embed, resell — subject to the license terms (attribution, preserve the notice, etc.). We'd love to know about it.
+Yes. Apache 2.0 permits commercial use. You can fork, modify, embed, resell — subject to the license terms (attribution, preserve the notice, etc.). I'd love to know about it.
 
 ## How do I report a security issue?
 
@@ -95,16 +95,16 @@ Open a [private security advisory](https://github.com/dimpagk92/cellar/security/
 
 ## How do I contribute?
 
-Start with [CONTRIBUTING.md](../CONTRIBUTING.md). Areas we want help with:
+Start with [CONTRIBUTING.md](../CONTRIBUTING.md). Areas I'd love help with:
 - Windows UI Automation bridge
 - More application adapters
-- Tests on platforms we don't run day-to-day
+- Tests on platforms I don't run day-to-day
 - Docs and examples (especially tutorials)
 - Reproducing + triaging issues
 
 ## Is there a Discord / community space?
 
-Use [GitHub Discussions](https://github.com/dimpagk92/cellar/discussions) for questions and show-and-tell. We'll set up a Discord if Discussions feels too asynchronous — watch for an announcement if activity picks up.
+Use [GitHub Discussions](https://github.com/dimpagk92/cellar/discussions) for questions and show-and-tell. I'll set up a Discord if Discussions feels too asynchronous — watch for an announcement if activity picks up.
 
 ## Will this get funded / acquired / pivot?
 

@@ -1528,7 +1528,7 @@ impl Cortex {
         {
             let _ = (sheet, table, writes, verify);
             ActionResult::fail(
-                "write_cells requires macOS (AppleScript backend)".into(),
+                "write_cells requires macOS (AppleScript backend)".to_string(),
             )
         }
     }

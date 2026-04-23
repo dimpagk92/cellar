@@ -12,6 +12,12 @@ describe("normalizeCortexModel", () => {
       },
       focused_element: { id: "dom:submit", label: "Submit" },
       recent_diffs: [{ addedCount: 1, removedCount: 0, changedCount: 0, unchangedCount: 5, addedLabels: [], changedLabels: [] }],
+      last_diff_summary: {
+        added_count: 2,
+        removed_count: 1,
+        changed_count: 3,
+        unchanged_count: 4,
+      },
       vision_needed: true,
       age_ms: 10,
       cycle_count: 2,
@@ -46,6 +52,10 @@ describe("normalizeCortexModel", () => {
     expect(normalized?.temporal.idleSince).toBe(50);
     expect(normalized?.temporal.errorPersisting?.durationMs).toBe(300);
     expect(normalized?.freshness?.lastUpdateMs).toBe(100);
+    expect(normalized?.lastDiffSummary?.addedCount).toBe(2);
+    expect(normalized?.lastDiffSummary?.removedCount).toBe(1);
+    expect(normalized?.lastDiffSummary?.changedCount).toBe(3);
+    expect(normalized?.lastDiffSummary?.unchangedCount).toBe(4);
     expect(normalized?.stability.stable.has("dom:submit")).toBe(true);
     expect(normalized?.semantic?.currentActivity).toContain("Browser");
     expect(normalized?.sourceSummary?.accessibility).toBe(0);

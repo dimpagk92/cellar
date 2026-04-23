@@ -1,31 +1,19 @@
-//! CEL Goal Runner — full Rust execution loop.
+//! CEL Goal Runner — canonical agent loop.
 //!
-//! Owns the entire perceive → plan → execute → verify → reflect → gate cycle.
-//! Reads from Cortex directly. Plans via cel-planner directly. Dispatches
-//! execution through Cortex adapter routing. Only event callbacks cross to TS.
+//! One entry point (`CanonicalGoalRunner::run`), one loop, one retry
+//! semantic (3 strikes per step → `FailureReport`), one outcome shape.
+//! Callers are thin shims: CLI, MCP server, eval harness, benchmarks
+//! each do 10–20 lines and hand off here.
+//!
+//! See `docs/canonical-agent-plan.md` for the motivating plan and the
+//! invariants the loop guarantees.
 
-pub mod callbacks;
-pub mod checkpoint;
-pub mod cognitive_trail;
+pub mod canonical_runner;
 pub mod config;
-pub mod notebook;
 pub mod outcome;
-pub mod runner;
 pub mod runtime_backend;
-pub mod state;
-pub mod strategy_router;
-pub mod strategy_tracker;
-pub mod verification;
 
-pub use callbacks::{ExecutionCallbacks, NoOpCallbacks};
-pub use checkpoint::CheckpointManager;
-pub use cognitive_trail::CognitiveTrail;
+pub use canonical_runner::{CanonicalGoalRunner, CortexStepExecutor, StepExecutor};
 pub use config::GoalConfig;
-pub use notebook::Notebook;
-pub use outcome::{ActionRecord, GoalResult, GoalStatus, GoalMetrics, StepOutcome};
-pub use runner::GoalRunner;
+pub use outcome::{ActionRecord, GoalMetrics, GoalResult, GoalStatus, StepOutcome};
 pub use runtime_backend::{resolve_runtime_backend, RuntimeBackend};
-pub use state::{RunnerState, RunnerPhase};
-pub use strategy_router::{StrategyRoute, StrategySelection, select_route};
-pub use strategy_tracker::StrategyTracker;
-pub use verification::{VerificationResult, verify_action};

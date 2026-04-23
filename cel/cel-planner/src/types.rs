@@ -63,7 +63,12 @@ impl Default for GoalConfig {
             goal: String::new(),
             max_steps: 50,
             max_retries: 3,
-            max_tokens: 2048,
+            // 2048 was fine for non-reasoning models but Gemini 2.5 Flash
+            // burns a variable chunk on thinking tokens before emitting
+            // visible output — runs regularly truncated JSON at ~300 chars.
+            // 8192 gives headroom for the thinking pass plus a cdp_eval
+            // batch (which can easily exceed 1kB of JS).
+            max_tokens: 8192,
             context_detail: ContextDetail::Full,
         }
     }
@@ -374,6 +379,18 @@ pub enum PlannedAction {
         /// The action to perform: "click" (AXPress), "activate" (AXConfirm),
         /// "increment", "decrement", "show_menu"
         action: String,
+        /// Label hint for fallback element resolution. AX IDs are hashes
+        /// that include bounds + depth and therefore change whenever the
+        /// UI mutates between plan time and dispatch time. If the cortex
+        /// can't find `target_id` in the live AX tree, it falls back to
+        /// searching for the first visible element whose role matches
+        /// `role_hint` (if provided) and whose label equals `label`.
+        /// Planner must populate this from the same perception snapshot
+        /// that produced the target_id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role_hint: Option<String>,
     },
     /// Activate (bring to front) a macOS application by name.
     /// Uses `open -a` under the hood — the most reliable app switching method.
@@ -395,6 +412,13 @@ pub enum PlannedAction {
         /// JavaScript expression to evaluate in the page context.
         expression: String,
     },
+    /// Convenience navigation action. LLMs gravitate toward `{"type":"navigate","url":"..."}`
+    /// even when the prompt asks for cdp_eval, so accept it as a first-class variant and
+    /// route it to the same reset_preferred_target + cdp_eval path inside the cortex.
+    Navigate {
+        #[serde(alias = "href", alias = "to")]
+        url: String,
+    },
     /// No-op: LLM sometimes puts notebook_writes inside the actions array.
     /// This variant absorbs that mistake gracefully instead of causing a parse error.
     /// The actual notebook_writes are processed from the top-level PlannedStep field.
@@ -407,6 +431,95 @@ pub enum PlannedAction {
         #[serde(default)]
         category: String,
     },
+    /// Declarative extraction with selector fallbacks.
+    ///
+    /// Replaces the "LLM hand-writes `document.querySelector(...)` in a
+    /// loop" failure mode. Runtime tries each selector in order via
+    /// CDP `Runtime.evaluate`, parses according to `parse_as`, and on
+    /// first success writes the value into `shared_memory[name]`. The
+    /// planner supplies the scenario-specific selector knowledge as
+    /// parameters; the retry/parse machinery is generic.
+    ///
+    /// Contract with the runner: consecutive failures for the same
+    /// `name` (across turns) accumulate toward an auto-null cutoff
+    /// (see the stall/retry budget in `canonical_runner.rs`). After
+    /// the cutoff the runtime records `shared_memory[name] = null` so
+    /// the LLM stops polishing a field that the page does not surface.
+    #[serde(alias = "extract_with_fallbacks", alias = "extract_declarative")]
+    ExtractWithFallback {
+        /// Logical name for this extraction target (e.g. `"btc_price"`).
+        /// Written into `shared_memory` on success, and used by the
+        /// runner to group consecutive failures for retry budgeting.
+        name: String,
+        /// CSS selector or JS expression candidates, tried in order.
+        /// An entry may be either a plain CSS selector (runtime wraps
+        /// it into `document.querySelector(SEL)?.textContent`) or a
+        /// full JS expression starting with `function` or a recognized
+        /// prefix — the runtime auto-detects.
+        selectors: Vec<String>,
+        /// How to parse the raw string yielded by the first matching
+        /// selector. One of: `"text"`, `"float"`, `"int"`, `"html"`.
+        /// Unknown values fall back to `"text"`.
+        #[serde(default = "default_parse_as", alias = "parse", alias = "as")]
+        parse_as: String,
+    },
+    /// Deterministic spreadsheet cell writes via AppleScript (Numbers).
+    ///
+    /// Replaces the flaky keystroke recipe (`activate_app → key(arrows)
+    /// → key(Delete) → type → key(Return)`) with one atomic operation
+    /// against the document model. The keystroke recipe produced
+    /// concatenated garbage values, duplicated headers, and values
+    /// landing in the wrong cells whenever an intermediate step got
+    /// perturbed by focus drift or AX tree lag. `WriteCells` sidesteps
+    /// the entire UI event loop.
+    ///
+    /// Batch-shaped because the AppleScript spawn cost amortizes across
+    /// many cells — single-cell callers pass a length-1 `writes` vector.
+    #[serde(alias = "write_cell")]
+    WriteCells {
+        /// Target app. Currently only `"Numbers"` is implemented; other
+        /// values produce a clean runtime error so the planner can pivot.
+        #[serde(default = "default_spreadsheet_app")]
+        app: String,
+        /// Optional sheet name. `None` = first sheet of first document.
+        #[serde(default)]
+        sheet: Option<String>,
+        /// Optional table name. `None` = first table of selected sheet.
+        #[serde(default)]
+        table: Option<String>,
+        /// Writes to apply, in order.
+        writes: Vec<CellWrite>,
+        /// When true, the runtime reads each cell back after writing
+        /// and includes the readback in the step result's `data` field.
+        /// Recommended: keep `true` — verification is cheap (same
+        /// AppleScript call) and catches Numbers' value coercions.
+        #[serde(default = "default_true")]
+        verify: bool,
+    },
+}
+
+/// One cell write inside a [`PlannedAction::WriteCells`] batch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CellWrite {
+    /// A1-notation cell reference, e.g. `"B2"`, `"AA17"`.
+    #[serde(alias = "ref", alias = "cell", alias = "address")]
+    pub cell_ref: String,
+    /// Value to write. Pass raw numeric strings (`"108432.50"`, not
+    /// `"$108,432.50"`); Numbers formats per the cell's display
+    /// format. Text values pass through unchanged.
+    pub value: String,
+}
+
+fn default_spreadsheet_app() -> String {
+    "Numbers".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_parse_as() -> String {
+    "text".into()
 }
 
 impl PlannedAction {
@@ -448,7 +561,10 @@ impl PlannedAction {
             | Self::ActivateApp { .. }
             | Self::Select { .. }
             | Self::CdpEval { .. }
-            | Self::NotebookWrites { .. } => vec![],
+            | Self::Navigate { .. }
+            | Self::NotebookWrites { .. }
+            | Self::WriteCells { .. }
+            | Self::ExtractWithFallback { .. } => vec![],
         }
     }
 }

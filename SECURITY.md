@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-**Do not open a public issue.** Report security vulnerabilities through GitHub's [private security advisory](https://github.com/dimpagk92/cellar/security/advisories/new) feature.
+**Do not open a public issue.** Security reports go to [private security advisory](https://github.com/dimpagk92/cellar/security/advisories/new) (PGP key on request).
 
 We aim to:
 - Acknowledge within **72 hours**.
@@ -22,6 +22,7 @@ In scope:
 Out of scope:
 - Third-party MCP clients / LLM providers.
 - Services a user chooses to connect the runtime to.
+- Commercial-only components (these aren't part of this repo).
 
 ## Supported Versions
 
@@ -55,14 +56,14 @@ A few features can execute attacker-influenced content on the user's machine. Ea
 
 **Risk**: The baseline collector runs local shell commands. Output size is not currently bounded — a pathological baseline can consume memory.
 
-**Default posture**: Runs with the user's own shell privileges; no shell injection from untrusted input.
+**Default posture**: Runs with the user's own shell privileges; no shell injection from untrusted input. Fixing the unbounded-output path is on the [PRODUCTION_HARDENING.md](PRODUCTION_HARDENING.md) list.
 
 ## Responsible Disclosure
 
 If you find a vulnerability:
 
-1. Open a [private security advisory](https://github.com/dimpagk92/cellar/security/advisories/new) with details and a proof-of-concept if safe to share.
+1. Open a [private security advisory](https://github.com/dimpagk92/cellar/security/advisories/new) with the details, a proof-of-concept if safe to share, and your preferred credit.
 2. Give us the timeline above to respond.
-3. Please do not exploit the issue against systems you don't own, and don't access data that isn't yours.
+3. Please do not exploit the issue against systems you don't own, don't test against production infrastructure you do not operate, and don't access data that isn't yours.
 
 Thank you — security reports make this safer for every Cellar user.

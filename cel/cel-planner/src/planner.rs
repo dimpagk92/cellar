@@ -14,7 +14,6 @@ use cel_context::ScreenContext;
 
 use crate::error::PlannerError;
 use crate::history::StepHistory;
-use crate::loop_detector::{context_fingerprint, LoopDetector, LoopSignal};
 use crate::prompt::{self, PromptOptions};
 use crate::types::*;
 
@@ -24,8 +23,6 @@ const MIN_ACTIONABLE_ELEMENTS: usize = 3;
 const EMPTY_CONTEXT_MAX_RETRIES: u32 = 3;
 /// Base delay between empty-context retries in milliseconds.
 const EMPTY_CONTEXT_BASE_DELAY_MS: u64 = 500;
-/// How many grace steps after a loop warning before auto-failing.
-const LOOP_GRACE_STEPS: u32 = 2;
 
 /// Trait the caller implements to provide screen context and execute actions.
 ///
@@ -65,13 +62,20 @@ impl Planner {
         }
     }
 
-    /// Run the full observe-plan-act-verify loop until Done, Fail, or max steps.
+    /// Legacy iterative observe-plan-act-verify loop — **deprecated**.
+    ///
+    /// This method predates the canonical agent (see
+    /// `docs/canonical-agent-plan.md`) and its multi-signal loop detector.
+    /// Kept only so existing tests that construct a `Planner` still
+    /// compile; new callers must drive the loop via
+    /// `cel_goal_runner::CanonicalGoalRunner::run` instead. The body is
+    /// preserved verbatim but with loop detection stripped.
+    #[deprecated(note = "use cel_goal_runner::CanonicalGoalRunner::run")]
     pub async fn run(
         &self,
         backend: &dyn PlannerBackend,
     ) -> Result<PlannerEvent, PlannerError> {
         let mut history = StepHistory::new();
-        let mut loop_detector = LoopDetector::new();
         let mut loop_warning: Option<String> = None;
         let mut tentative_plan: Vec<PlannedStep> = Vec::new();
         let system = prompt::system_prompt();
@@ -170,39 +174,10 @@ impl Planner {
             // 6. RECORD for next iteration
             history.record(step_index, step.action.clone(), success, error);
 
-            // 7. LOOP DETECTION
-            let ctx_hash = context_fingerprint(&context);
-            let signal = loop_detector.check(&step.action, ctx_hash);
-
-            match signal {
-                LoopSignal::None => {
-                    loop_warning = None;
-                }
-                _ => {
-                    let signal_str = signal.to_string();
-                    let nudge = signal.nudge_message().to_string();
-                    backend.on_event(PlannerEvent::LoopDetected {
-                        step_index,
-                        signal: signal_str.clone(),
-                    });
-                    tracing::warn!(step = step_index, signal = %signal_str, "Loop detected");
-
-                    if loop_detector.should_auto_fail() {
-                        let event = PlannerEvent::GoalFailed {
-                            reason: format!("Stuck in action loop: {}", signal_str),
-                            total_steps: step_index,
-                        };
-                        backend.on_event(event.clone());
-                        return Ok(event);
-                    }
-
-                    // Always update with latest nudge (escalates with severity)
-                    if loop_warning.is_none() {
-                        // First detection — start grace period
-                        loop_detector.start_grace(LOOP_GRACE_STEPS);
-                    }
-                    loop_warning = Some(nudge);
-                }
+            // Loop detection is no longer this loop's concern — the
+            // canonical runner surfaces stuck steps via the 3-strike
+            // retry rule (see CanonicalGoalRunner).
+            {
             }
 
             // Brief pause to let the UI settle
@@ -648,7 +623,7 @@ mod tests {
         assert_eq!(config.goal, "Test goal");
         assert_eq!(config.max_steps, 50);
         assert_eq!(config.max_retries, 3);
-        assert_eq!(config.max_tokens, 2048);
+        assert_eq!(config.max_tokens, 8192);
         assert_eq!(config.context_detail, ContextDetail::Full);
     }
 

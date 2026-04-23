@@ -239,20 +239,24 @@ IF you must use cdp_eval for a <select>: resolve by value OR text, then dispatch
 RULE: Never use `input[name="subject"]` for a <select> — querySelector returns null and the assignment silently fails. A <select> is NOT an <input>."#;
 
 const EXAMPLES_BROWSER_SEARCH: &str = r#"GOAL: "Search Google for Apple stock price"
-BEST (3 steps): Cmd+L → type query → Enter. Batch in ONE response:
-  "actions": [{"type":"key_combo","keys":["Command","l"]},{"type":"type","text":"Apple stock price"},{"type":"key","key":"Enter"}]
-Then extract data from results with cdp_eval:
-  "actions": [{"type":"cdp_eval","expression":"document.body.innerText.substring(0, 2000)"}]
+BEST (1 step): navigate directly via cdp_eval, then extract in the same batch:
+  "actions": [
+    {"type":"cdp_eval","expression":"window.location.href='https://www.google.com/search?q=Apple+stock+price'"},
+    {"type":"wait","ms":1200},
+    {"type":"cdp_eval","expression":"document.body.innerText.substring(0, 2000)"}
+  ]
 
 GOAL: "Go to capital.gr and find CREDIA stock price"
-BEST: Navigate directly via address bar, then extract with cdp_eval:
-  "actions": [{"type":"key_combo","keys":["Command","l"]},{"type":"type","text":"https://www.capital.gr/finance/quote/CREDIA"},{"type":"key","key":"Enter"}]
-After page loads, dismiss cookie banner + extract in ONE cdp_eval:
-  "actions": [{"type":"cdp_eval","expression":"const btn = document.querySelector('button'); if (btn && btn.textContent.includes('Accept')) btn.click(); document.body.innerText.substring(0, 2000)"}]
+BEST: cdp_eval navigation + cookie dismissal + extract in ONE batch:
+  "actions": [
+    {"type":"cdp_eval","expression":"window.location.href='https://www.capital.gr/finance/quote/CREDIA'"},
+    {"type":"wait","ms":1500},
+    {"type":"cdp_eval","expression":"(() => { const btn = Array.from(document.querySelectorAll('button')).find(b => /accept|agree/i.test(b.textContent)); if (btn) btn.click(); return document.body.innerText.substring(0, 2000); })()"}
+  ]
 
-RULES for browser search:
-- Use Cmd+L (address bar) → type → Enter. This is the FASTEST navigation pattern.
-- Use cdp_eval for extracting page content — much faster than scrolling + reading elements.
+RULES for browser navigation:
+- **ALWAYS navigate via cdp_eval**: `window.location.href = '<url>'`. It's instant, tab-scoped, and can't be blocked by OS focus. Cmd+L + type + Enter is DEPRECATED — it sends OS-level keystrokes to whatever app is focused, which may not be the browser. The runtime now refuses native-input actions when the CEL browser isn't frontmost, so Cmd+L flows will fail with a focus-guard error.
+- Use cdp_eval to extract page content — much faster than scrolling + reading elements.
 - Use cdp_eval to dismiss cookie banners: find button by text content and click it.
 - Batch Cmd+L + type + Enter in a SINGLE response (3 actions, 1 step).
 - After navigation, WAIT for page load before extracting."#;
@@ -282,14 +286,56 @@ You can control ANY macOS application, not just browsers.
 - Do NOT use Spotlight for app switching — it is unreliable. Use activate_app instead.
 - After activate_app, WAIT 1000ms for the app to come to front before acting on it.
 
-### Browser Shortcuts (when inside Chrome/Safari/Firefox)
-- Focus + select address bar: key_combo ["Cmd","L"] — this SELECTS ALL text so typing replaces it
-- New tab: key_combo ["Cmd","T"]
-- IMPORTANT: ALWAYS use Cmd+L before typing a URL or search query. This focuses the address bar AND selects existing text so your typing replaces it cleanly.
-- To search: Cmd+L → type search query → Enter (Chrome will search via default engine)
-- To navigate: Cmd+L → type URL → Enter
-- Batch navigation: [{"type":"key_combo","keys":["Cmd","L"]},{"type":"type","text":"https://news.google.com"},{"type":"key","key":"Enter"}]
-- Batch search: [{"type":"key_combo","keys":["Cmd","L"]},{"type":"type","text":"war in Iran"},{"type":"key","key":"Enter"}]
+### In a Browser Tab — cdp_eval ONLY for EVERYTHING
+
+When APP is a browser (Chrome/Safari/Firefox), ALL in-page work MUST go through cdp_eval. AX-tree clicks on web pages are flaky (the tree mutates every second), so NEVER use click/ax_action/type for page content — use `cdp_eval` exclusively for:
+
+- **Navigation**: `{"type":"navigate","url":"<url>"}` (preferred) or `{"type":"cdp_eval","expression":"window.location.href='<url>'"}`
+- **Clicks on page buttons/links**: `{"type":"cdp_eval","expression":"(()=>{const el=[...document.querySelectorAll('button,a,[role=button]')].find(e=>/text-you-want/i.test(e.textContent));if(el){el.click();return 'clicked:'+el.textContent.slice(0,40);}return 'not-found';})()"}`
+- **Cookie banners / consent**: `{"type":"cdp_eval","expression":"(()=>{const b=[...document.querySelectorAll('button,[role=button]')].find(x=>/accept|agree|allow|got it|OK/i.test(x.textContent));if(b)b.click();return b?'dismissed':'none';})()"}`
+- **Form fills**: cdp_eval that sets .value AND dispatches input+change events, then clicks submit.
+- **Extract text**: `{"type":"cdp_eval","expression":"document.body.innerText.substring(0, 3000)"}`
+- **Extract structured**: `{"type":"cdp_eval","expression":"JSON.stringify({title:document.title,price:document.querySelector('[data-price]')?.textContent,headlines:[...document.querySelectorAll('h1,h2,h3')].slice(0,10).map(h=>h.textContent.trim())})"}`
+- **Scroll to reveal**: `{"type":"cdp_eval","expression":"window.scrollBy(0, 800); return window.scrollY;"}`
+
+NEVER in a browser tab: click/ax_action/type against `ax:*` ids of page content, Cmd+L, address-bar clicks. The AX ids reshape every render and you WILL fail with "Element not found". AX is only reliable for the browser chrome (tabs, bookmarks menu) and those are rarely needed.
+
+BATCH AGGRESSIVELY. One planner round should do 3-5 cdp_evals:
+```
+[
+  {"type":"navigate","url":"https://finance.yahoo.com/quote/BTC-USD/"},
+  {"type":"wait","ms":1200},
+  {"type":"cdp_eval","expression":"(()=>{const b=[...document.querySelectorAll('button')].find(x=>/accept|agree/i.test(x.textContent));if(b)b.click();return 'ok';})()"},
+  {"type":"cdp_eval","expression":"document.body.innerText.substring(0, 3000)"}
+]
+```
+
+### Extract price data the ROBUST way: innerText regex, not fragile selectors
+
+**DO NOT** write selectors like `document.querySelector('fin-streamer[data-field=regularMarketPrice]')` — they drift with every DOM refactor and return null silently. Repeatedly calling the same null-returning selector is the #1 way the agent gets stuck in a loop.
+
+**DO** extract visible text once, then pattern-match with regex. Most finance pages (Yahoo Finance summary included) put BTC/ETH/SOL prices in a market ticker bar that's visible on any page, so one cdp_eval can harvest all three prices from ONE page without navigating.
+
+```js
+// Extract prices for multiple tickers from a single visible page
+(() => {
+  const text = document.body.innerText;
+  const grab = (label) => {
+    const re = new RegExp(label + "\\s*\\n?\\s*([0-9][0-9,\\.]+)");
+    const m = text.match(re);
+    return m ? m[1] : null;
+  };
+  return JSON.stringify({
+    btc: grab("Bitcoin USD"),
+    eth: grab("Ethereum USD"),
+    sol: grab("Solana USD")
+  });
+})()
+```
+
+If a selector-based cdp_eval returns `null` twice, STOP calling it. Pivot to innerText + regex. The runtime auto-fails after 5 identical consecutive cdp_evals.
+
+Why cdp-first: each step costs ~2s of perception+planning round-trip. Batching 5 steps into 1 saves 8s and avoids every stale-AX failure.
 
 ### Reliable Interactions
 - If a coordinate click fails on a button or menu item, use ax_action instead — it uses the native macOS accessibility API and is more reliable:
@@ -1409,7 +1455,14 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
             let expr = if expression.len() > 40 { &expression[..40] } else { expression };
             format!("cdp_eval(\"{}…\")", expr)
         }
+        PlannedAction::Navigate { url } => format!("navigate({})", url),
         PlannedAction::NotebookWrites { .. } => "(notebook — no-op)".to_string(),
+        PlannedAction::WriteCells { app, writes, .. } => {
+            format!("write_cells({}, {} cells)", app, writes.len())
+        }
+        PlannedAction::ExtractWithFallback { name, selectors, .. } => {
+            format!("extract({}, {} selectors)", name, selectors.len())
+        }
     }
 }
 

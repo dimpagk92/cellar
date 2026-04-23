@@ -168,12 +168,33 @@ fn spawn_real_execution(
         let _guard = exec_lock.lock().await;
         store.update_status(&job_id, JobStatus::Running, None, None);
 
-        let config = merge_goal_config(goal, config_override);
-        let callbacks = Arc::new(cel_goal_runner::NoOpCallbacks);
-        let mut runner = cel_goal_runner::GoalRunner::new(config, cortex, callbacks);
+        let config = merge_goal_config(goal.clone(), config_override);
+        let limits = cel_planner::RunLimits {
+            max_steps: config.max_steps,
+            timeout_ms: config.timeout_ms,
+            max_step_retries: 3,
+        };
 
-        let goal_result = runner.run().await;
-        let result_json = match serde_json::to_value(&goal_result) {
+        // Canonical path: LLM produces a Plan upfront, CortexStepExecutor
+        // dispatches. Same contract as CLI and eval harness.
+        let llm_client = match cel_llm::create_client() {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                store.update_status(
+                    &job_id,
+                    JobStatus::Failed,
+                    None,
+                    Some(format!("LLM not configured: {e}")),
+                );
+                return;
+            }
+        };
+        let planner = cel_planner::LlmPlanProducer::new(llm_client);
+        let executor = cel_goal_runner::CortexStepExecutor::new(cortex);
+        let runner = cel_goal_runner::CanonicalGoalRunner::new(planner, executor);
+        let outcome = runner.run(&goal, limits).await;
+
+        let result_json = match serde_json::to_value(&outcome) {
             Ok(v) => v,
             Err(e) => {
                 store.update_status(
@@ -186,14 +207,17 @@ fn spawn_real_execution(
             }
         };
 
-        // Map runner-level outcome onto the worker's JobStatus. Achieved → Succeeded;
-        // every other GoalStatus (Failed/MaxSteps/Timeout/Cancelled) → Failed.
-        // The full GoalResult is always available on `result` for inspection.
-        let (job_status, error) = match goal_result.status {
-            cel_goal_runner::GoalStatus::Achieved => (JobStatus::Succeeded, None),
-            other => (
+        // Canonical GoalOutcome → worker JobStatus.
+        let (job_status, error) = match &outcome {
+            cel_planner::GoalOutcome::Succeeded { .. } => (JobStatus::Succeeded, None),
+            cel_planner::GoalOutcome::Failed(report) => (
                 JobStatus::Failed,
-                Some(format!("{other:?}: {}", goal_result.summary)),
+                Some(format!(
+                    "{}/{}: {}",
+                    report.failing_sub_goal,
+                    report.failing_step,
+                    report.attempts.last().cloned().unwrap_or_default()
+                )),
             ),
         };
         store.update_status(&job_id, job_status, Some(result_json), error);

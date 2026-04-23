@@ -17,6 +17,17 @@ pub struct CdpTarget {
     pub ws_url: String,
 }
 
+/// Detailed HTTP target metadata from Chrome's /json endpoints.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CdpHttpTarget {
+    pub id: String,
+    pub app_name: String,
+    pub port: u16,
+    pub title: String,
+    pub url: String,
+    pub ws_url: String,
+}
+
 /// Apps whose DevToolsActivePort should NOT be read during passive discovery.
 /// These are Electron apps where connecting to their CDP port would interfere
 /// with the host process (e.g., Claude Code, Codex — CEL runs inside these).
@@ -182,6 +193,136 @@ fn extract_debug_port(line: &str) -> Option<&str> {
     }
 }
 
+/// List page targets exposed by Chrome's DevTools HTTP endpoint.
+pub fn list_http_targets(port: u16) -> Vec<CdpHttpTarget> {
+    let body = match http_request_local(port, "GET", "/json/list") {
+        Some((status, body)) if (200..300).contains(&status) => body,
+        _ => return Vec::new(),
+    };
+
+    let version = query_browser_name(port).unwrap_or_else(|| "Browser".to_string());
+    let entries: Vec<serde_json::Value> = match serde_json::from_str(&body) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut targets = Vec::new();
+    for entry in entries {
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else { continue };
+        let Some(ws_url) = entry.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) else { continue };
+        let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        if entry_type != "page" {
+            continue;
+        }
+        let url = entry
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if url.starts_with("devtools://") {
+            continue;
+        }
+        targets.push(CdpHttpTarget {
+            id: id.to_string(),
+            app_name: version.clone(),
+            port,
+            title: entry
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            url,
+            ws_url: ws_url.to_string(),
+        });
+    }
+
+    targets
+}
+
+fn percent_encode_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for byte in url.bytes() {
+        let is_allowed = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'~' | b':' | b'/' | b'?' | b'&' | b'=' | b'%' | b'#'
+            );
+        if is_allowed {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{:02X}", byte));
+        }
+    }
+    out
+}
+
+fn open_new_target(port: u16, url: &str) -> Option<CdpHttpTarget> {
+    let path = format!("/json/new?{}", percent_encode_url(url));
+    let body = match http_request_local(port, "PUT", &path) {
+        Some((status, body)) if (200..300).contains(&status) => body,
+        _ => return None,
+    };
+
+    let entry: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let id = entry.get("id")?.as_str()?.to_string();
+    let ws_url = entry.get("webSocketDebuggerUrl")?.as_str()?.to_string();
+    let title = entry
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let url = entry
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(CdpHttpTarget {
+        id,
+        app_name: query_browser_name(port).unwrap_or_else(|| "Browser".into()),
+        port,
+        title,
+        url,
+        ws_url,
+    })
+}
+
+fn activate_target(port: u16, target_id: &str) -> bool {
+    let path = format!("/json/activate/{}", target_id);
+    matches!(http_request_local(port, "GET", &path), Some((status, _)) if (200..300).contains(&status))
+}
+
+fn close_target(port: u16, target_id: &str) -> bool {
+    let path = format!("/json/close/{}", target_id);
+    matches!(http_request_local(port, "GET", &path), Some((status, _)) if (200..300).contains(&status))
+}
+
+/// Reset CEL's dedicated browser to a fresh single page target at `url`.
+///
+/// This avoids stale-tab drift by opening a new target on the dedicated CDP
+/// browser, activating it, and then closing older page targets on the same port.
+pub fn reset_preferred_target(url: &str) -> Result<(), String> {
+    let port = preferred_cel_cdp_port();
+    let existing = list_http_targets(port);
+    let new_target = open_new_target(port, url)
+        .ok_or_else(|| format!("Failed to open a new CDP target for {url} on port {port}"))?;
+
+    if !activate_target(port, &new_target.id) {
+        tracing::debug!(
+            "CDP HTTP activate failed for new target {} on port {}",
+            new_target.id,
+            port
+        );
+    }
+
+    for target in existing {
+        if target.id != new_target.id {
+            let _ = close_target(port, &target.id);
+        }
+    }
+
+    Ok(())
+}
+
 /// Extract app name from a ps aux line.
 fn extract_app_name(line: &str) -> String {
     // Look for .app in the full command string (not split by whitespace)
@@ -309,6 +450,10 @@ fn query_browser_name(port: u16) -> Option<String> {
 }
 
 fn http_get_local_json(port: u16, path: &str) -> Option<String> {
+    http_request_local(port, "GET", path).map(|(_, body)| body)
+}
+
+fn http_request_local(port: u16, method: &str, path: &str) -> Option<(u16, String)> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(1)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
@@ -318,8 +463,8 @@ fn http_get_local_json(port: u16, path: &str) -> Option<String> {
     // must speak HTTP/1.1. `Connection: close` still lets the server end the
     // response with EOF without keeping the socket open for another request.
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-        path, port
+        "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        method, path, port
     );
     stream.write_all(request.as_bytes()).ok()?;
 
@@ -341,6 +486,12 @@ fn http_get_local_json(port: u16, path: &str) -> Option<String> {
 
     let header_end = header_end?;
     let header_text = String::from_utf8_lossy(&response[..header_end]);
+    let status_code = header_text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .unwrap_or(0);
     let content_length = header_text
         .lines()
         .find_map(|line| {
@@ -350,9 +501,25 @@ fn http_get_local_json(port: u16, path: &str) -> Option<String> {
             } else {
                 None
             }
-        })?;
+        });
 
-    while response.len() < header_end + content_length {
+    if let Some(content_length) = content_length {
+        while response.len() < header_end + content_length {
+            let mut chunk = [0_u8; 1024];
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&chunk[..read]);
+        }
+        if response.len() < header_end + content_length {
+            return None;
+        }
+        let body = String::from_utf8(response[header_end..header_end + content_length].to_vec()).ok()?;
+        return Some((status_code, body));
+    }
+
+    loop {
         let mut chunk = [0_u8; 1024];
         let read = stream.read(&mut chunk).ok()?;
         if read == 0 {
@@ -361,11 +528,8 @@ fn http_get_local_json(port: u16, path: &str) -> Option<String> {
         response.extend_from_slice(&chunk[..read]);
     }
 
-    if response.len() < header_end + content_length {
-        return None;
-    }
-
-    String::from_utf8(response[header_end..header_end + content_length].to_vec()).ok()
+    let body = String::from_utf8(response[header_end..].to_vec()).ok()?;
+    Some((status_code, body))
 }
 
 #[cfg(test)]

@@ -4,9 +4,7 @@
   "description": "cellar CLI — developer tooling for CEL",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "bin": {
-    "cellar": "dist/index.js"
-  },
+  "bin": { "cellar": "dist/index.js" },
   "scripts": {
     "build": "tsc",
     "test": "node -e \"process.exit(0)\"",
@@ -17,7 +15,5 @@
     "@dpagk/cellar-mcp": "workspace:*",
     "commander": "^12.1.0"
   },
-  "devDependencies": {
-    "typescript": "^5.5.0"
-  }
+  "devDependencies": { "typescript": "^5.5.0" }
 }

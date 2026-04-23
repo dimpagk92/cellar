@@ -50,6 +50,16 @@ export function normalizeCortexModel(raw: unknown): MentalModel | null {
     }
   }
 
+  if (parsed.lastDiffSummary) {
+    const diff = parsed.lastDiffSummary;
+    if (diff.added_count !== undefined && diff.addedCount === undefined) diff.addedCount = diff.added_count;
+    if (diff.removed_count !== undefined && diff.removedCount === undefined) diff.removedCount = diff.removed_count;
+    if (diff.changed_count !== undefined && diff.changedCount === undefined) diff.changedCount = diff.changed_count;
+    if (diff.unchanged_count !== undefined && diff.unchangedCount === undefined) {
+      diff.unchangedCount = diff.unchanged_count;
+    }
+  }
+
   if (parsed.currentContext) {
     const ctx = parsed.currentContext;
     if (ctx.timestamp_ms === undefined && ctx.timestampMs !== undefined) ctx.timestamp_ms = ctx.timestampMs;

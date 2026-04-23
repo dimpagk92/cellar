@@ -1,6 +1,5 @@
 //! Dump the web page content area — skip Chrome UI, focus on AXWebArea children.
-//!
-//! macOS-only (uses AXUIElement + ApplicationServices framework).
+
 
 #![cfg(target_os = "macos")]
 

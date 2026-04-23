@@ -11,7 +11,7 @@ mod client;
 mod content;
 pub mod setup;
 
-pub use discovery::{discover_cdp_targets, discover_cdp_targets_filtered, CdpTarget};
+pub use discovery::{discover_cdp_targets, discover_cdp_targets_filtered, reset_preferred_target, CdpTarget};
 pub use client::{CdpClient, CdpError};
 pub use content::{extract_page_content, PageContent, TextBlock, DomElement, ConsoleMessage, ResourceEntry, ElementBounds, ViewportInfo};
 pub use setup::{install_cdp_launch_agent, uninstall_cdp_launch_agent, is_cdp_setup_installed};

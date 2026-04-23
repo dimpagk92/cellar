@@ -161,123 +161,31 @@ export const celThinkSchema = z.discriminatedUnion("mode", [
     knowledge_retention_days: z.number().default(365),
   }),
 
-  // --- run_goal: autonomous goal execution ---
+  // --- run_goal: autonomous goal execution via the canonical agent ---
+  // Only budget limits are tunable — `enable_vision`, `self_heal`,
+  // `decompose`, `enable_notebook`, `workflow_name`, etc. are no longer
+  // knobs (see docs/canonical-agent-plan.md). The canonical loop is one
+  // shape for every caller; varying it per-invocation was the main
+  // source of CLI-vs-eval drift.
   z.object({
     mode: z.literal("run_goal"),
     goal: z
       .string()
       .describe(
-        "Natural language goal to achieve with delegated autonomy. CEL runs the full " +
-          "see→plan→act loop internally and returns the result. " +
-          "Use this only when you want CEL itself to own planning and execution; " +
-          "if the host model can already reason step-by-step, prefer cel_see + cel_act " +
-          "for better efficiency and fewer internal LLM calls. " +
-          "Example: 'Open Finder and search for a file called passport'",
+        "Natural language goal. The canonical agent runs a single " +
+          "perceive → plan → sub_goals → steps loop with 3-strike retry. " +
+          "Prefer cel_see + cel_act when the host model can already reason " +
+          "step-by-step; use run_goal only to delegate the whole loop.",
       ),
-    max_steps: z.number().default(30).describe("Maximum iterations before giving up"),
+    max_steps: z.number().default(80).describe("Total step budget across sub-goals"),
     timeout_ms: z
       .number()
-      .default(120000)
-      .describe("Total timeout in milliseconds"),
-    enable_vision: z
-      .boolean()
-      .default(true)
-      .describe("Use screenshots when accessibility tree is sparse"),
-    self_heal: z
-      .boolean()
-      .default(true)
-      .describe("Re-plan on action failures"),
-    context_lazy: z
-      .boolean()
-      .default(true)
-      .describe(
-        "Enable context-lazy planning: the planner decides how much context each step needs. " +
-          "Blind actions (keyboard shortcuts, typing) skip the slow accessibility tree walk entirely.",
-      ),
-    decompose: z
-      .boolean()
-      .default(false)
-      .describe(
-        "Use the orchestrator to decompose the goal into sub-tasks. " +
-          "Best for complex multi-step goals. Uses Gemini Flash for decomposition (cheap). " +
-          "Enables replanning on failure — the orchestrator tries a different approach if a sub-task fails. " +
-          "Avoid for straightforward browser tasks when the host model can directly drive cel_see/cel_act.",
-      ),
-    workflow_name: z
-      .string()
-      .optional()
-      .describe(
-        "Workflow name for history scoping. When provided, enables: " +
-          "history-informed planning (learns from past runs), observation storage, " +
-          "and working memory persistence across runs.",
-      ),
-    enable_notebook: z
-      .boolean()
-      .default(true)
-      .describe(
-        "Enable notebook for cross-replan data persistence. " +
-          "The notebook records data discovered during execution (prices, URLs, " +
-          "confirmation numbers) that persists across strategy changes.",
-      ),
+      .default(900_000)
+      .describe("Total wall-clock timeout in milliseconds"),
   }),
 ]);
 
 type Input = z.infer<typeof celThinkSchema>;
-
-function isLikelyBrowserGoal(goal: string): boolean {
-  const lower = goal.toLowerCase();
-  return [
-    "http://",
-    "https://",
-    "browser",
-    "chrome",
-    "chromium",
-    "arc ",
-    "brave",
-    "edge",
-    "gmail",
-    "google ",
-    "youtube",
-    "search for",
-    "open website",
-    "web page",
-    "news.google",
-  ].some((needle) => lower.includes(needle));
-}
-
-function firstUrlInText(text: string): string | null {
-  for (const token of text.split(/\s+/)) {
-    const trimmed = token.trim().replace(/^[("'[]+|[)\]"',.]+$/g, "");
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-      return trimmed;
-    }
-  }
-  return null;
-}
-
-function focusBrowserApp(cel: Cel): void {
-  const activateApp = (cel as any).activateApp?.bind(cel);
-  if (!activateApp) return;
-
-  const candidates = [
-    "Google Chrome",
-    "Chromium",
-    "Brave Browser",
-    "Microsoft Edge",
-    "Arc",
-    "Safari",
-  ];
-
-  for (const appName of candidates) {
-    try {
-      if (activateApp(appName)) {
-        return;
-      }
-    } catch {
-      // Best effort only — try next browser candidate.
-    }
-  }
-}
 
 export async function handleCelThink(cel: Cel, args: Input) {
   try {
@@ -413,38 +321,22 @@ export async function handleCelThink(cel: Cel, args: Input) {
       }
 
       case "run_goal": {
-        const plannerGoal = args.goal.trim();
-
-        const browserGoal = isLikelyBrowserGoal(args.goal);
-
-        if (browserGoal) {
-          await ensureCdpChrome(cel);
-          focusBrowserApp(cel);
-          await new Promise((resolve) => setTimeout(resolve, 1500));
-        }
-
-        // Ensure Cortex is running — it discovers and manages adapters automatically.
-        // The browser adapter process driver activates when Chrome is frontmost.
+        // Canonical path: the MCP server is a thin shim over
+        // CanonicalGoalRunner::run. No legacy flags, no per-invocation
+        // routing decisions — the canonical agent is one shape for
+        // every caller. See docs/canonical-agent-plan.md.
         if (!cel.isCortexRunning()) {
           cel.bootCortex();
-          if (browserGoal) {
-            await new Promise((resolve) => setTimeout(resolve, 1500));
-          }
         }
-
-        // All goals go through the Rust runner.
-        // The Cortex handles perception (200ms tick, adapter context fusion)
-        // and execution dispatch (routes actions to the owning adapter).
+        // Always ensure the dedicated CDP browser. Cheap no-op when it's
+        // already running. Prevents `connect_to_focused_app` from latching
+        // onto Safari or whatever's frontmost when the goal is browser-ish
+        // but doesn't name a URL.
+        await ensureCdpChrome(cel);
         const rustResult = await cel.runGoalRust({
-          goal: plannerGoal,
+          goal: args.goal.trim(),
           max_steps: args.max_steps,
           timeout_ms: args.timeout_ms,
-          enable_vision: args.enable_vision,
-          self_heal: args.self_heal,
-          enable_decomposition: args.decompose ?? false,
-          enable_notebook: args.enable_notebook,
-          workflow_name: args.workflow_name ?? null,
-          constrain_to_url: firstUrlInText(args.goal),
         });
         return textResult(typeof rustResult === "string" ? JSON.parse(rustResult) : rustResult);
       }

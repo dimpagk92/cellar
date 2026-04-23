@@ -1,8 +1,7 @@
 //! Deep dump — shows ALL attributes for each element to understand Electron apps.
 //!
 //! Usage: cargo run -p cel-accessibility --example dump_deep
-//!
-//! macOS-only (uses AXUIElement + ApplicationServices framework).
+
 
 #![cfg(target_os = "macos")]
 

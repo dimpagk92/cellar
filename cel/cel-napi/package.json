@@ -1,21 +1,10 @@
 {
   "name": "@dpagk/cellar-napi",
   "version": "0.1.0",
-  "description": "Cellar native bindings via napi-rs",
-  "homepage": "https://github.com/dimpagk92/cellar",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/dimpagk92/cellar.git",
-    "directory": "cel/cel-napi"
-  },
-  "bugs": "https://github.com/dimpagk92/cellar/issues",
-  "license": "Apache-2.0",
-  "author": "dimpagk92",
+  "description": "CEL native bindings via napi-rs",
   "main": "index.js",
-  "types": "index.d.ts",
   "files": [
     "index.js",
-    "index.d.ts",
     "cel-napi.darwin-arm64.node",
     "cel-napi.darwin-x64.node",
     "cel-napi.linux-x64-gnu.node",
@@ -35,8 +24,5 @@
         "x86_64-pc-windows-msvc"
       ]
     }
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }

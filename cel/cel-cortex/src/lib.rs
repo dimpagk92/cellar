@@ -52,8 +52,9 @@ pub use manager::CortexManager;
 pub use memory::{Memory, MemoryEntry, MemoryError, MemoryLenses};
 pub use model::{
     Anomaly, AnomalyType, DialogType, DismissableDialog, ElementStability,
-    ErrorState, FocusedElement, LoadingState, MentalModel, PerceptionDiff,
-    TemporalFlags,
+    ErrorState, FocusedElement, FreshnessAssessment, FreshnessState,
+    LoadingState, MentalModel, PerceptionDiff, DiffSummary, SemanticInsight,
+    SourceSummary, StalenessCause, TaskPhase, TemporalFlags,
 };
 pub use adapter::{
     ActionResult, AdapterDriver, AdapterError, AdapterManifest, AdapterState,

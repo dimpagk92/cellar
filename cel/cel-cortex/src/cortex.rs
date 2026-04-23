@@ -150,6 +150,17 @@ pub struct Cortex {
     /// Notify handle the tick loop waits on alongside its interval. Wake
     /// via `refresh_now()` to trigger an out-of-band tick.
     refresh_notify: Arc<Notify>,
+
+    /// Most recent `activate_app` target. Set when an ActivateApp action
+    /// succeeds. Read by the native-input dispatch path to re-raise the
+    /// expected target app if another app stole frontmost between the
+    /// activation and the keystroke (Terminal, the editor the eval was
+    /// launched from, a notification, a system dialog, …).
+    ///
+    /// Wrapped in `Arc<Mutex<…>>` rather than kept behind the model
+    /// `RwLock` because native-input dispatch is sync-from-blocking-task
+    /// and must not contend with the tick loop.
+    last_activated_app: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Cortex {
@@ -176,6 +187,7 @@ impl Cortex {
             last_tick_ms: Arc::new(AtomicU64::new(0)),
             stalled_ticks: Arc::new(AtomicU64::new(0)),
             refresh_notify: Arc::new(Notify::new()),
+            last_activated_app: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -290,6 +302,30 @@ impl Cortex {
             .collect()
     }
 
+    /// Is a CDP client bound? Used by the canonical runner to tell
+    /// the planner whether `cdp_eval` / `navigate` will actually
+    /// dispatch somewhere vs be blind.
+    pub fn has_cdp_client(&self) -> bool {
+        self.cdp_client.is_some()
+    }
+
+    /// Is native macOS input unlocked? Used by the planner to steer
+    /// away from ax_action / key / type when the cortex is in
+    /// browser-only safety mode.
+    pub fn native_input_allowed(&self) -> bool {
+        self.allow_native_input
+    }
+
+    /// Fetch the current URL of the CDP-bound page (if any). Used by
+    /// the canonical runner to tell the planner whether it's already
+    /// on the right page before emitting `navigate`. Returns None
+    /// when there is no CDP client, the client is unreachable, or
+    /// the bound page is not a URL page (about:blank, devtools, …).
+    pub async fn cdp_current_url(&self) -> Option<String> {
+        let client = self.cdp_client.as_ref()?;
+        client.get_url().await.ok()
+    }
+
     /// Is the cortex currently running?
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
@@ -355,6 +391,7 @@ impl Cortex {
             model.current_context = initial_context;
             model.focused_element = focused;
             model.confidence = 1.0;
+            model.refresh_derived(now_ms(), None, None);
         }
 
         debug!(cortex_id = %self.id, app = %expected_app, "Cortex booted");
@@ -374,6 +411,8 @@ impl Cortex {
             let mut watchdog = ContextWatchdog::new();
             let mut expected_app = expected_app;
             let mut consecutive_action_failures: u32 = 0;
+            let mut last_event_ms: Option<u64> = None;
+            let mut last_significant_event_ms: Option<u64> = None;
             let mut element_adapter_index: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
             let mut interval =
@@ -497,6 +536,12 @@ impl Cortex {
 
                 // 3. Classify significance
                 let has_significant = events.iter().any(is_significant_event);
+                if !events.is_empty() {
+                    last_event_ms = Some(now);
+                }
+                if has_significant {
+                    last_significant_event_ms = Some(now);
+                }
 
                 // 4. Read old context for diffing
                 let old_context = {
@@ -609,6 +654,9 @@ impl Cortex {
                     m.current_context = new_context;
                     m.focused_element = focused.clone();
                     m.confidence = 1.0;
+                    if has_significant {
+                        last_significant_event_ms = None;
+                    }
 
                     // Diff rolling window
                     if let Some(ref diff) = perception_diff {
@@ -724,12 +772,12 @@ impl Cortex {
                     // Vision + meta
                     m.vision_needed = vision_needed;
                     m.cycle_count += 1;
-                    m.age_ms = 0; // Just updated
                     m.uptime_ms = now.saturating_sub(boot_time);
 
                     // Adapter state
                     m.element_adapter_index = element_adapter_index.clone();
                     m.active_adapters = active_adapter_names.clone();
+                    m.refresh_derived(now, last_event_ms, last_significant_event_ms);
                 }
 
                 // Mirror liveness state into atomics for lock-free external
@@ -881,6 +929,171 @@ impl Cortex {
         m.anomaly_queue.drain(..).collect()
     }
 
+    /// Pre-flight focus check for native-input dispatches (Key, KeyCombo,
+    /// Type-without-target-id). These actions dispatch through OS-level
+    /// input drivers that target **whatever app is frontmost**. If the
+    /// Cortex has a CDP client bound — meaning the caller is driving a
+    /// browser — and the frontmost app isn't a browser, the keystrokes
+    /// would land in the wrong window (terminal, Claude, editor). Worse,
+    /// eval smoke saw this trigger a recovery spiral where Cmd+L gets
+    /// typed into the terminal and the goal never escapes.
+    ///
+    /// The gate:
+    ///   1. If no CDP client bound → non-browser goal → let native input fire.
+    ///   2. If frontmost is already a browser → proceed.
+    ///   3. Otherwise, activate the preferred browser, poll up to
+    ///      `poll_ms` for focus to land. Fail with a clear error if it
+    ///      never does — refusing to dispatch into the wrong window is
+    ///      always safer than guessing.
+    ///
+    /// Returns `Ok(())` when it's safe to dispatch native input;
+    /// `Err(CortexError::ExecutionFailed)` otherwise.
+    pub fn ensure_browser_focus(
+        &self,
+        action_kind: &str,
+    ) -> Result<(), CortexError> {
+        // No CDP client = this cortex isn't driving a browser. Native
+        // input is the intended primary path; don't gate.
+        if self.cdp_client.is_none() {
+            return Ok(());
+        }
+
+        // `with_native_input_unsafe()` is the caller's explicit opt-in:
+        // they've accepted that the session is isolated enough that
+        // stray keystrokes are fine, and they want to drive non-browser
+        // apps too. The browser-focus guard must defer to that opt-in
+        // — otherwise scenarios that hand off to Numbers / Finder /
+        // Notes can never send keys, because the guard would keep
+        // trying to raise Chrome back to the front.
+        if self.allow_native_input {
+            return Ok(());
+        }
+
+        // Fast path: already focused on a browser.
+        if frontmost_is_browser() {
+            return Ok(());
+        }
+
+        warn!(
+            action = action_kind,
+            "Native input about to fire while focus is off the CDP browser — activating"
+        );
+        // Try to raise the preferred CDP browser. Poll ~1.2s for focus
+        // to land; frontmost changes via osascript are near-instant on
+        // macOS but can take up to ~1s on a busy system.
+        let _ = cel_cdp::activate_preferred_browser_target();
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(1_200) {
+            if frontmost_is_browser() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+
+        let frontmost = get_frontmost_app_name().unwrap_or_else(|| "unknown".into());
+        Err(CortexError::ExecutionFailed(format!(
+            "Focus guard refused {action_kind}: frontmost app is \"{frontmost}\", \
+             not the CEL CDP browser. Raising the browser via osascript \
+             didn't land focus within 1.2s — aborting rather than sending \
+             keystrokes to the wrong window."
+        )))
+    }
+
+    /// Runtime refusal of `ax_action` / `click` on web content.
+    ///
+    /// When a CDP client is bound AND the frontmost app is a
+    /// browser, `ax:*` target_ids on page content are almost always
+    /// wrong: the AX tree for a web page is a brittle projection of
+    /// the DOM, and actions routed through it land on whatever
+    /// happens to be focused (often nothing). Refusing them here
+    /// forces the planner onto the `cdp_eval` path for in-page work,
+    /// where CEL has full reliability.
+    ///
+    /// Returns `Some(reason)` when the action should be refused, or
+    /// `None` to let it proceed. `ax:*` targets for browser chrome
+    /// (tabs, bookmarks bar) still work — the runner rejects on
+    /// target prefix + browser focus, not on element type, and
+    /// legitimate browser-chrome AX ids don't come up in web-content
+    /// goals in practice.
+    fn refuse_ax_on_browser_page(
+        &self,
+        target_id: &str,
+        action: &str,
+    ) -> Option<String> {
+        if self.cdp_client.is_none() {
+            return None;
+        }
+        if !target_id.starts_with("ax:") {
+            return None;
+        }
+        if !frontmost_is_browser() {
+            return None;
+        }
+        Some(format!(
+            "runtime refuses {action} on `{target_id}`: \
+             CDP is bound to a browser; in-page interactions must go through \
+             `cdp_eval` (click via DOM, not AX). Switch to a cdp_eval action \
+             such as `document.querySelector('...').click()` or \
+             `window.location.href = '<url>'`."
+        ))
+    }
+
+    /// Target-app focus gate. If the last successful `activate_app`
+    /// named an app X, and X isn't currently frontmost (another app
+    /// has stolen focus — a notification, an editor, the session this
+    /// eval was spawned from), re-raise X synchronously before the
+    /// keystroke dispatches. Best-effort: failures are swallowed
+    /// because the caller is already past the safety gate at this
+    /// point — we're trying to un-steal focus, not refuse the action.
+    ///
+    /// Only fires when `allow_native_input` is on. In browser-only
+    /// cortexes the browser-focus gate above already handled this.
+    fn ensure_target_app_focus(&self) {
+        if !self.allow_native_input {
+            return;
+        }
+        let target = match self.last_activated_app.lock() {
+            Ok(g) => g.clone(),
+            Err(_) => return,
+        };
+        let Some(target) = target else {
+            return;
+        };
+        let target_lower = target.to_lowercase();
+        if let Some(current) = get_frontmost_app_name() {
+            if current.to_lowercase().contains(&target_lower)
+                || target_lower.contains(&current.to_lowercase())
+            {
+                return;
+            }
+            tracing::debug!(
+                target = %target,
+                current = %current,
+                "Pre-keystroke focus gate: target app not frontmost, re-raising"
+            );
+        }
+        let safe_name = target.replace('"', "\\\"");
+        // System Events `set frontmost := true` is the same incantation
+        // activate_app uses; re-firing it here keeps the dispatch path
+        // simple and consistent with launch-time behavior.
+        let script = format!(
+            r#"tell application "System Events"
+                 repeat with p in (every application process whose name is "{}" or name contains "{}")
+                   set frontmost of p to true
+                 end repeat
+               end tell"#,
+            safe_name, safe_name
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .status();
+        // Short settle so the window server flushes the activation
+        // before the keystroke lands. 150ms is empirically enough on
+        // fast dev machines; shorter and the next CGEvent races the
+        // focus change, longer and every step adds observable latency.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
     /// Execute a planner action through native CEL primitives.
     ///
     /// This is the first migration slice: native/non-browser actions are owned
@@ -924,6 +1137,9 @@ impl Cortex {
 
         let result = match action {
             PlannedAction::Click { target_id } => {
+                if let Some(reason) = self.refuse_ax_on_browser_page(target_id, "click") {
+                    return Ok(ActionResult::fail(reason));
+                }
                 if let Some(element) = find_element(context, target_id) {
                     if try_ax_action(target_id, "click")? {
                         ActionResult::ok()
@@ -942,6 +1158,13 @@ impl Cortex {
                 }
             }
             PlannedAction::Type { target_id, text } => {
+                // No target_id means "type into whatever's focused" — the
+                // exact case the focus gate prevents. Target-bound Type
+                // still clicks first, but typing itself still goes OS-level.
+                if let Err(e) = self.ensure_browser_focus("type") {
+                    return Ok(ActionResult::fail(e.to_string()));
+                }
+                self.ensure_target_app_focus();
                 let mut controller = create_controller()
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 if let Some(target_id) = target_id {
@@ -965,6 +1188,10 @@ impl Cortex {
                 ActionResult::ok()
             }
             PlannedAction::Key { key } => {
+                if let Err(e) = self.ensure_browser_focus("key") {
+                    return Ok(ActionResult::fail(e.to_string()));
+                }
+                self.ensure_target_app_focus();
                 let mut controller = create_controller()
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 controller
@@ -973,6 +1200,10 @@ impl Cortex {
                 ActionResult::ok()
             }
             PlannedAction::KeyCombo { keys } => {
+                if let Err(e) = self.ensure_browser_focus("key_combo") {
+                    return Ok(ActionResult::fail(e.to_string()));
+                }
+                self.ensure_target_app_focus();
                 let mut controller = create_controller()
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
@@ -1027,15 +1258,54 @@ impl Cortex {
                 tokio::time::sleep(std::time::Duration::from_millis(*ms as u64)).await;
                 ActionResult::ok()
             }
-            PlannedAction::AxAction { target_id, action } => {
-                if try_ax_action(target_id, action)? {
-                    ActionResult::ok()
-                } else {
-                    ActionResult::fail(format!("AX action \"{action}\" failed on \"{target_id}\""))
+            PlannedAction::AxAction { target_id, action, label, role_hint } => {
+                if let Some(reason) = self.refuse_ax_on_browser_page(target_id, action) {
+                    return Ok(ActionResult::fail(reason));
+                }
+                // Primary: try the planner-supplied target_id. AX ids
+                // are bounds-hashed and therefore fragile across tree
+                // mutations (animations, focus shifts, popovers).
+                match try_ax_action(target_id, action) {
+                    Ok(true) => ActionResult::ok(),
+                    Ok(false) | Err(_) => {
+                        // Fallback: if the LLM supplied a `label`, ask
+                        // the live AX tree to resolve role+label → id
+                        // and try again. This recovers from the common
+                        // stale-hash failure mode without the planner
+                        // needing to re-plan.
+                        if let Some(lbl) = label.as_deref() {
+                            if let Some(resolved) =
+                                resolve_ax_by_label(lbl, role_hint.as_deref())
+                            {
+                                if try_ax_action(&resolved, action).unwrap_or(false) {
+                                    tracing::info!(
+                                        target_id = %target_id,
+                                        resolved = %resolved,
+                                        label = %lbl,
+                                        "ax_action fell back to label resolution"
+                                    );
+                                    return Ok(ActionResult::ok());
+                                }
+                            }
+                        }
+                        ActionResult::fail(format!(
+                            "AX action \"{action}\" failed on \"{target_id}\"{}",
+                            label.as_ref().map(|l| format!(" (label=\"{l}\" also not found)")).unwrap_or_default()
+                        ))
+                    }
                 }
             }
             PlannedAction::ActivateApp { app_name } => {
-                activate_app_with_verification(app_name)?
+                let result = activate_app_with_verification(app_name)?;
+                if result.success {
+                    // Remember the target so subsequent Key/KeyCombo/Type
+                    // actions can re-raise it if focus drifts. See
+                    // `ensure_target_app_focus`.
+                    if let Ok(mut guard) = self.last_activated_app.lock() {
+                        *guard = Some(app_name.clone());
+                    }
+                }
+                result
             }
             PlannedAction::Select {
                 from_x,
@@ -1096,6 +1366,16 @@ impl Cortex {
                 ActionResult::fail(format!("Could not resolve: {instruction}"))
             }
             PlannedAction::CdpEval { expression } => {
+                // Navigation-style cdp_eval (window.location.href = '<url>')
+                // must not be dispatched into whatever stale page target
+                // connect_to_focused_app() happens to bind. Detect it here
+                // and reset CEL's dedicated automation browser to a fresh
+                // page target at the requested URL before falling through.
+                if let Some(nav_url) = extract_navigation_url(expression) {
+                    if let Err(e) = cel_cdp::reset_preferred_target(&nav_url) {
+                        tracing::debug!("reset_preferred_target({}) failed: {}", nav_url, e);
+                    }
+                }
                 // Every cdp_eval is preceded by a small, idempotent prelude
                 // that patches `HTMLSelectElement.prototype.value` to also
                 // match by option text when the supplied value doesn't
@@ -1122,7 +1402,41 @@ impl Cortex {
                     Err(e) => ActionResult::fail(e),
                 }
             }
+            PlannedAction::Navigate { url } => {
+                if let Err(e) = cel_cdp::reset_preferred_target(url) {
+                    tracing::debug!("reset_preferred_target({}) failed: {}", url, e);
+                }
+                let sanitized = url.replace('\'', "\\'");
+                let expression = format!(
+                    "(function() {{ window.location.href = '{}'; return 'navigating'; }})()",
+                    sanitized
+                );
+                let full_expression = format!("{CEL_SELECT_PATCH_PRELUDE}\n{expression}");
+                match tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let client = cel_cdp::connect_to_focused_app().await;
+                        match client {
+                            Some(c) => match c.evaluate(&full_expression).await {
+                                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                                Err(e) => Err(format!("CDP eval failed: {e}")),
+                            },
+                            None => Err("No CDP target available".into()),
+                        }
+                    })
+                }) {
+                    Ok(result) => ActionResult { success: true, error: None, data: Some(serde_json::Value::String(result)) },
+                    Err(e) => ActionResult::fail(e),
+                }
+            }
+            PlannedAction::WriteCells {
+                app,
+                sheet,
+                table,
+                writes,
+                verify,
+            } => self.dispatch_write_cells(app, sheet.as_deref(), table.as_deref(), writes, *verify),
             PlannedAction::Extract { .. }
+            | PlannedAction::ExtractWithFallback { .. }
             | PlannedAction::Done { .. }
             | PlannedAction::Fail { .. }
             | PlannedAction::NotebookWrites { .. } => ActionResult::ok(),
@@ -1135,6 +1449,112 @@ impl Cortex {
         }
 
         Ok(result)
+    }
+
+    /// Route a `WriteCells` action to the correct scripting backend.
+    /// Currently only Numbers is wired up; other apps return a clean
+    /// runtime error so the planner can pivot instead of silently
+    /// falling back to a path we know produces garbage (keystrokes).
+    fn dispatch_write_cells(
+        &self,
+        app: &str,
+        sheet: Option<&str>,
+        table: Option<&str>,
+        writes: &[cel_planner::CellWrite],
+        verify: bool,
+    ) -> crate::adapter::ActionResult {
+        use crate::adapter::ActionResult;
+        if !app.eq_ignore_ascii_case("Numbers") {
+            return ActionResult::fail(format!(
+                "write_cells currently only supports app=\"Numbers\"; got \"{app}\". \
+                 Use Numbers or fall back to cdp_eval for web spreadsheets."
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let cell_writes: Vec<cel_input::CellWrite> = writes
+                .iter()
+                .map(|w| cel_input::CellWrite {
+                    cell_ref: w.cell_ref.clone(),
+                    value: w.value.clone(),
+                })
+                .collect();
+            match cel_input::write_numbers_cells(sheet, table, &cell_writes, verify) {
+                Ok(readbacks) => {
+                    if verify {
+                        // Compare readback vs requested, with numeric
+                        // tolerance (Numbers canonicalizes "108432.50"
+                        // → "108432.5", "$108,432.50" → "108432.5").
+                        let mut mismatches = Vec::new();
+                        for (w, got) in cell_writes.iter().zip(readbacks.iter()) {
+                            if !cells_match(&w.value, got) {
+                                mismatches.push(format!(
+                                    "{}: wrote \"{}\" got \"{}\"",
+                                    w.cell_ref, w.value, got
+                                ));
+                            }
+                        }
+                        if !mismatches.is_empty() {
+                            return ActionResult::fail(format!(
+                                "write_cells verification failed: {}",
+                                mismatches.join("; ")
+                            ));
+                        }
+                    }
+                    let data = serde_json::json!({
+                        "app": app,
+                        "writes": cell_writes
+                            .iter()
+                            .zip(readbacks.iter().chain(std::iter::repeat(&String::new())))
+                            .map(|(w, got)| {
+                                serde_json::json!({
+                                    "ref": w.cell_ref,
+                                    "requested": w.value,
+                                    "readback": got,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    });
+                    ActionResult {
+                        success: true,
+                        error: None,
+                        data: Some(data),
+                    }
+                }
+                Err(e) => ActionResult::fail(format!("write_cells failed: {e}")),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (sheet, table, writes, verify);
+            ActionResult::fail(
+                "write_cells requires macOS (AppleScript backend)".into(),
+            )
+        }
+    }
+}
+
+/// Loose equality for write_cells verification. Numbers canonicalizes
+/// numeric input when the cell format is Number: `"108432.50"` becomes
+/// `"108432.5"`, `"$108,432.50"` becomes `"108432.5"`. Compare as
+/// floats when both sides parse; otherwise fall back to trimmed
+/// string equality.
+fn cells_match(requested: &str, got: &str) -> bool {
+    let r = requested.trim();
+    let g = got.trim();
+    if r == g {
+        return true;
+    }
+    let strip = |s: &str| {
+        s.replace(['$', ',', ' '], "")
+            .trim_end_matches('%')
+            .to_string()
+    };
+    let rn = strip(r).parse::<f64>().ok();
+    let gn = strip(g).parse::<f64>().ok();
+    match (rn, gn) {
+        (Some(a), Some(b)) => (a - b).abs() < 1e-6 * a.abs().max(1.0),
+        _ => false,
     }
 }
 
@@ -1150,10 +1570,93 @@ fn bounds_center(element: &cel_context::ContextElement) -> Option<(i32, i32)> {
     ))
 }
 
+/// Recognize navigation-style `cdp_eval` and extract the destination URL.
+///
+/// Matches patterns the planner is known to emit, including:
+///   * `window.location.href = '<url>'`
+///   * `window.location.href='<url>'`
+///   * `location.href = "<url>"`
+///   * `(function() { window.location.href = '<url>'; return 'navigating'; })()`
+///
+/// Returns `None` for non-navigation evals. A returned URL has had surrounding
+/// quotes stripped and is safe to hand to `reset_preferred_target`.
+fn extract_navigation_url(expression: &str) -> Option<String> {
+    let normalized = expression.trim();
+    let needle = "location.href";
+    let idx = normalized.find(needle)?;
+    let after = &normalized[idx + needle.len()..];
+    let eq = after.find('=')?;
+    let rest = after[eq + 1..].trim_start();
+    let bytes = rest.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let quote = bytes[0];
+    if quote != b'"' && quote != b'\'' && quote != b'`' {
+        return None;
+    }
+    let tail = &rest[1..];
+    let end = tail.find(quote as char)?;
+    let url = &tail[..end];
+    if url.is_empty() {
+        return None;
+    }
+    Some(url.to_string())
+}
+
 fn try_ax_action(target_id: &str, action: &str) -> Result<bool, CortexError> {
     let tree = cel_accessibility::create_tree();
     tree.perform_action(target_id, action)
         .map_err(|e| CortexError::ExecutionFailed(e.to_string()))
+}
+
+/// Resolve a label (and optional role hint) to a live AX element id
+/// by querying the accessibility tree right now. Used as a fallback
+/// when the planner-supplied hash id isn't found — typically because
+/// the tree mutated between plan time and dispatch time (animations,
+/// focus shift, modal appearing). Returns the first visible match.
+fn resolve_ax_by_label(label: &str, role_hint: Option<&str>) -> Option<String> {
+    let tree = cel_accessibility::create_tree();
+    let role = role_hint.and_then(parse_role_hint);
+    let matches = tree.find_elements(role.as_ref(), Some(label)).ok()?;
+    matches.into_iter().find(|e| e.state.visible).map(|e| e.id)
+}
+
+/// Map a free-form role string from the LLM ("button", "AXButton",
+/// "text field", …) onto [`cel_accessibility::ElementRole`]. Unknown
+/// roles return `None` so the fallback search matches on label alone.
+fn parse_role_hint(hint: &str) -> Option<cel_accessibility::ElementRole> {
+    use cel_accessibility::ElementRole;
+    let normalized = hint
+        .trim()
+        .to_ascii_lowercase()
+        .trim_start_matches("ax")
+        .replace('_', "")
+        .replace('-', "")
+        .replace(' ', "");
+    Some(match normalized.as_str() {
+        "button" => ElementRole::Button,
+        "input" | "textfield" | "text" => ElementRole::Input,
+        "checkbox" => ElementRole::Checkbox,
+        "radiobutton" | "radio" => ElementRole::RadioButton,
+        "combobox" | "popupbutton" => ElementRole::ComboBox,
+        "slider" => ElementRole::Slider,
+        "menu" => ElementRole::Menu,
+        "menuitem" => ElementRole::MenuItem,
+        "tab" => ElementRole::Tab,
+        "tabitem" => ElementRole::TabItem,
+        "link" => ElementRole::Link,
+        "image" => ElementRole::Image,
+        "list" => ElementRole::List,
+        "listitem" | "row" | "tablerow" => ElementRole::ListItem,
+        "cell" | "tablecell" => ElementRole::TableCell,
+        "window" => ElementRole::Window,
+        "dialog" => ElementRole::Dialog,
+        "group" => ElementRole::Group,
+        "toolbar" => ElementRole::Toolbar,
+        "" => return None,
+        _ => return None,
+    })
 }
 
 fn try_set_value(target_id: &str, value: &str) -> Result<bool, CortexError> {
@@ -1389,14 +1892,19 @@ fn action_requires_native_input(action: &PlannedAction) -> bool {
         | PlannedAction::ActivateApp { .. }
         | PlannedAction::Select { .. }
         | PlannedAction::Act { .. }
-        | PlannedAction::Custom { .. } => true,
+        | PlannedAction::Custom { .. }
+        // write_cells fires osascript → system events → target app;
+        // treat it like any other native-input action for gating.
+        | PlannedAction::WriteCells { .. } => true,
         // Pure / control / browser-safe — always allowed.
         PlannedAction::Wait { .. }
         | PlannedAction::Done { .. }
         | PlannedAction::Fail { .. }
         | PlannedAction::Extract { .. }
+        | PlannedAction::ExtractWithFallback { .. }
         | PlannedAction::NotebookWrites { .. }
-        | PlannedAction::CdpEval { .. } => false,
+        | PlannedAction::CdpEval { .. }
+        | PlannedAction::Navigate { .. } => false,
         // Batch is a wrapper — recurse and require native input only if any
         // inner action does.
         PlannedAction::Batch { actions } => {
@@ -1417,6 +1925,7 @@ fn action_type_str(action: &PlannedAction) -> &str {
         PlannedAction::Wait { .. } => "wait",
         PlannedAction::Custom { .. } => "custom",
         PlannedAction::Extract { .. } => "extract",
+        PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback",
         PlannedAction::Batch { .. } => "batch",
         PlannedAction::Act { .. } => "act",
         PlannedAction::Done { .. } => "done",
@@ -1425,7 +1934,9 @@ fn action_type_str(action: &PlannedAction) -> &str {
         PlannedAction::ActivateApp { .. } => "activate_app",
         PlannedAction::Select { .. } => "select",
         PlannedAction::CdpEval { .. } => "cdp_eval",
+        PlannedAction::Navigate { .. } => "navigate",
         PlannedAction::NotebookWrites { .. } => "notebook_writes",
+        PlannedAction::WriteCells { .. } => "write_cells",
     }
 }
 
@@ -1549,36 +2060,53 @@ fn activate_app_with_verification(
     let activated_preferred_browser = is_browser && cel_cdp::activate_preferred_browser_target();
 
     if !activated_preferred_browser {
-        // Use AppleScript to activate — more reliable than `open -a` for
-        // already-running apps like Finder, and works for all apps.
-        let activate_script = format!(
-            "tell application \"{}\" to activate",
-            app_name.replace('"', "\\\"")
+        // Escalating-aggression activation. macOS apps don't always
+        // "win" frontmost against whatever process currently has focus
+        // — a plain `tell app to activate` can silently lose the race
+        // when the runtime is spawned from a session where another app
+        // keeps grabbing events. So we fire three things in order:
+        //   1. AppleScript activate to launch / wake the app.
+        //   2. `open -a` as a safety net for apps that ignore AS.
+        //   3. `System Events` sets `frontmost := true` on the process
+        //      directly, which is the closest AppleScript gets to
+        //      NSRunningApplication.activateIgnoringOtherApps. This is
+        //      what actually pins the app to the front when another
+        //      session process is fighting for focus.
+        let safe_name = app_name.replace('"', "\\\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &format!("tell application \"{safe_name}\" to activate")])
+            .status();
+        let _ = std::process::Command::new("open")
+            .arg("-a")
+            .arg(app_name)
+            .status();
+        // Force-frontmost via System Events. Run twice with a short
+        // gap — the first call tends to wake the process, the second
+        // actually flips frontmost once the window server catches up.
+        let force_frontmost = format!(
+            r#"tell application "System Events"
+                 repeat with p in (every application process whose name is "{safe_name}" or name contains "{safe_name}")
+                   set frontmost of p to true
+                 end repeat
+               end tell"#
         );
-        let status = std::process::Command::new("osascript")
-            .args(["-e", &activate_script])
-            .status()
-            .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
-
-        if !status.success() {
-            // Fallback: try `open -a` (handles apps that don't respond to AppleScript)
-            let fallback = std::process::Command::new("open")
-                .arg("-a")
-                .arg(app_name)
-                .status()
-                .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
-            if !fallback.success() {
-                return Ok(ActionResult::fail(format!(
-                    "Failed to activate app \"{app_name}\""
-                )));
-            }
-        }
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &force_frontmost])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &force_frontmost])
+            .status();
     }
 
-    // Poll to verify the app actually became frontmost (up to 2 seconds)
+    // Poll to verify the app actually became frontmost. Cold-start
+    // launches (Numbers, Pages, Keynote) can take 4–6s when iCloud
+    // sync kicks in on first open, so the ceiling is generous —
+    // failing too early was causing legitimate launches to misreport.
     let target_lower = app_name.to_lowercase();
-    for _ in 0..4 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(400));
         if let Some(frontmost) = get_frontmost_app_name() {
             if frontmost.to_lowercase().contains(&target_lower)
                 || target_lower.contains(&frontmost.to_lowercase())
@@ -1588,12 +2116,57 @@ fn activate_app_with_verification(
         }
     }
 
+    // Second chance: even if another app technically holds the
+    // frontmost flag (common on macOS when a modal dialog is layered
+    // over a launching app), Numbers / Pages / etc. are effectively
+    // "the active app" if their process is visible with a window.
+    // NSWorkspace's frontmost heuristics can flicker during launch;
+    // deferring to "is the app running with a visible window" gives
+    // a more useful readout for the downstream sub-goal.
+    if app_is_running_with_visible_window(&target_lower) {
+        return Ok(ActionResult::ok());
+    }
+
     Ok(ActionResult::fail(format!(
         "App \"{app_name}\" was activated but did not become frontmost"
     )))
 }
 
+/// Best-effort check: is the named app in the running-apps list with
+/// at least one on-screen window? Useful during the narrow window
+/// after `open -a` where the app exists but hasn't won frontmost yet.
+fn app_is_running_with_visible_window(name_lower: &str) -> bool {
+    let script = format!(
+        r#"tell application "System Events"
+             set hits to (name of application processes whose name contains "{}" or "{}" contains name)
+             return length of hits
+           end tell"#,
+        name_lower, name_lower
+    );
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            s.parse::<u32>().ok()
+        })
+        .map(|n| n > 0)
+        .unwrap_or(false)
+}
+
 /// Get the name of the current frontmost application via System Events.
+/// True when the currently-frontmost macOS app name matches one of the
+/// CDP-capable browsers CEL knows about. Used by the focus gate so
+/// native-input actions don't fire into the wrong window.
+fn frontmost_is_browser() -> bool {
+    let Some(name) = get_frontmost_app_name() else {
+        return false;
+    };
+    let lower = name.to_lowercase();
+    CDP_BROWSERS.iter().any(|b| lower.contains(b))
+}
+
 fn get_frontmost_app_name() -> Option<String> {
     let output = std::process::Command::new("osascript")
         .args([

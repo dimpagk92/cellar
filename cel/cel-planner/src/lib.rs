@@ -51,25 +51,32 @@
 //! # }
 //! ```
 
+pub mod canonical;
+pub mod canonical_plan_producer;
 pub mod decompose;
 pub mod distiller;
 mod error;
 pub mod history;
-pub mod loop_detector;
+pub mod llm_plan_producer;
 mod planner;
 pub mod prompt;
 pub mod signals;
 mod types;
 
+pub use canonical::{
+    AttemptRecord, FailureReport, GoalOutcome, NextMove, Plan, RunLimits, RuntimeCaps, Step,
+    StepKind, StepResult, SubGoal,
+};
+pub use canonical_plan_producer::{DoneVerdict, PlanProducer};
+pub use llm_plan_producer::{build_user_prompt as build_next_move_user_prompt, LlmPlanProducer, NEXT_MOVE_SYSTEM_PROMPT};
 pub use error::PlannerError;
 pub use history::StepHistory;
-pub use loop_detector::{context_fingerprint, LoopDetector, LoopSignal};
 pub use planner::{find_blocking_error, validate_grounding, Planner, PlannerBackend};
 pub use prompt::{build_user_prompt, PromptOptions, PromptResult};
 pub use signals::{CortexSignals, LoadingSignal};
 pub use types::{
-    ContextDetail, ContextTier, GoalConfig, NotebookWrite, PlannedAction, PlannedPlan,
-    PlannedStep, PlannerEvent, ProgressAssessment, StepRecord,
+    CellWrite, ContextDetail, ContextTier, GoalConfig, NotebookWrite, PlannedAction,
+    PlannedPlan, PlannedStep, PlannerEvent, ProgressAssessment, StepRecord,
 };
 
 /// Create a planner from environment-configured LLM.

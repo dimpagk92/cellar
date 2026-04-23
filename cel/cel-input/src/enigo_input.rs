@@ -40,10 +40,21 @@ fn parse_key(key: &str) -> Result<enigo::Key, InputError> {
         "backspace" => Ok(enigo::Key::Backspace),
         "delete" => Ok(enigo::Key::Delete),
         "space" => Ok(enigo::Key::Space),
-        "up" => Ok(enigo::Key::UpArrow),
-        "down" => Ok(enigo::Key::DownArrow),
-        "left" => Ok(enigo::Key::LeftArrow),
-        "right" => Ok(enigo::Key::RightArrow),
+        "up" | "uparrow" | "arrowup" | "up arrow" | "up_arrow" | "arrow up" => {
+            Ok(enigo::Key::UpArrow)
+        }
+        "down" | "downarrow" | "arrowdown" | "down arrow" | "down_arrow" | "arrow down" => {
+            Ok(enigo::Key::DownArrow)
+        }
+        "left" | "leftarrow" | "arrowleft" | "left arrow" | "left_arrow" | "arrow left" => {
+            Ok(enigo::Key::LeftArrow)
+        }
+        "right"
+        | "rightarrow"
+        | "arrowright"
+        | "right arrow"
+        | "right_arrow"
+        | "arrow right" => Ok(enigo::Key::RightArrow),
         "home" => Ok(enigo::Key::Home),
         "end" => Ok(enigo::Key::End),
         "pageup" => Ok(enigo::Key::PageUp),

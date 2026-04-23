@@ -9,7 +9,7 @@ We welcome contributions of all kinds. This guide helps you get started.
 | Area | Difficulty | What to do |
 |------|-----------|------------|
 | Documentation | Easy | Improve docs, add examples, fix typos |
-| Test coverage | Easy | Add tests for existing code |
+| Test coverage | Easy | Add tests for existing code (see `docs/TEST_INVENTORY.md`) |
 | Bug reports | Easy | File issues with reproduction steps |
 | Adapters | Medium | Build a new adapter for an application you use (see [docs/building-adapters.md](docs/building-adapters.md)) |
 | macOS accessibility | Medium-Hard | Implement AXUIElement bridge in `cel-accessibility/` |
@@ -65,11 +65,12 @@ cellar/
   mcp-server/           MCP server (4 tools)
   agent/                Workflow execution engine (TypeScript)
   cli/                  CLI tool
-  adapters/             Application-specific adapters (browser bundled)
-  cellar-worker/        Worker daemon (remote execution, preview)
+  adapters/             Application-specific adapters
+  recorder/             Training/recording system
+  live-view/            Screen streaming server
+  registry/             Community workflow registry (planned)
   docs/                 Documentation
-  examples/             Runnable examples
-  tests/                Cross-package integration tests
+  benchmarks/           Performance benchmarks
 ```
 
 ## Submitting Changes
@@ -127,5 +128,5 @@ The MCP server (`mcp-server/`) is new. Ideas for improvement:
 ## License
 
 By contributing, you agree that your contributions will be licensed under:
-- **Core runtime** (`cel/`, `agent/`, `cli/`, `mcp-server/`, `cellar-worker/`, `docs/`, `examples/`, `tests/`): Apache License 2.0
+- **Everything OSS-destined** (`cel/`, `agent/`, `cli/`, `mcp-server/`, `cellar-worker/`, `live-view/`, `recorder/`, `registry/`, `docs/`, `benchmarks/`, `examples/`, `e2e/`, `tests/`, `box/`): Apache License 2.0
 - **Community adapters** (`adapters/`): MIT License

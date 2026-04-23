@@ -44,7 +44,8 @@ Shipped as of April 2026.
 | **Interactive first-run setup** (`cellar init`) | `cli/src/commands/init.ts` |
 | **Config file** at `~/.cellar/config.toml` — env vars take precedence | `LlmProviderConfig::from_config_file` |
 | Per-role LLM routing (Planner / Observer / Vision / Validator / …) | `LlmRole` enum |
-| Browser adapter via CDP | `adapters/browser/` |
+| Benchmark suite — Hybrid (5 tasks) + general web (50+) | `benchmarks/` |
+| First-party adapters — Excel, SAP GUI, Bloomberg, MetaTrader | `adapters/` |
 
 ---
 
@@ -98,7 +99,7 @@ Shipped as of April 2026.
 
     And matching env vars (`CEL_RUNTIME_BACKEND`, `CEL_RUNTIME_URL`, `CEL_RUNTIME_TOKEN`).
 
-6. **Integration tests** — end-to-end: local cellar → remote worker (docker-compose) → browser goal → verified outcome.
+6. **Integration tests** — end-to-end: local cellar → remote worker (docker-compose) → browser goal → verified outcome. Live in `e2e/remote/`.
 
 ### Success criteria
 
@@ -127,6 +128,7 @@ Shipped as of April 2026.
 - Worker pool mode: a thin control-plane orchestrates N workers behind a load balancer
 - Per-tenant filesystem isolation + clipboard scoping
 
+Depends on [`PRODUCTION_HARDENING.md`](../PRODUCTION_HARDENING.md) landing.
 
 ---
 
@@ -137,8 +139,22 @@ Shipped as of April 2026.
 - **Control plane** (new, private repo): auth, billing, fleet orchestration, workflow registry backend.
 - **Managed LLM proxy** — bundled model access. "Use Cellar's models, one bill." Opt-in.
 - **macOS-in-cloud** — pool of EC2 Mac / MacStadium hosts for customers who need native macOS automation remotely. Same wire protocol as Docker workers.
-- **Hosted workflow marketplace** — community adapter + goal registry.
+- **Hosted workflow marketplace** — backend for the community registry (client exists at `registry/`).
 - **Wire protocol**: reuses Phase 1. Managed = Remote pointed at our infra. No new protocol.
+
+---
+
+## Phase 4 — Hard OSS/Commercial Repo Split 💭
+
+**Target: when the commercial boundary stops moving. Likely 12+ months.**
+
+Today: single private monorepo, OSS subset mirrored to `github.com/dimpagk92/cellar` on each release (see [oss-boundary.md](oss-boundary.md)).
+
+Later: true two-repo split with the commercial product depending on published OSS crates/packages. Deferred because:
+
+- The commercial/OSS boundary is still drifting as we figure out what's paid.
+- Monorepo velocity is higher than a two-repo split would allow for a small team.
+- The mirror pattern already produces a clean public artifact for grants (NGI) and adoption.
 
 ---
 
@@ -149,6 +165,14 @@ To avoid over-committing:
 - **Full Windows UI Automation bridge** — designed, not prioritized. Linux workers cover Phase 1. Windows waits for demand.
 - **Training or fine-tuning our own models** — not a differentiator. Frontier models + Gemma 4 locally cover the field.
 - **Mobile automation (iOS / Android)** — out of scope indefinitely.
+
+---
+
+## Related Plans (active, parallel tracks)
+
+- [`HYBRID_SUITE_FINALIZATION_PLAN.md`](../HYBRID_SUITE_FINALIZATION_PLAN.md) — benchmark stability. Blocks Phase 1 "buyer-ready proof artifact."
+- [`PRODUCTION_HARDENING.md`](../PRODUCTION_HARDENING.md) — security/robustness fixes. Blocks Phase 2.
+- [`RUNTIME_KERNEL_CONSOLIDATION_PLAN.md`](../RUNTIME_KERNEL_CONSOLIDATION_PLAN.md) — orchestration sprawl reduction. Ongoing, unblocks faster Phase 1 iteration.
 
 ---
 

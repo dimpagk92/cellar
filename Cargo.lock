@@ -685,6 +685,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -761,6 +762,8 @@ dependencies = [
  "cel-context",
  "cel-cortex",
  "cel-goal-runner",
+ "cel-llm",
+ "cel-planner",
  "reqwest",
  "serde",
  "serde_json",

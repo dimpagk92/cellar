@@ -22,6 +22,27 @@ mod planner;
 mod store;
 mod watchdog;
 
+/// Initialize tracing subscriber on first access so RUST_LOG works inside the
+/// NAPI-hosted runtime. Without this, all cel-crates `tracing::*` calls are
+/// silently dropped and the host can't diagnose what the agent is doing.
+static TRACING_INIT: std::sync::Once = std::sync::Once::new();
+
+fn ensure_tracing_init() {
+    TRACING_INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .try_init();
+    });
+}
+
+#[napi]
+pub fn init_tracing() {
+    ensure_tracing_init();
+}
+
 /// Shared Tokio runtime — created once, reused across all async operations.
 static TOKIO_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
 

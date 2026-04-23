@@ -305,7 +305,6 @@ export async function getDedicatedCdpBrowserStatus(
   requestedPort = getPreferredCelCdpPort(),
 ): Promise<DedicatedCdpBrowserStatus> {
   const version = await queryVersion(requestedPort);
-  const running = Boolean(version);
   const userDataDir = typeof version?.["User-Data-Dir"] === "string"
     ? version["User-Data-Dir"]
     : null;
@@ -318,6 +317,7 @@ export async function getDedicatedCdpBrowserStatus(
   const targetCount = discoveredTargets.length > 0
     ? discoveredTargets.length
     : await queryTargetCount(requestedPort);
+  const running = Boolean(version) || targetCount > 0;
   const processMatch = findCelBrowserProcess(requestedPort);
 
   const ownedByCel = isCelOwnedUserDataDir(userDataDir)
@@ -331,7 +331,7 @@ export async function getDedicatedCdpBrowserStatus(
     ready,
     ownedByCel,
     conflict: running && !ownedByCel,
-    browserApp: browserVersion?.split("/")[0] ?? null,
+    browserApp: browserVersion?.split("/")[0] ?? discoveredTargets[0]?.app_name ?? null,
     browserVersion,
     userDataDir,
     webSocketDebuggerUrl,

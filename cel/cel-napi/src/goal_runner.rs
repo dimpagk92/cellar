@@ -14,57 +14,131 @@
 use napi_derive::napi;
 use std::sync::Arc;
 
-use cel_goal_runner::{resolve_runtime_backend, GoalConfig, GoalRunner, NoOpCallbacks, RuntimeBackend};
+use cel_goal_runner::{
+    resolve_runtime_backend, CanonicalGoalRunner, CortexStepExecutor, GoalConfig, RuntimeBackend,
+};
+use cel_planner::{GoalOutcome, LlmPlanProducer, RunLimits};
 use cellar_worker::{SubmitGoalRequest, WorkerClient};
+use serde::Deserialize;
 
-/// Run a goal using the Rust goal-runner.
+/// Minimal config the canonical agent actually consumes. Anything else the
+/// JS caller sends is ignored — the canonical agent has no opt-in flags.
+/// See `docs/canonical-agent-plan.md` for why.
+#[derive(Debug, Clone, Deserialize)]
+struct CanonicalJsConfig {
+    goal: String,
+    #[serde(default = "default_max_steps")]
+    max_steps: u32,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+fn default_max_steps() -> u32 {
+    80
+}
+fn default_timeout_ms() -> u64 {
+    900_000
+}
+
+/// Run a goal through the canonical agent loop.
 ///
 /// When the runtime backend is `Local` (default), executes in-process via
-/// the booted Cortex. When `Remote`, submits to the configured worker and
-/// polls until completion.
-///
-/// Returns the GoalResult as a JSON string.
+/// the booted Cortex + CanonicalGoalRunner. When `Remote`, submits to the
+/// configured worker and polls until completion. Only `goal`, `max_steps`,
+/// and `timeout_ms` are honored on the JS side; legacy flags
+/// (`enable_vision`, `enable_decomposition`, `self_heal`, `enable_notebook`)
+/// are silently ignored — the canonical agent does not expose them.
 #[napi]
 pub async fn run_goal_rust(config_json: String) -> napi::Result<String> {
-    let config = parse_config(&config_json)?;
+    crate::ensure_tracing_init();
+    let config = parse_canonical_config(&config_json)?;
 
     match resolve_runtime_backend() {
-        RuntimeBackend::Local => run_local(config).await,
-        RuntimeBackend::Remote { url, token } => run_remote(url, token, config).await,
+        RuntimeBackend::Local => run_local_canonical(config).await,
+        RuntimeBackend::Remote { url, token } => run_remote_canonical(url, token, config).await,
     }
 }
 
-/// Parse `GoalConfig` from the JS side, tolerating one layer of double-stringify.
-fn parse_config(config_json: &str) -> napi::Result<GoalConfig> {
-    serde_json::from_str::<GoalConfig>(config_json)
+/// Parse the minimal canonical config from JS, tolerating double-stringify.
+fn parse_canonical_config(config_json: &str) -> napi::Result<CanonicalJsConfig> {
+    serde_json::from_str::<CanonicalJsConfig>(config_json)
         .or_else(|_| {
             let unquoted: String = serde_json::from_str(config_json).map_err(|e| {
                 napi::Error::from_reason(format!("Invalid config JSON (unwrap): {e}"))
             })?;
-            serde_json::from_str::<GoalConfig>(&unquoted)
+            serde_json::from_str::<CanonicalJsConfig>(&unquoted)
                 .map_err(|e| napi::Error::from_reason(format!("Invalid config JSON (inner): {e}")))
         })
 }
 
-async fn run_local(config: GoalConfig) -> napi::Result<String> {
+async fn run_local_canonical(config: CanonicalJsConfig) -> napi::Result<String> {
     let cortex = crate::cortex::get_cortex_handle().ok_or_else(|| {
         napi::Error::from_reason("Cortex not running — call boot_cortex() first")
     })?;
-    let callbacks = Arc::new(NoOpCallbacks);
-    let mut runner = GoalRunner::new(config, cortex, callbacks);
-    let result = runner.run().await;
-    serde_json::to_string(&result)
+    let llm_client = cel_llm::create_client().map_err(|e| {
+        napi::Error::from_reason(format!(
+            "LLM client not configured (set CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
+        ))
+    })?;
+    let planner = LlmPlanProducer::new(Arc::new(llm_client));
+    let executor = CortexStepExecutor::new(cortex);
+    let runner = CanonicalGoalRunner::new(planner, executor);
+    let limits = RunLimits {
+        max_steps: config.max_steps,
+        timeout_ms: config.timeout_ms,
+        max_step_retries: 3,
+    };
+    let outcome = runner.run(&config.goal, limits).await;
+    serde_json::to_string(&render_outcome_for_js(&outcome))
         .map_err(|e| napi::Error::from_reason(format!("Result serialization failed: {e}")))
 }
 
-async fn run_remote(url: String, token: Option<String>, config: GoalConfig) -> napi::Result<String> {
+/// Flatten a canonical [`GoalOutcome`] into the JSON shape the CLI and MCP
+/// already know how to display. Keeps `status` / `summary` / `duration_ms`
+/// stable so the TS side doesn't need a second schema migration.
+fn render_outcome_for_js(outcome: &GoalOutcome) -> serde_json::Value {
+    match outcome {
+        GoalOutcome::Succeeded {
+            summary,
+            extracted_data,
+        } => serde_json::json!({
+            "status": "Achieved",
+            "summary": summary,
+            "extracted_data": extracted_data,
+        }),
+        GoalOutcome::Failed(report) => serde_json::json!({
+            "status": "Failed",
+            "summary": format!(
+                "sub_goal `{}` / step `{}` failed after {} attempts",
+                report.failing_sub_goal,
+                report.failing_step,
+                report.attempts.len(),
+            ),
+            "failure_report": report,
+        }),
+    }
+}
+
+async fn run_remote_canonical(
+    url: String,
+    token: Option<String>,
+    config: CanonicalJsConfig,
+) -> napi::Result<String> {
     tracing::info!(%url, "dispatching goal to remote cellar-worker");
     let client = WorkerClient::new(&url, token);
 
-    let config_value = serde_json::to_value(&config).ok();
-    let goal = config.goal.clone();
+    // Wrap the canonical config in the legacy `GoalConfig` shape the
+    // worker still speaks. Once the worker migrates to the canonical
+    // agent too, this adapter goes away.
+    let worker_config = GoalConfig {
+        goal: config.goal.clone(),
+        max_steps: config.max_steps,
+        timeout_ms: config.timeout_ms,
+        ..Default::default()
+    };
+    let config_value = serde_json::to_value(&worker_config).ok();
     let req = SubmitGoalRequest {
-        goal: goal.clone(),
+        goal: config.goal.clone(),
         config: config_value,
     };
 
@@ -73,8 +147,6 @@ async fn run_remote(url: String, token: Option<String>, config: GoalConfig) -> n
         .await
         .map_err(|e| napi::Error::from_reason(format!("remote submit failed: {e}")))?;
 
-    // Cap wait at the runner's own timeout + buffer, to avoid hanging indefinitely
-    // on a stuck worker.
     let wait_secs = (config.timeout_ms / 1000).saturating_add(30).max(60);
     let details = client
         .wait_for_job(&submit.job_id, wait_secs)

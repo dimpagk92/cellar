@@ -3,7 +3,7 @@
 ## Project Structure
 
 - **Rust workspace** at repo root (`Cargo.toml`) — all `cel/` crates and `adapters/`
-- **TypeScript monorepo** via pnpm workspace — `agent/`, `mcp-server/`, `cli/`, `adapters/browser/`
+- **TypeScript monorepo** via pnpm workspace — `agent/`, `mcp-server/`, `recorder/`, `live-view/`, `registry/`, `cli/`
 - Rust <-> TypeScript bridge via **napi-rs** (`cel/cel-napi/`)
 
 ### Package Overview
@@ -23,7 +23,9 @@
 | `@cellar/agent` | TypeScript | Workflow execution engine, Cel class, TypeScript types |
 | `@dpagk/cellar-mcp` | TypeScript | MCP server (4 tools: context, action, observe, knowledge) |
 | `@cellar/cli` | TypeScript | `cellar` CLI tool |
-| `@cellar/adapter-browser` | TypeScript | Browser adapter (CDP-backed) |
+| `@cellar/recorder` | TypeScript | Training: passive observation + explicit recording |
+| `@cellar/live-view` | TypeScript | Screen streaming server (WebSocket + SSE) |
+| `@cellar/registry` | TypeScript | Community workflow registry client |
 
 ## Build Commands
 

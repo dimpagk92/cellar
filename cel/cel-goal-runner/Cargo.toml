@@ -9,7 +9,11 @@ description = "CEL Goal Runner — full Rust execution loop"
 cel-context = { workspace = true }
 cel-cdp = { workspace = true }
 cel-cortex = { workspace = true }
-cel-display = { workspace = true }
+# `xcap` feature turns on real screen capture. Without it create_capture()
+# returns a StubCapture that produces no pixels — the canonical runner's
+# screenshot_png() call then gives the planner's vision path nothing to
+# look at. Must stay on wherever the runner runs live.
+cel-display = { workspace = true, features = ["xcap"] }
 cel-input = { workspace = true }
 cel-planner = { workspace = true }
 cel-llm = { workspace = true }

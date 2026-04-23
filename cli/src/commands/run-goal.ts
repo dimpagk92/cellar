@@ -1,65 +1,39 @@
 import { Command } from "commander";
 import { Cel, ensureDedicatedCdpBrowser } from "@cellar/agent";
 
+// Canonical run-goal surface — the CLI is a thin shim over
+// `CanonicalGoalRunner::run`. The only flags are budget limits; every
+// former toggle (vision / self-heal / decompose / notebook) lives
+// inside the canonical agent loop as implicit behavior. See
+// docs/canonical-agent-plan.md.
 interface RunGoalOptions {
   maxSteps: number;
   timeoutMs: number;
-  vision: boolean;
-  selfHeal: boolean;
-  decompose: boolean;
-  notebook: boolean;
   json: boolean;
 }
 
-/**
- * Heuristic: does this goal want a browser? A goal is browser-ish if it
- * references http(s)://, a top-level domain, or common browser verbs.
- * Keep loose — false positives just cost a ~50ms no-op ensure check;
- * false negatives cost the full deterministic-path failure we saw on
- * the HN eval smoke.
- */
-function looksBrowserGoal(goal: string): boolean {
-  const lower = goal.toLowerCase();
-  if (/\bhttps?:\/\//.test(lower)) return true;
-  if (/\b(navigate|open|visit|browse|go to|extract from|read)\b/.test(lower)) {
-    return true;
-  }
-  if (/\.(com|org|net|io|dev|app|co\.|edu|gov|ai)\b/.test(lower)) return true;
-  return false;
-}
-
-interface GoalResult {
+interface CanonicalResult {
   status?: string;
   summary?: string;
-  total_steps?: number;
-  duration_ms?: number;
-  metrics?: {
-    llm_calls?: number;
-    vision_calls?: number;
-    action_successes?: number;
-    action_failures?: number;
-    replans?: number;
-    total_llm_tokens?: number;
-    stale_targets?: number;
-    refreshes?: number;
+  extracted_data?: unknown;
+  failure_report?: {
+    failing_sub_goal: string;
+    failing_step: string;
+    attempts: string[];
   };
 }
 
 export const runGoalCommand = new Command("run-goal")
-  .description("Execute a natural-language goal (routes through the full Rust goal-runner)")
+  .description("Execute a natural-language goal via the canonical Rust agent")
   .argument("<goal>", "Natural-language goal, quoted")
-  .option("--max-steps <n>", "Maximum steps before giving up", (v) => parseInt(v, 10), 30)
-  .option("--timeout-ms <n>", "Total timeout in ms", (v) => parseInt(v, 10), 120_000)
-  .option("--no-vision", "Disable vision fallback")
-  .option("--no-self-heal", "Disable self-healing retries")
-  .option("--decompose", "Enable milestone decomposition", false)
-  .option("--no-notebook", "Disable notebook persistence")
-  .option("--json", "Output raw GoalResult JSON", false)
+  .option("--max-steps <n>", "Maximum steps before giving up", (v) => parseInt(v, 10), 80)
+  .option("--timeout-ms <n>", "Total timeout in ms", (v) => parseInt(v, 10), 900_000)
+  .option("--json", "Output raw GoalOutcome JSON", false)
   .action(async (goal: string, opts: RunGoalOptions) => {
     const cel = new Cel();
     if (!cel.isNativeAvailable) {
       console.error(
-        "CEL native module not available. Build it with `cargo build -p cel-napi` and copy the .node file into cel/cel-napi/.",
+        "CEL native module not available. Build it with `cargo build -p cel-napi --release` and copy the .node file into cel/cel-napi/.",
       );
       process.exit(1);
     }
@@ -74,13 +48,12 @@ export const runGoalCommand = new Command("run-goal")
       cel.bootCortex();
     }
 
-    // Goals that mention a URL or navigation will hit the deterministic
-    // fast path, which needs a live CEL CDP browser. Eagerly ensure one
-    // when the goal looks browser-y — idempotent if the browser is
-    // already running (just verifies and returns). Non-browser goals
-    // (e.g. native desktop tasks) skip this so the TCC prompt and
-    // process-launch latency don't burn budget on them.
-    if (backend === "local" && looksBrowserGoal(goal)) {
+    // Always ensure the dedicated CEL browser when running locally.
+    // Idempotent — cheap no-op when the browser is already up. Without
+    // it, `connect_to_focused_app` would bind to whatever browser
+    // happens to be frontmost (Safari, regular Chrome, etc.) for goals
+    // whose prompt text doesn't name a URL.
+    if (backend === "local") {
       try {
         const ensure = await ensureDedicatedCdpBrowser({ cel });
         if (!ensure.ok) {
@@ -100,15 +73,12 @@ export const runGoalCommand = new Command("run-goal")
 
     const start = Date.now();
     try {
-      const result = (await cel.runGoalRust({
+      const raw = await cel.runGoalRust({
         goal,
         max_steps: opts.maxSteps,
         timeout_ms: opts.timeoutMs,
-        enable_vision: opts.vision,
-        self_heal: opts.selfHeal,
-        enable_decomposition: opts.decompose,
-        enable_notebook: opts.notebook,
-      })) as GoalResult;
+      });
+      const result = (typeof raw === "string" ? JSON.parse(raw) : raw) as CanonicalResult;
       const wallMs = Date.now() - start;
 
       if (opts.json) {
@@ -119,15 +89,15 @@ export const runGoalCommand = new Command("run-goal")
       console.log("");
       console.log("=== Result ===");
       console.log(`Status:   ${result.status ?? "(unknown)"}`);
-      console.log(`Steps:    ${result.total_steps ?? 0}`);
-      console.log(`Duration: ${result.duration_ms ?? wallMs}ms (wall: ${wallMs}ms)`);
+      console.log(`Duration: ${wallMs}ms`);
       console.log(`Summary:  ${result.summary ?? ""}`);
-      const m = result.metrics ?? {};
-      const successes = m.action_successes ?? 0;
-      const failures = m.action_failures ?? 0;
-      console.log(
-        `Metrics:  llm=${m.llm_calls ?? 0} vision=${m.vision_calls ?? 0} actions=${successes}/${successes + failures} replans=${m.replans ?? 0}`,
-      );
+      if (result.failure_report) {
+        console.log(`Failing sub-goal: ${result.failure_report.failing_sub_goal}`);
+        console.log(`Failing step:     ${result.failure_report.failing_step}`);
+        for (const [i, msg] of result.failure_report.attempts.entries()) {
+          console.log(`Attempt ${i + 1}: ${msg}`);
+        }
+      }
 
       if (result.status && result.status !== "Achieved") {
         process.exit(1);

@@ -106,22 +106,31 @@ impl ProcessDriver {
             AdapterError::Unavailable("No entrypoint in manifest".into())
         })?;
         let entrypoint_path = self.adapter_dir.join(entrypoint);
+        let current_dir = self
+            .adapter_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.adapter_dir.clone());
+        let entrypoint_arg = entrypoint_path
+            .canonicalize()
+            .unwrap_or(entrypoint_path)
+            .to_string_lossy()
+            .into_owned();
 
         // Determine how to run the entrypoint based on extension
-        let (cmd, args): (&str, Vec<&str>) = if entrypoint.ends_with(".py") {
-            ("python3", vec![entrypoint_path.to_str().unwrap_or("")])
+        let (cmd, args): (&str, Vec<String>) = if entrypoint.ends_with(".py") {
+            ("python3", vec![entrypoint_arg.clone()])
         } else if entrypoint.ends_with(".ts") || entrypoint.ends_with(".js") {
-            ("node", vec![entrypoint_path.to_str().unwrap_or("")])
+            ("node", vec![entrypoint_arg.clone()])
         } else {
             // Assume it's a binary
-            (entrypoint_path.to_str().unwrap_or(""), vec![])
+            (entrypoint_arg.as_str(), vec![])
         };
 
         debug!(adapter = %self.manifest.name, cmd = cmd, "Spawning adapter process");
 
         let mut child = Command::new(cmd)
             .args(&args)
-            .current_dir(&self.adapter_dir)
+            .current_dir(current_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit()) // adapter stderr goes to CEL's stderr for debugging

@@ -135,5 +135,6 @@ Setup: `cellar init` → option 4. Nothing leaves the machine.
 ## Related
 
 - [ROADMAP.md](ROADMAP.md) — phased delivery of each execution backend.
+- [oss-boundary.md](oss-boundary.md) — which parts of the above are OSS vs commercial.
 - [quickstart.md](quickstart.md) — hands-on setup for Shape A.
 - [architecture.md](architecture.md) — internal runtime architecture (Cortex / Goal Runner / Planner / Adapters).

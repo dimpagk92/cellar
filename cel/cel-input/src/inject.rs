@@ -8,6 +8,13 @@ pub enum InputError {
     Failed(String),
     #[error("Invalid key: {0}")]
     InvalidKey(String),
+    #[error(
+        "AppleScript automation for {app} not authorized. Grant in System Settings → \
+         Privacy & Security → Automation → <host app> → {app}"
+    )]
+    AppleScriptPermission { app: String },
+    #[error("Scripting unavailable for {app}: {reason}")]
+    ScriptingUnavailable { app: String, reason: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

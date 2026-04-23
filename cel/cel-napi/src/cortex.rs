@@ -173,7 +173,23 @@ pub fn read_cortex_model() -> napi::Result<String> {
         napi::Error::from_reason("Cortex not running. Call boot_cortex() first.")
     })?;
 
-    let model = handle.block_on(async { model_lock.read().await.clone() });
+    let mut model = handle.block_on(async { model_lock.read().await.clone() });
+    let last_event_ms = model
+        .freshness
+        .as_ref()
+        .and_then(|freshness| freshness.last_event_ms);
+    let last_significant_event_ms = model
+        .freshness
+        .as_ref()
+        .and_then(|freshness| freshness.last_significant_event_ms);
+    model.refresh_derived(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        last_event_ms,
+        last_significant_event_ms,
+    );
     serde_json::to_string(&model)
         .map_err(|e| napi::Error::from_reason(format!("Model serialize error: {}", e)))
 }

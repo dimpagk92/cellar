@@ -110,7 +110,9 @@ function extractUrlRequirements(goal: string): GoalRequirement[] {
   const matches = goal.match(/\bhttps?:\/\/[^\s),]+/g) ?? [];
 
   for (const raw of matches) {
-    const normalized = raw.replace(/\/+$/, "");
+    let stripCount = 0;
+    while (stripCount < raw.length && raw[raw.length - 1 - stripCount] === "/") stripCount++;
+    const normalized = stripCount === 0 ? raw : raw.slice(0, raw.length - stripCount);
     requirements.push({
       label: raw,
       aliases: normalized === raw ? [raw] : [raw, normalized],

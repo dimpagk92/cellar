@@ -46,7 +46,7 @@ export async function executeBrowserAction(
         const sel = el.properties.css_selector;
         const nodeId = el.properties.backend_node_id;
         try {
-          if (sel) {
+          if (sel && typeof sel === "string" && /^[A-Za-z0-9_\-#.\[\]="':>+~*\s,()^$|]+$/.test(sel)) {
             await adapter.evaluate(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (el) el.focus(); })()`);
             return true;
           }

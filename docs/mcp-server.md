@@ -1,8 +1,14 @@
 # CEL MCP Server
 
-CEL exposes its capabilities as an [MCP](https://modelcontextprotocol.io/) server, making it instantly available to Claude Code, Cursor, and any MCP-compatible client.
+CEL exposes its capabilities as an [MCP](https://modelcontextprotocol.io/) server, making it available to Claude Code, Cursor, Codex, GPT-based tool callers, LangGraph runtimes, and any other MCP-compatible client.
 
-The server sends **instructions** to every client on connect — any AI agent will automatically know how to use CEL's tools without needing external documentation.
+The MCP server is the main agent-facing boundary for the platform:
+
+- `CEL` owns perception, execution, context fusion, and adapter-backed truth
+- the MCP host owns planning by default
+- `cel_think` remains available as an optional built-in planner / memory layer when you explicitly want CEL to take over the loop
+
+The server sends **instructions** to every client on connect so an agent can use CEL without bespoke glue docs.
 
 ## Setup
 
@@ -38,15 +44,15 @@ cellar mcp
 npx @modelcontextprotocol/inspector node mcp-server/dist/index.js
 ```
 
-## Architecture: See → Act → Think → Perceive
+## Surface: See → Act → Perceive + Optional Think
 
 CEL uses four tools organized by intent:
 
 | Tool | Purpose | Modes/Actions |
 |------|---------|---------------|
 | **cel_see** | Read screen state | 14 modes |
-| **cel_act** | Execute actions | 12 actions (11 + CDP eval) |
-| **cel_think** | Plan, remember, track, autonomous execution | 17 modes |
+| **cel_act** | Execute actions | native input, CDP, and deterministic app actions |
+| **cel_think** | Optional built-in planning, memory, autonomous execution | 17 modes |
 | **cel_perceive** | Always-on perception (Cortex) | 7 modes |
 
 ---
@@ -138,6 +144,7 @@ Click, type, scroll, drag, and interact via the native accessibility API.
 
 - **Prefer `ax_action` over `click`** for buttons/checkboxes — uses the native accessibility API, more reliable than coordinate-based clicking.
 - **Prefer `set_value` over `type`** for form fields — faster and more reliable, bypasses keyboard entirely. Use `cel_see` `is_settable` mode to check first.
+- **Prefer `write_cells` / `read_cells` over AX text guessing in Numbers** — these use the Numbers document model directly.
 - For coordinate-based actions, provide `(x, y)` or a `target_ref` from `cel_see` `make_reference`.
 - Batch up to 4 actions, then re-observe with `cel_see` between batches.
 
@@ -157,6 +164,8 @@ Click, type, scroll, drag, and interact via the native accessibility API.
 | `ax_action` | `element_id, ax_action` | Native accessibility action (click, activate, press, increment, decrement, cancel, show_menu, scroll_to_visible, raise, pick, delete) |
 | `set_value` | `element_id, value` | Direct value injection (text for fields, "true"/"false" for checkboxes) |
 | `cdp_eval` | `expression` | Execute JavaScript in browser via Chrome DevTools Protocol — best for cookie banners, iframes, overlays, and elements invisible to the accessibility tree |
+| `write_cells` | `app?, sheet?, table?, writes[], verify?` | Deterministic spreadsheet write via app model (currently Numbers) |
+| `read_cells` | `app?, sheet?, table?, cell_refs[]` | Deterministic spreadsheet read via app model (currently Numbers) |
 
 ### Examples
 
@@ -212,17 +221,42 @@ Click, type, scroll, drag, and interact via the native accessibility API.
 }
 ```
 
+**Write Numbers cells deterministically:**
+
+```json
+{
+  "action": "write_cells",
+  "app": "Numbers",
+  "writes": [
+    { "cell_ref": "A1", "value": "BTC" },
+    { "cell_ref": "B1", "value": "ETH" },
+    { "cell_ref": "C1", "value": "SOL" }
+  ],
+  "verify": true
+}
+```
+
+**Read Numbers cells back from the document model:**
+
+```json
+{
+  "action": "read_cells",
+  "app": "Numbers",
+  "cell_refs": ["A1", "B1", "C1"]
+}
+```
+
 ---
 
-## cel_think — Plan, Remember, Track
+## cel_think — Optional Built-In Planner / Memory Layer
 
-CEL's cognitive layer for planning, knowledge management, workflow tracking, and LLM calls.
+Optional built-in layer for delegated autonomy, planning, knowledge management, workflow tracking, and LLM calls.
 
 ### Modes
 
 | Mode | Parameters | Description |
 |------|-----------|-------------|
-| `run_goal` | `goal`, `max_steps?`, `timeout_ms?`, `enable_vision?`, `self_heal?`, `context_lazy?`, `decompose?`, `workflow_name?`, `enable_notebook?` | Full autonomous see→plan→act loop. Defaults: 30 max steps, 120s timeout, vision/self_heal/context_lazy/notebook ON. |
+| `run_goal` | `goal`, `max_steps?` (default 80), `timeout_ms?` (default 900000) | Canonical see→plan→act loop. Vision, self-healing, decomposition, and notebook behavior are implicit in the canonical loop — no per-invocation knobs (see [canonical-agent-plan.md](canonical-agent-plan.md)). |
 | `plan` | `goal`, `history?`, `max_steps?` | LLM-powered step planning given current screen context |
 | `plan_with_vision` | `goal`, `history?` | Same as plan but also sends a screenshot for visual grounding |
 | `search_knowledge` | `query`, `workflow_scope?`, `limit` | FTS5 full-text search over knowledge base |

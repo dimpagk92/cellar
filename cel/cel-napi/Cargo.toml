@@ -26,6 +26,7 @@ cel-cdp = { workspace = true }
 cel-cortex = { workspace = true }
 cel-signals = { workspace = true }
 adapter-common = { workspace = true }
+adapter-numbers = { workspace = true }
 cel-goal-runner = { workspace = true }
 cellar-worker = { path = "../../cellar-worker" }
 tokio = { workspace = true }
@@ -33,6 +34,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
 
 # napi-rs bindings
 napi = { version = "2", features = ["async", "serde-json"] }

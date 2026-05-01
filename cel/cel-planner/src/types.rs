@@ -496,6 +496,27 @@ pub enum PlannedAction {
         #[serde(default = "default_true")]
         verify: bool,
     },
+    /// Deterministic spreadsheet cell reads via AppleScript (Numbers).
+    ///
+    /// Use this when the agent needs spreadsheet truth from the app
+    /// model instead of relying on the accessibility tree to expose
+    /// the values. Particularly useful for Numbers, whose AX surface
+    /// often only exposes the focused cell or formula-bar content.
+    #[serde(alias = "read_cell")]
+    ReadCells {
+        /// Target app. Currently only `"Numbers"` is implemented.
+        #[serde(default = "default_spreadsheet_app")]
+        app: String,
+        /// Optional sheet name. `None` = first sheet of first document.
+        #[serde(default)]
+        sheet: Option<String>,
+        /// Optional table name. `None` = first table of selected sheet.
+        #[serde(default)]
+        table: Option<String>,
+        /// Cells to read, in order.
+        #[serde(alias = "refs", alias = "cells", alias = "addresses")]
+        cell_refs: Vec<String>,
+    },
 }
 
 /// One cell write inside a [`PlannedAction::WriteCells`] batch.
@@ -564,6 +585,7 @@ impl PlannedAction {
             | Self::Navigate { .. }
             | Self::NotebookWrites { .. }
             | Self::WriteCells { .. }
+            | Self::ReadCells { .. }
             | Self::ExtractWithFallback { .. } => vec![],
         }
     }
@@ -640,6 +662,64 @@ mod target_ids_tests {
         .target_ids()
         .is_empty());
         assert!(PlannedAction::Wait { ms: 100 }.target_ids().is_empty());
+    }
+
+    #[test]
+    fn extract_with_fallback_round_trips() {
+        let raw = r#"{"type":"extract_with_fallback","name":"btc_price",
+            "selectors":["fin-streamer[data-field='regularMarketPrice']",
+                         "[data-test='qsp-price']"],
+            "parse_as":"float"}"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match &a {
+            PlannedAction::ExtractWithFallback { name, selectors, parse_as } => {
+                assert_eq!(name, "btc_price");
+                assert_eq!(selectors.len(), 2);
+                assert_eq!(parse_as, "float");
+            }
+            _ => panic!("expected ExtractWithFallback"),
+        }
+        // Has no element-level targets.
+        assert!(a.target_ids().is_empty());
+    }
+
+    #[test]
+    fn extract_with_fallback_defaults_parse_as_to_text() {
+        let raw = r#"{"type":"extract_with_fallback","name":"title",
+            "selectors":["h1"]}"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::ExtractWithFallback { parse_as, .. } => {
+                assert_eq!(parse_as, "text");
+            }
+            _ => panic!("expected ExtractWithFallback"),
+        }
+    }
+
+    #[test]
+    fn extract_with_fallback_accepts_parse_alias() {
+        let raw = r#"{"type":"extract_with_fallback","name":"n",
+            "selectors":["a"],"parse":"int"}"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::ExtractWithFallback { parse_as, .. } => {
+                assert_eq!(parse_as, "int");
+            }
+            _ => panic!("expected ExtractWithFallback"),
+        }
+    }
+
+    #[test]
+    fn read_cells_accepts_cells_alias_and_defaults_app() {
+        let raw = r#"{"type":"read_cells","cells":["A1","B2"]}"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::ReadCells { app, cell_refs, .. } => {
+                assert_eq!(app, "Numbers");
+                assert_eq!(cell_refs, vec!["A1", "B2"]);
+            }
+            _ => panic!("expected ReadCells"),
+        }
     }
 }
 

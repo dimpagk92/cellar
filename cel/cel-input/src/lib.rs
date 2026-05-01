@@ -11,7 +11,7 @@ pub mod applescript;
 pub use inject::{GestureEvent, InputController, InputError, InputEvent, MouseButton};
 pub use enigo_input::EnigoInput;
 #[cfg(target_os = "macos")]
-pub use applescript::{write_numbers_cells, CellWrite};
+pub use applescript::{read_numbers_cells, write_numbers_cells, CellWrite};
 
 /// Create a platform-appropriate input controller.
 pub fn create_controller() -> Result<Box<dyn InputController>, InputError> {

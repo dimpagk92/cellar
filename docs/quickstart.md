@@ -1,6 +1,8 @@
-# Quickstart: CEL with Claude Code
+# Quickstart: CEL with any agent
 
-Get CEL running as an MCP server in Claude Code in under 5 minutes.
+Get CEL running locally in under 5 minutes, then point your preferred agent at it. CEL is agent-agnostic — the install steps are identical regardless of which planner you use; only Step 4 (configuration) branches by agent.
+
+Already set up and just need the per-agent config? Jump to [Step 4 — pick your agent](#step-4-pick-your-agent).
 
 ## Prerequisites
 
@@ -56,9 +58,76 @@ Options offered:
 
 If you'd rather configure by env var (for MCP `.mcp.json` embedding), skip `init` and continue to the Claude Code config below.
 
-## Step 4: Configure Claude Code
+## Step 4: Pick your agent
+
+CEL exposes the same tool surface (`cel_see`, `cel_act`, `cel_perceive`, `cel_think`) to every agent. Pick the branch that matches how you want to drive it. Full per-agent cookbooks live under [`agents/`](./agents/).
+
+**Hello world used in each branch:** "Open Calculator, type 2+2, read the result." Three actions, no network, works with any of the five paths below.
+
+> **Which LLM?** If the agent framework brings its own LLM (Claude Code, Cursor, Codex, LangGraph with BYOM), CEL does not need one — you can skip `CEL_LLM_*` env vars entirely. You only need them when you use CEL's built-in `cel_think run_goal` fallback. See [`bring-your-own-llm.md`](./bring-your-own-llm.md).
+
+### 4a: Claude Code (MCP)
 
 Create or edit `.mcp.json` in your project root (or `~/.mcp.json` for global):
+
+```json
+{
+  "mcpServers": {
+    "cellar": {
+      "command": "node",
+      "args": ["/absolute/path/to/cellar/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Restart Claude Code. The `cel_see` / `cel_act` / `cel_perceive` / `cel_think` tools appear in the tool list.
+
+Hello world: ask Claude Code "Open Calculator, type 2+2 with cel_act, then read the result with cel_see." Full cookbook: [`agents/claude-code.md`](./agents/claude-code.md).
+
+### 4b: Cursor (MCP)
+
+Cursor reads MCP servers from `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global). Same schema as Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "cellar": {
+      "command": "node",
+      "args": ["/absolute/path/to/cellar/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+Restart Cursor, enable the server in Settings → MCP. Hello world identical to Claude Code. Full cookbook: [`agents/cursor.md`](./agents/cursor.md).
+
+### 4c: LangGraph (SDK / MCP)
+
+Two paths:
+
+- **MCP** — run CEL's MCP server and connect with `langchain-mcp-adapters`. Good for graphs that already speak MCP.
+- **SDK / N-API** — embed CEL in-process by importing from `cel/cel-napi` (Node) or the Rust crates (for a native LangGraph sidecar). Lower latency.
+
+Hello world (MCP path): the graph's tool node calls `cel_act ax_action` to open Calculator, then `cel_act type`, then `cel_see context` to read the display. Full cookbook and sidecar reference: [`agents/README.md`](./agents/README.md) (LangGraph section) plus [`langgraph-rust-sidecar.md`](./langgraph-rust-sidecar.md).
+
+### 4d: Raw MCP client
+
+Any MCP-speaking client (Python `mcp` library, custom Node client, n8n MCP node, etc.):
+
+```bash
+node /absolute/path/to/cellar/mcp-server/dist/index.js
+```
+
+The server speaks stdio JSON-RPC with the standard MCP handshake. Tools surface the same `cel_see` / `cel_act` / `cel_perceive` / `cel_think` contract documented in [`mcp-server.md`](./mcp-server.md).
+
+Hello world: issue `cel_act { mode: "ax_action", action: "open_app", app: "Calculator" }`, then `cel_act { mode: "type", text: "2+2" }`, then `cel_see { mode: "context" }` and read the result field. Full cookbook: [`agents/README.md`](./agents/README.md) (raw MCP section) and [`api-reference.md`](./api-reference.md).
+
+### 4e: Built-in `cel_think run_goal` fallback
+
+If you want CEL to plan and execute on its own (no external agent), use the built-in planner. This is the path from the previous version of this doc — preserved so users following the old quickstart are not stranded.
+
+Configure `.mcp.json` with LLM env vars so `cel_think` can call out:
 
 ```json
 {
@@ -76,57 +145,53 @@ Create or edit `.mcp.json` in your project root (or `~/.mcp.json` for global):
 }
 ```
 
-**LLM env vars** are needed for `cel_think` planning and `run_goal` autonomous execution. If you only need `cel_see` + `cel_act` (with Claude as the planner), you can omit them.
+Or skip MCP entirely and run from the CLI:
 
-**Optional: separate planner model** for higher-quality autonomous execution:
+```bash
+cellar run-goal "Open Calculator, type 2+2, and read the result"
+```
+
+**Optional: separate planner model for higher-quality delegated runs:**
 
 ```json
-{
-  "mcpServers": {
-    "cellar": {
-      "command": "node",
-      "args": ["/absolute/path/to/cellar/mcp-server/dist/index.js"],
-      "env": {
-        "CEL_LLM_PROVIDER": "gemini",
-        "CEL_LLM_API_KEY": "your-gemini-api-key",
-        "CEL_LLM_MODEL": "gemini-2.5-flash",
-        "CEL_LLM_PLANNER_PROVIDER": "gemini",
-        "CEL_LLM_PLANNER_API_KEY": "your-gemini-api-key",
-        "CEL_LLM_PLANNER_MODEL": "gemini-2.5-flash"
-      }
-    }
-  }
+"env": {
+  "CEL_LLM_PROVIDER": "gemini",
+  "CEL_LLM_API_KEY": "your-gemini-api-key",
+  "CEL_LLM_MODEL": "gemini-2.5-flash",
+  "CEL_LLM_PLANNER_PROVIDER": "gemini",
+  "CEL_LLM_PLANNER_API_KEY": "your-gemini-api-key",
+  "CEL_LLM_PLANNER_MODEL": "gemini-2.5-flash"
 }
 ```
 
-## Step 5: Restart Claude Code
+The built-in planner is a **reference client**, not the definition of CEL — it is fine to use, but any of the branches above is equally first-class. See [`mcp-server.md`](./mcp-server.md) for the full `cel_think` reference.
 
-After saving `.mcp.json`, restart Claude Code (or start a new conversation). The MCP server starts automatically.
+## Step 5: Verify
 
-**What happens on startup:**
-1. CEL native module loads (Rust via napi-rs)
-2. Cortex boots — always-on perception engine starts monitoring the screen
-3. CDP auto-detect — if Chrome is running with remote debugging, CEL connects to it
+Whichever branch you picked, the verification is the same: confirm `cel_see` returns structured context.
 
-You should see the `cel_see`, `cel_act`, `cel_think`, and `cel_perceive` tools available.
-
-## Step 6: Verify
-
-In Claude Code, ask:
+**From Claude Code / Cursor / any MCP-speaking agent:**
 
 ```
 Take a screenshot of my screen using cel_see
 ```
 
-Or:
+or
 
 ```
 What apps are open on my screen?
 ```
 
-Claude should call `cel_see` and describe what it sees.
+**From the CLI:**
 
-## Step 7: Chrome CDP (Optional but Recommended)
+```bash
+cellar context            # human-readable
+cellar context --json     # raw structured output
+```
+
+The agent (or CLI) should return a list of `ContextElement`s with labels, roles, bounds, and confidence scores.
+
+## Step 6: Chrome CDP (Optional but Recommended)
 
 CDP (Chrome DevTools Protocol) gives CEL deep browser access — page content, DOM interaction, cookie banner dismissal, iframe access. Without it, CEL can still click/type in browsers, but can't read page content or interact with invisible elements.
 
@@ -153,9 +218,11 @@ CEL prefers its dedicated browser instance on port `9333`, so it does not have t
 Check if CDP is available using cel_see cdp_status
 ```
 
-## Using the Skills
+## Claude Code skills (optional convenience layer)
 
-If you've installed the Claude Code skills, you can use slash commands:
+Claude-Code-specific only. If you're using a different agent, skip this section — your agent's own tool-invocation surface already covers the same ground.
+
+If you've installed the Claude Code skills, slash commands wrap the raw MCP tools:
 
 ### `/cellar` — Claude as Orchestrator
 
@@ -175,7 +242,7 @@ Claude observes, plans, acts, and verifies. Most powerful mode.
 
 ### `/cellar-auto` — Fire-and-Forget
 
-Delegates to CEL's internal planner. Faster and cheaper, but less capable.
+Delegates to CEL's built-in planner/runtime. Useful as a convenience path, but it is only one client of the CEL platform.
 
 ```
 /cellar-auto Open TextEdit and type "Hello World"
@@ -202,8 +269,8 @@ The Cortex means `cel_see` `context` and `cel_perceive` `read` are instant — t
 | Tool | Purpose | Common modes/actions |
 |------|---------|---------------------|
 | **cel_see** | Read screen | `context`, `screenshot`, `cdp_page`, `wait_for_idle` |
-| **cel_act** | Interact | `ax_action`, `set_value`, `click`, `type`, `cdp_eval` |
-| **cel_think** | Reason | `run_goal`, `plan`, `store_knowledge`, `search_knowledge` |
+| **cel_act** | Interact | `ax_action`, `set_value`, `click`, `type`, `cdp_eval`, `write_cells`, `read_cells` |
+| **cel_think** | Optional built-in planning / memory | `run_goal`, `plan`, `store_knowledge`, `search_knowledge` |
 | **cel_perceive** | Continuous awareness | `start`, `read`, `feed`, `checkpoint`, `stop` |
 
 See [mcp-server.md](mcp-server.md) for the full tool reference with all modes, parameters, and examples.

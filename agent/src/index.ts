@@ -93,7 +93,14 @@ export type {
 } from "./types.js";
 /** @deprecated Use AdapterRegistry from runtime/adapter-registry instead */
 export type { ActionAdapter, AdapterRegistry as LegacyAdapterRegistry } from "./action-executor.js";
-export { celConfig, resolvePath, type CelConfig } from "./config.js";
+export {
+  celConfig,
+  discoverClaudeCodeOauthTokens,
+  hasConfiguredLlmAuth,
+  hydrateLlmEnvFromConfig,
+  resolvePath,
+  type CelConfig,
+} from "./config.js";
 export { log, createLogger, setLogLevel, getLogLevel } from "./logger.js";
 export { getOrScanBaseline, resetBaseline, type DeviceBaseline } from "./device-baseline.js";
 export {
@@ -242,6 +249,42 @@ export {
   type ExtractionConfig,
   type PaginatedExtractionResult,
 } from "./paginated-extractor.js";
+export {
+  createCellarGraph,
+  CelLangGraphDriver,
+  CelLlmPlanner,
+  CelToolCallingChatModel,
+  CellarLangGraphState,
+  createInitialCellarGraphState,
+  createCellarReactAgent,
+  createCortexTools,
+  createCellarToolSession,
+  defaultCellarGraphPolicy,
+  extractFinalAgentText,
+  serializeAgentMessages,
+  type CellarGraphOptions,
+  type CellarLangGraphDriver,
+  type CellarLangGraphPlanner,
+  type CelLlmPlannerOptions,
+  type CelToolCallingCallOptions,
+  type CelToolCallingChatModelOptions,
+  type CellarGraphStateValue,
+  type CellarGraphPolicy,
+  type CreateCellarReactAgentOptions,
+  type CreateCortexToolsOptions,
+  type CellarToolSession,
+  type AttemptRecord,
+  type CanonicalAction,
+  type CanonicalStep,
+  type CanonicalStepResult,
+  type DoneVerdict,
+  type FailureReport,
+  type GoalOutcome,
+  type NextMove,
+  type PerceptionFrame,
+  type ReviewDecision,
+  type RuntimeCaps,
+} from "./langgraph/index.js";
 export {
   cuaToPlannedAction,
   CUA_PROVIDERS,

@@ -1,0 +1,19 @@
+[package]
+name = "adapter-numbers"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "CEL adapter for Apple Numbers via AppleScript (macOS-only)"
+
+[dependencies]
+# Numbers depends on cel-cortex for the AdapterDriver trait. This is
+# transitional — adapter-common::Adapter and cel-cortex::AdapterDriver
+# are two parallel surfaces; reconciling them is tracked as v1
+# adapter-SDK work in docs/adapter-sdk.md. Keeping the cel-cortex dep
+# here avoids reimplementing two traits while that lands.
+cel-cortex = { workspace = true }
+cel-context = { workspace = true }
+cel-accessibility = { workspace = true }
+cel-input = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }

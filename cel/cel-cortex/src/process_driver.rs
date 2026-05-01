@@ -11,8 +11,17 @@
 //! ← {"method":"get_context"}
 //! → {"elements":[...]}
 //!
+//! ← {"method":"snapshot"}
+//! → {"elements":[...]}
+//!
 //! ← {"method":"execute","action":"write_cell","params":{...}}
 //! → {"success":true}
+//!
+//! ← {"method":"verify_action","action":"write_cell","params":{...},"result":{...}}
+//! → {"success":true,"data":{...}}
+//!
+//! ← {"method":"bootstrap"}
+//! → {"ok":true}
 //!
 //! ← {"method":"deactivate"}
 //! → {"ok":true}
@@ -45,6 +54,8 @@ struct Request {
     action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     params: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -208,6 +219,7 @@ impl ProcessDriver {
             method: "activate".into(),
             action: None,
             params: None,
+            result: None,
         }).await?;
         let ack: AckResponse = serde_json::from_str(&resp).map_err(|e| {
             AdapterError::ProtocolError(format!("Invalid activate response: {e}"))
@@ -236,6 +248,7 @@ impl AdapterDriver for ProcessDriver {
             method: "activate".into(),
             action: None,
             params: None,
+            result: None,
         }).await?;
 
         let ack: AckResponse = serde_json::from_str(&resp).map_err(|e| {
@@ -255,6 +268,7 @@ impl AdapterDriver for ProcessDriver {
             method: "deactivate".into(),
             action: None,
             params: None,
+            result: None,
         }).await;
 
         let mut proc = self.process.lock().await;
@@ -269,6 +283,7 @@ impl AdapterDriver for ProcessDriver {
             method: "get_context".into(),
             action: None,
             params: None,
+            result: None,
         }).await;
 
         let resp = match result {
@@ -279,6 +294,7 @@ impl AdapterDriver for ProcessDriver {
                     method: "get_context".into(),
                     action: None,
                     params: None,
+                    result: None,
                 }).await?
             }
             Err(e) => return Err(e),
@@ -299,6 +315,7 @@ impl AdapterDriver for ProcessDriver {
             method: "execute".into(),
             action: Some(action.into()),
             params: Some(params),
+            result: None,
         }).await?;
 
         let parsed: ExecuteResponse = serde_json::from_str(&resp).map_err(|e| {
@@ -313,5 +330,87 @@ impl AdapterDriver for ProcessDriver {
 
     async fn probe(&self) -> bool {
         self.process.lock().await.is_some()
+    }
+
+    async fn bootstrap(&mut self) -> Result<(), AdapterError> {
+        let resp = match self.call_raw(&Request {
+            method: "bootstrap".into(),
+            action: None,
+            params: None,
+            result: None,
+        }).await {
+            Ok(resp) => resp,
+            Err(AdapterError::Timeout(_)) => {
+                return Err(AdapterError::Timeout(RESPONSE_TIMEOUT_MS));
+            }
+            Err(AdapterError::ProcessCrashed(_)) => {
+                self.try_restart().await?;
+                self.call_raw(&Request {
+                    method: "bootstrap".into(),
+                    action: None,
+                    params: None,
+                    result: None,
+                }).await?
+            }
+            Err(_) => {
+                return Ok(());
+            }
+        };
+
+        match serde_json::from_str::<AckResponse>(&resp) {
+            Ok(ack) if ack.ok => Ok(()),
+            Ok(_) => Ok(()),
+            Err(_) => Ok(()),
+        }
+    }
+
+    async fn snapshot(&self) -> Result<Vec<ContextElement>, AdapterError> {
+        let resp = match self.call_raw(&Request {
+            method: "snapshot".into(),
+            action: None,
+            params: None,
+            result: None,
+        }).await {
+            Ok(resp) => resp,
+            Err(AdapterError::ProcessCrashed(_) | AdapterError::Timeout(_)) => {
+                return self.get_context().await;
+            }
+            Err(_) => {
+                return self.get_context().await;
+            }
+        };
+
+        match serde_json::from_str::<ContextResponse>(&resp) {
+            Ok(parsed) => Ok(parsed.elements),
+            Err(_) => self.get_context().await,
+        }
+    }
+
+    async fn verify_action(
+        &self,
+        action: &str,
+        params: &serde_json::Value,
+        result: &ActionResult,
+    ) -> Result<Option<ActionResult>, AdapterError> {
+        let resp = match self.call_raw(&Request {
+            method: "verify_action".into(),
+            action: Some(action.into()),
+            params: Some(params.clone()),
+            result: Some(serde_json::to_value(result).map_err(|e| {
+                AdapterError::ProtocolError(format!("verify_action serialize failed: {e}"))
+            })?),
+        }).await {
+            Ok(resp) => resp,
+            Err(_) => return Ok(None),
+        };
+
+        match serde_json::from_str::<ExecuteResponse>(&resp) {
+            Ok(parsed) => Ok(Some(ActionResult {
+                success: parsed.success,
+                error: parsed.error,
+                data: parsed.data,
+            })),
+            Err(_) => Ok(None),
+        }
     }
 }

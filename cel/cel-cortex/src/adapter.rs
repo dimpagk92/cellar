@@ -60,6 +60,12 @@ pub struct AdapterManifest {
     pub entrypoint: Option<String>,
     /// Context capabilities.
     pub context: ContextDeclaration,
+    /// Lifecycle semantics for activation/bootstrap.
+    #[serde(default)]
+    pub lifecycle: LifecycleDeclaration,
+    /// Verification semantics for adapter truth.
+    #[serde(default)]
+    pub verification: VerificationDeclaration,
     /// Available actions.
     #[serde(default)]
     pub actions: HashMap<String, ActionDeclaration>,
@@ -81,10 +87,67 @@ pub struct ContextDeclaration {
     /// Base confidence for adapter-sourced elements (0.0-1.0).
     #[serde(default = "default_confidence")]
     pub confidence: f64,
+    /// Which truth surface this adapter primarily contributes.
+    /// Examples: "native_api", "document_model", "browser_dom", "ui".
+    #[serde(default = "default_truth_surface")]
+    pub truth_surface: String,
 }
 
 fn default_refresh_ms() -> u64 { 200 }
 fn default_confidence() -> f64 { 0.95 }
+fn default_truth_surface() -> String { "native_api".into() }
+
+/// Declares activation/bootstrap expectations for an adapter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleDeclaration {
+    /// Whether the app should normally be frontmost for this adapter to activate.
+    #[serde(default = "default_requires_frontmost")]
+    pub requires_frontmost: bool,
+    /// Whether CEL should call `bootstrap()` right after a successful activation.
+    #[serde(default)]
+    pub bootstrap_on_activate: bool,
+    /// Whether the adapter can keep contributing context while not frontmost.
+    #[serde(default)]
+    pub background_refresh: bool,
+}
+
+fn default_requires_frontmost() -> bool { true }
+
+impl Default for LifecycleDeclaration {
+    fn default() -> Self {
+        Self {
+            requires_frontmost: default_requires_frontmost(),
+            bootstrap_on_activate: false,
+            background_refresh: false,
+        }
+    }
+}
+
+/// Declares how CEL should verify adapter-backed truth.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerificationDeclaration {
+    /// Which surface should be treated as authoritative for this adapter.
+    #[serde(default = "default_verification_surface")]
+    pub truth_surface: String,
+    /// Optional action name that reads authoritative state back.
+    #[serde(default)]
+    pub readback_action: Option<String>,
+    /// Optional action name that returns a compact state snapshot.
+    #[serde(default)]
+    pub snapshot_action: Option<String>,
+}
+
+impl Default for VerificationDeclaration {
+    fn default() -> Self {
+        Self {
+            truth_surface: default_verification_surface(),
+            readback_action: None,
+            snapshot_action: None,
+        }
+    }
+}
+
+fn default_verification_surface() -> String { "ui".into() }
 
 /// Declares an action the adapter can execute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +158,15 @@ pub struct ActionDeclaration {
     /// Human-readable description for the planner prompt.
     #[serde(default)]
     pub description: String,
+    /// Whether this action mutates application state.
+    #[serde(default)]
+    pub mutates_state: bool,
+    /// Whether CEL should ask the adapter for a stronger verification/readback.
+    #[serde(default)]
+    pub requires_verification: bool,
+    /// Whether the action returns structured data that can feed CEL context/evals.
+    #[serde(default)]
+    pub returns_data: bool,
 }
 
 // ── Action Result ──────────────────────────────────────────────────────────
@@ -138,10 +210,22 @@ pub trait AdapterDriver: Send + Sync {
     /// Called when the app loses focus or the Cortex shuts down.
     async fn deactivate(&mut self) -> Result<(), AdapterError>;
 
+    /// Optional post-activation hook for deterministic setup. Adapters can use
+    /// this to create/open a scratch document or otherwise prepare app state.
+    async fn bootstrap(&mut self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
     /// Read context elements from the application.
     /// Called on each Cortex tick (or at the adapter's declared refresh_ms).
     /// Returns elements in CEL's native ContextElement format.
     async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError>;
+
+    /// Return a compact snapshot that should be treated as adapter-backed truth
+    /// for CEL context and eval surfaces. Defaults to `get_context()`.
+    async fn snapshot(&self) -> Result<Vec<ContextElement>, AdapterError> {
+        self.get_context().await
+    }
 
     /// Execute a named action on the application.
     async fn execute(
@@ -149,6 +233,18 @@ pub trait AdapterDriver: Send + Sync {
         action: &str,
         params: serde_json::Value,
     ) -> Result<ActionResult, AdapterError>;
+
+    /// Optional verification hook. When an action declares
+    /// `requires_verification`, CEL may call this to get a stronger verdict
+    /// or a deterministic readback after the base `execute`.
+    async fn verify_action(
+        &self,
+        _action: &str,
+        _params: &serde_json::Value,
+        _result: &ActionResult,
+    ) -> Result<Option<ActionResult>, AdapterError> {
+        Ok(None)
+    }
 
     /// Check if the target application is running and reachable.
     async fn probe(&self) -> bool;
@@ -262,7 +358,11 @@ mod tests {
         assert_eq!(manifest.name, "excel");
         assert_eq!(manifest.app_patterns.len(), 2);
         assert_eq!(manifest.context.confidence, 0.95);
+        assert_eq!(manifest.context.truth_surface, "native_api");
         assert!(manifest.actions.contains_key("write_cell"));
+        assert!(manifest.lifecycle.requires_frontmost);
+        assert!(!manifest.lifecycle.bootstrap_on_activate);
+        assert_eq!(manifest.verification.truth_surface, "ui");
         assert_eq!(manifest.runtime, "process"); // default
     }
 
@@ -279,8 +379,6 @@ mod tests {
 
     #[test]
     fn test_registered_adapter_matches_app() {
-        use std::sync::Arc;
-
         // Create a minimal mock
         struct MockDriver {
             manifest: AdapterManifest,

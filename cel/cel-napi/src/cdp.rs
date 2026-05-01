@@ -64,8 +64,9 @@ pub async fn cdp_get_cookies() -> napi::Result<String> {
     };
 
     match client.get_cookies().await {
-        Ok(cookies) => serde_json::to_string(&cookies)
-            .map_err(|e| napi::Error::from_reason(e.to_string())),
+        Ok(cookies) => {
+            serde_json::to_string(&cookies).map_err(|e| napi::Error::from_reason(e.to_string()))
+        }
         Err(e) => Err(napi::Error::from_reason(e.to_string())),
     }
 }
@@ -94,9 +95,13 @@ pub async fn cdp_get_network_requests(limit: Option<u32>) -> napi::Result<String
         None => return Ok("[]".to_string()),
     };
 
-    match client.get_network_requests(limit.unwrap_or(20) as usize).await {
-        Ok(events) => serde_json::to_string(&events)
-            .map_err(|e| napi::Error::from_reason(e.to_string())),
+    match client
+        .get_network_requests(limit.unwrap_or(20) as usize)
+        .await
+    {
+        Ok(events) => {
+            serde_json::to_string(&events).map_err(|e| napi::Error::from_reason(e.to_string()))
+        }
         Err(e) => Err(napi::Error::from_reason(e.to_string())),
     }
 }
@@ -109,7 +114,9 @@ pub async fn cdp_navigate(url: String) -> napi::Result<()> {
         None => return Err(napi::Error::from_reason("No CDP target available")),
     };
 
-    client.navigate(&url).await
+    client
+        .navigate(&url)
+        .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
@@ -119,12 +126,17 @@ pub async fn cdp_navigate(url: String) -> napi::Result<()> {
 pub async fn cdp_evaluate(expression: String) -> napi::Result<String> {
     let client = match cel_cdp::connect_to_focused_app().await {
         Some(c) => c,
-        None => return Err(napi::Error::from_reason("No CDP target available. Is Chrome running with --remote-debugging-port?")),
+        None => {
+            return Err(napi::Error::from_reason(
+                "No CDP target available. Is Chrome running with --remote-debugging-port?",
+            ))
+        }
     };
 
-    let result = client.evaluate(&expression).await
+    let result = client
+        .evaluate(&expression)
+        .await
         .map_err(|e| napi::Error::from_reason(format!("CDP evaluate failed: {}", e)))?;
 
-    serde_json::to_string(&result)
-        .map_err(|e| napi::Error::from_reason(e.to_string()))
+    serde_json::to_string(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
 }

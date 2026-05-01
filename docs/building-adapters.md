@@ -1,6 +1,11 @@
 # Building Adapters
 
-Adapters extend CEL to work with specific applications through their native APIs. Instead of relying on accessibility trees or vision to understand Excel, an Excel adapter uses COM automation to read cell values, formulas, and sheet structure directly — with near-perfect accuracy.
+Adapters extend CEL with app-specific structured truth and execution. Instead of relying on accessibility trees or vision to understand Excel, an Excel adapter can use COM automation to read cell values, formulas, and sheet structure directly — with near-perfect accuracy.
+
+Architecture rule:
+- `Adapters` add app/domain truth
+- `CEL` fuses that truth with AX/CDP/vision and exposes stable tool surfaces
+- `Agents` consume CEL through MCP, SDKs, or other bindings
 
 ## When to Build an Adapter
 
@@ -17,39 +22,100 @@ Don't build an adapter when:
 ## Adapter Architecture
 
 ```
-Agent → cel-context (fusion) → Adapter → Native API → Application
-                ↑                  ↑
-         accessibility tree    deterministic data
+Agent Runtime → CEL tool / SDK surface → Adapter → Native API → Application
+                     ↑                    ↑
+            AX/CDP/vision fusion     deterministic app truth
 ```
 
 When an adapter is registered, its data is fused into the unified context alongside accessibility and vision data. Adapter elements get `source: "native_api"` and typically have the highest confidence scores (0.95+).
 
+Numbers is the canonical example:
+- keep improving generic AX so app/window/dialog handoff is strong
+- use adapter-style document-model operations for cell truth
+- expose deterministic reads, writes, snapshots, and verification through the adapter contract
+
 ## Adapter Interface
 
-Every adapter implements the `AdapterTrait` from `adapters/adapter-common/`:
+Every adapter implements the `AdapterDriver` contract used by Cortex:
 
 ```rust
-pub trait AdapterTrait: Send + Sync {
-    /// Check if this adapter's application is available on the system.
-    fn is_available(&self) -> bool;
+pub trait AdapterDriver: Send + Sync {
+    fn manifest(&self) -> &AdapterManifest;
 
-    /// Connect to the application.
-    fn connect(&mut self) -> Result<(), AdapterError>;
+    /// Called when the target app becomes relevant / frontmost.
+    async fn activate(&mut self) -> Result<(), AdapterError>;
 
-    /// Disconnect from the application.
-    fn disconnect(&mut self) -> Result<(), AdapterError>;
+    /// Called when the app is no longer active or the cortex shuts down.
+    async fn deactivate(&mut self) -> Result<(), AdapterError>;
+
+    /// Optional deterministic setup hook.
+    async fn bootstrap(&mut self) -> Result<(), AdapterError>;
 
     /// Read context elements from the application.
-    fn get_elements(&self) -> Result<Vec<ContextElement>, AdapterError>;
+    async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError>;
+
+    /// Compact adapter-backed truth snapshot. Defaults to get_context().
+    async fn snapshot(&self) -> Result<Vec<ContextElement>, AdapterError>;
 
     /// Execute an adapter-specific action.
-    fn execute_action(
-        &mut self,
+    async fn execute(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<ActionResult, AdapterError>;
+
+    /// Optional post-action verification / readback hook.
+    async fn verify_action(
+        &self,
         action: &str,
         params: &serde_json::Value,
-    ) -> Result<serde_json::Value, AdapterError>;
+        result: &ActionResult,
+    ) -> Result<Option<ActionResult>, AdapterError>;
+
+    async fn probe(&self) -> bool;
 }
 ```
+
+For process adapters, the same contract is surfaced over stdio JSON methods:
+
+- `activate`
+- `deactivate`
+- `bootstrap` (optional)
+- `get_context`
+- `snapshot` (optional; falls back to `get_context`)
+- `execute`
+- `verify_action` (optional; returns a normal `ActionResult`)
+
+## Manifest Semantics
+
+The adapter manifest is also where you describe how CEL should reason about the adapter.
+
+- `context.truth_surface`
+  Declares the primary truth source, like `native_api`, `document_model`, `browser_dom`, or `ui`.
+- `lifecycle.requires_frontmost`
+  True for most desktop adapters.
+- `lifecycle.bootstrap_on_activate`
+  Ask CEL to run `bootstrap()` immediately after activation.
+- `lifecycle.background_refresh`
+  Only set true when the adapter can safely read context while not frontmost.
+- `verification.truth_surface`
+  The authoritative post-action surface that CEL/evals should trust.
+- `verification.readback_action`
+  The action name that deterministically reads state back.
+- `verification.snapshot_action`
+  The action name that returns a compact truth snapshot for CEL context/evals.
+- `actions.<name>.mutates_state`
+  Mark state-changing actions clearly.
+- `actions.<name>.requires_verification`
+  Mark actions that should be followed by deterministic verification.
+- `actions.<name>.returns_data`
+  Mark actions that produce structured data useful to CEL and evals.
+
+This is how we keep the architecture clean:
+
+- adapters declare app truth and deterministic operations
+- CEL fuses, executes, verifies, and exposes that truth
+- agents remain swappable
 
 ## Example: Building a Simple Adapter
 
@@ -58,7 +124,7 @@ Here's a skeleton for a note-taking app adapter:
 ```rust
 // adapters/my-notes/src/lib.rs
 
-use adapter_common::{AdapterTrait, AdapterError};
+use cel_cortex::adapter::{AdapterDriver, AdapterError, ActionResult, AdapterManifest};
 use cel_context::{ContextElement, ContextSource, Bounds, ElementState};
 
 pub struct MyNotesAdapter {
@@ -71,29 +137,24 @@ impl MyNotesAdapter {
     }
 }
 
-impl AdapterTrait for MyNotesAdapter {
-    fn is_available(&self) -> bool {
-        // Check if the app is installed/running
-        std::process::Command::new("my-notes")
-            .arg("--version")
-            .output()
-            .is_ok()
+impl AdapterDriver for MyNotesAdapter {
+    fn manifest(&self) -> &AdapterManifest {
+        unimplemented!()
     }
 
-    fn connect(&mut self) -> Result<(), AdapterError> {
-        // Initialize connection to the app's API
+    async fn activate(&mut self) -> Result<(), AdapterError> {
         self.connected = true;
         Ok(())
     }
 
-    fn disconnect(&mut self) -> Result<(), AdapterError> {
+    async fn deactivate(&mut self) -> Result<(), AdapterError> {
         self.connected = false;
         Ok(())
     }
 
-    fn get_elements(&self) -> Result<Vec<ContextElement>, AdapterError> {
+    async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError> {
         if !self.connected {
-            return Err(AdapterError::NotConnected);
+            return Err(AdapterError::ActivationFailed("not connected".into()));
         }
 
         // Read data from the app's native API
@@ -122,20 +183,24 @@ impl AdapterTrait for MyNotesAdapter {
         ])
     }
 
-    fn execute_action(
-        &mut self,
+    async fn execute(
+        &self,
         action: &str,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, AdapterError> {
+        params: serde_json::Value,
+    ) -> Result<ActionResult, AdapterError> {
         match action {
             "set_title" => {
                 let title = params["title"].as_str()
-                    .ok_or(AdapterError::InvalidParams("title required".into()))?;
+                    .ok_or(AdapterError::ExecutionFailed("title required".into()))?;
                 // Call the app's API to set the title
-                Ok(serde_json::json!({ "success": true }))
+                Ok(ActionResult::ok())
             }
-            _ => Err(AdapterError::UnknownAction(action.into())),
+            _ => Err(AdapterError::ExecutionFailed(format!("unknown action: {action}"))),
         }
+    }
+
+    async fn probe(&self) -> bool {
+        true
     }
 }
 ```
@@ -173,7 +238,7 @@ const step: WorkflowStep = {
 };
 ```
 
-Via MCP, use `cel_action`:
+Via MCP, use `cel_act` with the adapter-backed action surface exposed by CEL.
 
 ```json
 {
@@ -197,8 +262,8 @@ These adapters have their interfaces defined but implementation is in progress. 
 
 ## Tips
 
-- **Confidence scores**: Native API elements should use 0.95-0.98 confidence. Leave room for the fusion engine to boost to 0.95 when vision confirms.
+- **Confidence scores**: Native API elements should use 0.95-0.98 confidence. Leave room for the fusion engine to merge them with AX/CDP/vision instead of replacing the rest of the context blindly.
 - **Bounds**: Always provide bounds when possible. Without bounds, the agent can't click the element.
-- **Actions**: Declare all available actions in the `actions` field. This tells the agent what it can do.
-- **Error handling**: Return `AdapterError::NotConnected` if the app isn't available, not a panic.
+- **Actions**: Declare all available actions in the manifest. This tells CEL and downstream agents what the adapter can do.
+- **Error handling**: Return structured `AdapterError`s, not panics.
 - **License**: Community adapters are MIT licensed by convention.

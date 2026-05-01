@@ -26,18 +26,6 @@ pub struct GoalConfig {
     /// burns steps + billed tokens with no chance of success. Phase 5.1.
     #[serde(default = "default_max_rate_limits")]
     pub max_consecutive_rate_limits: u32,
-    /// Enable vision (screenshot) fallback for planning.
-    #[serde(default = "default_true")]
-    pub enable_vision: bool,
-    /// Enable self-healing (retry with different approach on failure).
-    #[serde(default = "default_true")]
-    pub self_heal: bool,
-    /// Enable milestone decomposition for complex goals.
-    #[serde(default)]
-    pub enable_decomposition: bool,
-    /// Enable persistent notebook for data discovered during execution.
-    #[serde(default = "default_true")]
-    pub enable_notebook: bool,
     /// Workflow name for history scoping and knowledge persistence.
     #[serde(default)]
     pub workflow_name: Option<String>,
@@ -47,9 +35,6 @@ pub struct GoalConfig {
     /// LLM model for planning.
     #[serde(default)]
     pub llm_model: Option<String>,
-    /// Escalation model (used after consecutive failures).
-    #[serde(default)]
-    pub llm_escalation_model: Option<String>,
     /// URL to constrain navigation to (blocks search engine redirects).
     #[serde(default)]
     pub constrain_to_url: Option<String>,
@@ -66,7 +51,6 @@ fn default_step_delay() -> u64 { 500 }
 fn default_timeout() -> u64 { 120_000 }
 fn default_max_failures() -> u32 { 8 }
 fn default_max_rate_limits() -> u32 { 3 }
-fn default_true() -> bool { true }
 
 impl Default for GoalConfig {
     fn default() -> Self {
@@ -77,14 +61,9 @@ impl Default for GoalConfig {
             timeout_ms: default_timeout(),
             max_consecutive_failures: default_max_failures(),
             max_consecutive_rate_limits: default_max_rate_limits(),
-            enable_vision: true,
-            self_heal: true,
-            enable_decomposition: false,
-            enable_notebook: true,
             workflow_name: None,
             llm_provider: None,
             llm_model: None,
-            llm_escalation_model: None,
             constrain_to_url: None,
             deterministic_seed: None,
         }

@@ -52,11 +52,13 @@ pub fn classify_content_role(element_type: &str, actions: &[String], state: &Ele
         // Interactive controls
         "button" | "link" | "input" | "textfield" | "textarea" | "combobox"
         | "select" | "checkbox" | "radio" | "slider" | "switch" | "toggle"
-        | "tab" | "menuitem" | "menubar" | "menu" | "toolbar" | "searchfield" => {
+        | "tab" | "tab_item" | "menuitem" | "menu_item" | "menubar" | "menu"
+        | "toolbar" | "searchfield" | "tree_item" => {
             ContentRole::Interactive
         }
         // System chrome
-        "scrollbar" | "splitter" | "statusbar" | "progressbar" | "indicator" => {
+        "scrollbar" | "splitter" | "statusbar" | "status_bar" | "progressbar"
+        | "indicator" | "dialog" | "window" => {
             ContentRole::System
         }
         // Decorative
@@ -65,7 +67,8 @@ pub fn classify_content_role(element_type: &str, actions: &[String], state: &Ele
         }
         // Text content — untrusted
         "text" | "statictext" | "paragraph" | "heading" | "label" | "cell"
-        | "list" | "listitem" | "article" | "blockquote" => {
+        | "table" | "table_row" | "table_cell" | "list" | "listitem" | "list_item"
+        | "article" | "blockquote" => {
             ContentRole::Content
         }
         // Default: if it has actions, it's interactive; otherwise content
@@ -356,7 +359,7 @@ mod tests {
     #[test]
     fn test_classify_content_elements() {
         let types = ["text", "statictext", "paragraph", "heading",
-                     "label", "cell", "list", "listitem"];
+                     "label", "cell", "table", "table_row", "table_cell", "list", "listitem", "list_item"];
         for t in types {
             let role = classify_content_role(t, &[], &default_state());
             assert_eq!(role, ContentRole::Content, "Expected Content for '{}'", t);
@@ -365,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_classify_system_elements() {
-        let types = ["scrollbar", "splitter", "statusbar", "progressbar"];
+        let types = ["scrollbar", "splitter", "statusbar", "status_bar", "progressbar", "dialog", "window"];
         for t in types {
             let role = classify_content_role(t, &[], &default_state());
             assert_eq!(role, ContentRole::System, "Expected System for '{}'", t);

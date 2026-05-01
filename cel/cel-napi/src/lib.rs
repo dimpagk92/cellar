@@ -13,9 +13,9 @@ use napi_derive::napi;
 
 mod adapter_registry;
 mod cdp;
-mod goal_runner;
 mod context;
 mod cortex;
+mod goal_runner;
 mod input;
 mod llm;
 mod planner;
@@ -48,9 +48,7 @@ static TOKIO_RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceL
 
 pub(crate) fn rt_handle() -> napi::Result<tokio::runtime::Handle> {
     Ok(TOKIO_RT
-        .get_or_init(|| {
-            tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime")
-        })
+        .get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"))
         .handle()
         .clone())
 }

@@ -60,6 +60,14 @@ Action shapes inside a Step (these are the ONLY legal shapes):
   "Return".
   { "type": "click",       "target_id": "<ax:...>" }
   { "type": "scroll",      "dx": 0, "dy": 200 }
+  { "type": "extract_with_fallback",
+    "name": "btc_price",
+    "selectors": [
+      "fin-streamer[data-field='regularMarketPrice']",
+      "[data-test='qsp-price']",
+      "section.price h2"
+    ],
+    "parse_as": "float" }
   { "type": "write_cells", "app": "Numbers",
     "writes": [ {"ref":"A1","value":"Ticker"},
                 {"ref":"B1","value":"Price"},
@@ -98,6 +106,24 @@ Core rules (non-negotiable):
   or selector string (`ax:AXApplication/...`, `AXRole='AXButton'`,
   `ax:placeholder-X`, etc.). ALWAYS populate `label` + `role_hint`
   as a fallback.
+
+* **Web data extraction.** To read a field from a page, use
+  `extract_with_fallback` — NOT raw `cdp_eval` loops. Provide 2-4
+  candidate selectors ordered strongest-to-weakest, plus a
+  `parse_as` hint. The runtime tries them in order, parses, and
+  writes the first match into `shared_memory[name]`. Advantages:
+    - One action per field replaces N turns of synthesizing
+      `document.querySelector(...)` and refining selectors when they
+      miss.
+    - `shared_memory[name]` gets a clean parsed value you can feed
+      straight into `write_cells`.
+    - If all selectors miss for the same `name` 3 times across the
+      run, the runtime AUTO-NULLS the field and tells you via a
+      history entry — that's your signal the page doesn't surface
+      the data and you must move on with the rest of the goal. Do
+      NOT try to bypass the auto-null by renaming the field.
+  Reserve raw `cdp_eval` for actions (clicks, scrolls via JS) — not
+  data reads.
 
 * **Browser routing.** If APP is a browser, EVERY in-page interaction
   must be `cdp_eval`. Navigation is `navigate` with a DIRECT URL —
@@ -155,6 +181,9 @@ Core rules (non-negotiable):
     - When `verify: true`, the action result's `data.writes[i].readback`
       contains what Numbers actually stored. Use that to confirm each
       cell landed before emitting Done.
+    - If AX does not clearly expose the cell values afterward, use
+      `read_cells` to read them back from the Numbers document model
+      instead of guessing from partial AX text.
 
 * **Done REQUIRES direct perception evidence.** You may ONLY emit
   Done when the live perception or screenshot THIS TURN shows the
@@ -680,6 +709,7 @@ fn action_kind(action: &crate::types::PlannedAction) -> String {
         PlannedAction::Navigate { .. } => "navigate".into(),
         PlannedAction::NotebookWrites { .. } => "notebook_writes".into(),
         PlannedAction::WriteCells { .. } => "write_cells".into(),
+        PlannedAction::ReadCells { .. } => "read_cells".into(),
         PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback".into(),
     }
 }

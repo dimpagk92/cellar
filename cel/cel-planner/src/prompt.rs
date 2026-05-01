@@ -1460,6 +1460,9 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
         PlannedAction::WriteCells { app, writes, .. } => {
             format!("write_cells({}, {} cells)", app, writes.len())
         }
+        PlannedAction::ReadCells { app, cell_refs, .. } => {
+            format!("read_cells({}, {} cells)", app, cell_refs.len())
+        }
         PlannedAction::ExtractWithFallback { name, selectors, .. } => {
             format!("extract({}, {} selectors)", name, selectors.len())
         }

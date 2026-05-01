@@ -24,7 +24,7 @@
     "pnpm": ">=9.0.0"
   },
   "dependencies": {
-    "@browserbasehq/stagehand": "^3.2.0"
+    "@browserbasehq/stagehand": "^3.3.0"
   },
   "pnpm": {
     "peerDependencyRules": {

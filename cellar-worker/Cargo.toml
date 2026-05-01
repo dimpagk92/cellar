@@ -21,7 +21,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
-axum = "0.7"
+axum = "0.8"
 
 # CEL runtime — for real goal execution on the worker host.
 cel-goal-runner = { workspace = true }

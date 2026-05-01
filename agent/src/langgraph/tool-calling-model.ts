@@ -346,16 +346,19 @@ function normalizeModelResponse(raw: unknown): ModelResponse {
 
   const input = raw as Record<string, unknown>;
   const inferredKind = typeof input.kind === "string"
-    ? input.kind
+    ? normalizeKind(input.kind)
     : inferKind(input);
 
   if (inferredKind === "tool") {
-    if (typeof input.name !== "string" || input.name.length === 0) {
+    const toolName = typeof input.name === "string" && input.name.length > 0
+      ? input.name
+      : (typeof input.kind === "string" ? normalizeToolNameFromKind(input.kind) : null);
+    if (!toolName) {
       throw new Error("Tool response is missing a valid tool name");
     }
     return {
       kind: "tool",
-      name: input.name,
+      name: toolName,
       args: isRecord(input.args) ? input.args : {},
       thought: typeof input.thought === "string" ? input.thought : "",
     };
@@ -456,10 +459,34 @@ function forceDoneCheckResponse(draftAnswer: string): ToolCallResponse {
 }
 
 function inferKind(input: Record<string, unknown>): "tool" | "final" {
+  if (typeof input.kind === "string" && normalizeToolNameFromKind(input.kind)) {
+    return "tool";
+  }
   if (typeof input.name === "string" && ("args" in input || "tool" in input)) {
     return "tool";
   }
   return "final";
+}
+
+function normalizeKind(kind: string): "tool" | "final" | "unknown" {
+  if (kind === "tool" || kind === "final") {
+    return kind;
+  }
+  if (normalizeToolNameFromKind(kind)) {
+    return "tool";
+  }
+  return "unknown";
+}
+
+function normalizeToolNameFromKind(kind: string): string | null {
+  switch (kind) {
+    case "see":
+    case "act":
+    case "done_check":
+      return kind;
+    default:
+      return null;
+  }
 }
 
 function toAiMessage(response: ModelResponse): AIMessage {

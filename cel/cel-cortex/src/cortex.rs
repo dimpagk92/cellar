@@ -1927,6 +1927,71 @@ fn build_extract_expression(sel: &str) -> String {
         || trimmed.contains("=>");
     if looks_like_js {
         trimmed.to_string()
+    } else if trimmed.contains(":contains(") || trimmed.contains(":has(") {
+        let escaped = trimmed.replace('\\', "\\\\").replace('\'', "\\'");
+        format!(
+            "(function() {{
+                const selector = '{escaped}';
+                const textOf = (el) => (el && el.textContent != null ? el.textContent.trim() : '');
+                const includesText = (el, needle) => textOf(el).includes(needle);
+
+                const rowMatch = selector.match(/^([a-zA-Z0-9_-]+):has\\(([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\3\\)\\)\\s+([a-zA-Z0-9_-]+):nth-child\\((\\d+)\\)$/);
+                if (rowMatch) {{
+                    const [, rowTag, innerTag, , needle, cellTag, nth] = rowMatch;
+                    const rows = Array.from(document.querySelectorAll(rowTag));
+                    for (const row of rows) {{
+                        const match = Array.from(row.querySelectorAll(innerTag)).find((child) => includesText(child, needle));
+                        if (!match) continue;
+                        const idx = Math.max(parseInt(nth, 10) - 1, 0);
+                        const cells = Array.from(row.querySelectorAll(cellTag));
+                        const target = cells[idx];
+                        return target ? textOf(target) || null : null;
+                    }}
+                    return null;
+                }}
+
+                const adjacentMatch = selector.match(/^([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\2\\)\\s*\\+\\s*([a-zA-Z0-9_-]+)$/);
+                if (adjacentMatch) {{
+                    const [, baseTag, , needle, siblingTag] = adjacentMatch;
+                    const bases = Array.from(document.querySelectorAll(baseTag));
+                    for (const base of bases) {{
+                        if (!includesText(base, needle)) continue;
+                        let sibling = base.nextElementSibling;
+                        while (sibling) {{
+                            if (sibling.matches(siblingTag)) {{
+                                return textOf(sibling) || null;
+                            }}
+                            sibling = sibling.nextElementSibling;
+                        }}
+                    }}
+                    return null;
+                }}
+
+                const siblingNthMatch = selector.match(/^([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\2\\)\\s*~\\s*([a-zA-Z0-9_-]+):nth-of-type\\((\\d+)\\)$/);
+                if (siblingNthMatch) {{
+                    const [, baseTag, , needle, siblingTag, nth] = siblingNthMatch;
+                    const bases = Array.from(document.querySelectorAll(baseTag));
+                    for (const base of bases) {{
+                        if (!includesText(base, needle) || !base.parentElement) continue;
+                        const idx = Math.max(parseInt(nth, 10) - 1, 0);
+                        const matches = Array.from(base.parentElement.children).filter((child) => child.matches(siblingTag));
+                        const target = matches[idx];
+                        return target ? textOf(target) || null : null;
+                    }}
+                    return null;
+                }}
+
+                const containsOnlyMatch = selector.match(/^([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\2\\)$/);
+                if (containsOnlyMatch) {{
+                    const [, tag, , needle] = containsOnlyMatch;
+                    const match = Array.from(document.querySelectorAll(tag)).find((el) => includesText(el, needle));
+                    return match ? textOf(match) || null : null;
+                }}
+
+                const fallback = document.querySelector(selector);
+                return fallback ? (fallback.textContent == null ? null : fallback.textContent.trim()) : null;
+            }})()"
+        )
     } else {
         // Bare CSS selector. Escape single quotes for JS-string embedding.
         let escaped = trimmed.replace('\\', "\\\\").replace('\'', "\\'");
@@ -2945,6 +3010,16 @@ mod tests {
         assert_eq!(build_extract_expression(js), js);
         let arrow = "(() => document.title)()";
         assert_eq!(build_extract_expression(arrow), arrow);
+    }
+
+    #[test]
+    fn build_extract_expression_supports_contains_and_has_selectors() {
+        let expr = build_extract_expression("tr:has(td:contains('EMP-0742')) td:nth-child(2)");
+        assert!(expr.contains("rowMatch"));
+        assert!(expr.contains("adjacentMatch"));
+        assert!(expr.contains("siblingNthMatch"));
+        assert!(expr.contains("containsOnlyMatch"));
+        assert!(expr.contains("EMP-0742"));
     }
 
     #[test]

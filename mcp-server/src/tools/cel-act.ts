@@ -91,6 +91,24 @@ const singleActionSchema = z.discriminatedUnion("action", [
           "Example: document.querySelectorAll('button').forEach(b => { if(b.textContent.includes('Accept')) b.click() })",
       ),
   }),
+  z.object({
+    action: z.literal("write_cells"),
+    app: z.string().default("Numbers").describe("Spreadsheet app. Currently only Numbers is supported."),
+    sheet: z.string().optional().describe("Optional sheet name. Defaults to the first sheet."),
+    table: z.string().optional().describe("Optional table name. Defaults to the first table."),
+    writes: z.array(z.object({
+      cell_ref: z.string().describe("A1-style cell reference, e.g. A1 or B2"),
+      value: z.string().describe("Value to write into the cell"),
+    })).min(1).describe("Cells to write in a single deterministic batch."),
+    verify: z.boolean().default(true).describe("Read cells back after writing and fail if the stored values mismatch."),
+  }),
+  z.object({
+    action: z.literal("read_cells"),
+    app: z.string().default("Numbers").describe("Spreadsheet app. Currently only Numbers is supported."),
+    sheet: z.string().optional().describe("Optional sheet name. Defaults to the first sheet."),
+    table: z.string().optional().describe("Optional table name. Defaults to the first table."),
+    cell_refs: z.array(z.string()).min(1).describe("A1-style cell references to read back from the document model."),
+  }),
 ]);
 
 export const celActSchema = z.union([
@@ -176,7 +194,54 @@ function executeSingle(cel: Cel, action: SingleAction): string {
       // cdp_eval is async — handled separately in handleCelAct
       throw new Error("cdp_eval must be handled async");
     }
+    case "write_cells":
+    case "read_cells":
+      throw new Error(`${action.action} must be handled async`);
   }
+}
+
+async function ensureCortexForCanonicalAction(cel: Cel): Promise<void> {
+  if (!cel.isCortexRunning()) {
+    cel.bootCortex();
+    await sleep(700);
+  }
+}
+
+async function executeSpreadsheetAction(
+  cel: Cel,
+  action: Extract<SingleAction, { action: "write_cells" | "read_cells" }>,
+): Promise<string> {
+  await ensureCortexForCanonicalAction(cel);
+  const canonicalAction = action.action === "write_cells"
+    ? {
+        type: "write_cells" as const,
+        app: action.app,
+        sheet: action.sheet ?? null,
+        table: action.table ?? null,
+        writes: action.writes,
+        verify: action.verify,
+      }
+    : {
+        type: "read_cells" as const,
+        app: action.app,
+        sheet: action.sheet ?? null,
+        table: action.table ?? null,
+        cell_refs: action.cell_refs,
+      };
+
+  const result = await cel.canonicalExecuteStep({
+    purpose:
+      action.action === "write_cells"
+        ? "Write spreadsheet cells through the deterministic Numbers backend"
+        : "Read spreadsheet cells through the deterministic Numbers backend",
+    kind: "deterministic",
+    action: canonicalAction,
+  });
+
+  if (result.status !== "ok") {
+    throw new Error(result.message);
+  }
+  return JSON.stringify(result.data ?? {}, null, 2);
 }
 
 async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
@@ -184,6 +249,9 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
     const result = await cel.cdpEvaluate(action.expression);
     const resultStr = result === undefined || result === null ? "void" : JSON.stringify(result);
     return `CDP eval result: ${resultStr}`;
+  }
+  if (action.action === "write_cells" || action.action === "read_cells") {
+    return executeSpreadsheetAction(cel, action);
   }
   return executeSingle(cel, action);
 }

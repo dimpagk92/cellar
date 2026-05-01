@@ -17,6 +17,7 @@ import {
   textResult,
   errorResult,
 } from "./shared.js";
+import { persistObservation, readObservation } from "./observations.js";
 import { compressContext, hasActiveSpinner } from "@cellar/agent";
 
 export const celSeeSchema = z.discriminatedUnion("mode", [
@@ -60,6 +61,12 @@ export const celSeeSchema = z.discriminatedUnion("mode", [
   // --- screenshot ---
   z.object({
     mode: z.literal("screenshot"),
+  }),
+
+  // --- observation: load a previously persisted observation snapshot ---
+  z.object({
+    mode: z.literal("observation"),
+    observation_id: z.string().describe("Observation id returned by a previous context call"),
   }),
 
   // --- windows ---
@@ -236,7 +243,9 @@ export async function handleCelSee(cel: Cel, args: Input) {
               actionableCount++;
             }
           }
+          const observationId = persistObservation(ctx);
           return textResult({
+            observation_id: observationId,
             app: ctx.app,
             window: ctx.window,
             element_count: ctx.elements.length,
@@ -292,7 +301,9 @@ export async function handleCelSee(cel: Cel, args: Input) {
 
         // Compact format
         if (detail === "compact" || detail === "actionable_only") {
+          const observationId = persistObservation({ ...ctx, elements });
           return textResult({
+            observation_id: observationId,
             app: ctx.app,
             window: ctx.window,
             elements: elements.map(compactElement),
@@ -303,6 +314,7 @@ export async function handleCelSee(cel: Cel, args: Input) {
 
         // Full detail
         const result: ScreenContext & {
+          observation_id?: string;
           page_content?: unknown;
           url_map?: Record<number, string>;
           cdp_available?: boolean;
@@ -364,6 +376,8 @@ export async function handleCelSee(cel: Cel, args: Input) {
           // CDP not available
         }
 
+        result.observation_id = persistObservation(result);
+
         return textResult(result);
       }
 
@@ -379,6 +393,14 @@ export async function handleCelSee(cel: Cel, args: Input) {
             },
           ],
         };
+      }
+
+      case "observation": {
+        const observation = await readObservation(args.observation_id);
+        if (!observation) {
+          return errorResult(`Observation not found: ${args.observation_id}`);
+        }
+        return textResult(observation);
       }
 
       case "windows":

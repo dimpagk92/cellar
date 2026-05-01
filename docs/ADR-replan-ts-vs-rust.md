@@ -1,5 +1,7 @@
 # ADR: TS vs Rust as the primary goal-runner path
 
+> Historical note: the current repo direction is [adapters-cel-agents.md](./adapters-cel-agents.md). Planning is now treated as pluggable, so this ADR is no longer the architectural source of truth.
+
 **Status**: **Decided — Rust-primary (Fork 2)**
 **Decided**: 2026-04-19
 **Decided by**: dimpagk (project owner)

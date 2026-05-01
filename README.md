@@ -1,10 +1,75 @@
 # cellar
 
-**We handle the workflows that break when all you have is screenshots.**
+[![Glama MCP server](https://glama.ai/mcp/servers/dimpagk92/cellar/badges/score.svg)](https://glama.ai/mcp/servers/dimpagk92/cellar)
 
-CEL (Context Execution Layer) is an open-source computer use runtime that fuses accessibility trees, CDP, and vision into one structured perception layer. Where screenshot-only agents guess at pixels, CEL reads what's actually on screen — and knows when things change.
+**CEL — agent-agnostic infrastructure for computer use.**
+
+CEL (Context Execution Layer) is an open-source platform that fuses accessibility trees, CDP, vision, network, and app-specific adapters into one structured device understanding — and exposes stable execution primitives over MCP, CLI, SDK, and N-API. The planner is pluggable: use LangGraph, Mastra, Claude Code, Cursor, Codex, GPT, Gemini, n8n, a raw MCP client, or CEL's built-in `cel_think` fallback. CEL owns the device; you bring the agent.
 
 > **Status: Active development.** Core runtime fully functional on macOS. MCP server with 4 composable tools. Linux support available. Windows planned.
+
+## Three-layer architecture
+
+```
++------------------------------------------------------------+
+|  Agents       LangGraph | Mastra | Claude Code | Cursor    |
+|               Codex | GPT | Gemini | n8n | MCP clients      |
++------------------------------------------------------------+
+|  CEL / crates context fusion, stream normalization,         |
+|               canonical execution, adapter dispatch,        |
+|               stable MCP / CLI / SDK / N-API surfaces       |
++------------------------------------------------------------+
+|  Adapters     browser | Numbers | Excel | Figma | Slack    |
+|               Cursor | Docker Desktop | ...                 |
++------------------------------------------------------------+
+```
+
+- **Adapters** — where app-specific structured truth lives. Third-party extensible.
+- **CEL (this repo)** — the durable core: fused context, execution, adapter routing, tool surfaces.
+- **Agents** — planners/orchestrators. Every framework is a first-class client; none of them defines the platform.
+
+See [docs/what-cel-is.md](docs/what-cel-is.md) for the full platform boundary and [docs/adapters-cel-agents.md](docs/adapters-cel-agents.md) for the north-star design doc.
+
+## What CEL owns vs. what's pluggable
+
+| CEL owns (durable) | Pluggable (agent's choice) |
+|---|---|
+| Fused context: AX, CDP, vision, network, audio, adapters | Which agent framework plans / orchestrates |
+| Freshness, anomaly, and state tracking (Cortex) | Retry / branching / checkpoint policy |
+| Canonical `cel_see` / `cel_act` / `cel_perceive` / `cel_think` tool surface | Which LLM(s) back each role |
+| Adapter lifecycle, dispatch, and the `AdapterDriver` trait | Human-approval / done-policy |
+| Stable MCP, CLI (`cellar`), SDK, and N-API bindings | App-specific intelligence (lives in adapters) |
+
+## Supported agents
+
+First-class integrations. See [docs/agents/README.md](docs/agents/README.md) for the full matrix.
+
+| Agent | Cookbook | Transport |
+|---|---|---|
+| Claude Code | [docs/agents/claude-code.md](docs/agents/claude-code.md) | MCP |
+| Cursor | [docs/agents/cursor.md](docs/agents/cursor.md) | MCP |
+| LangGraph | [docs/agents/README.md](docs/agents/README.md) | MCP / SDK |
+| Mastra | [docs/agents/mastra.md](docs/agents/mastra.md) | MCP / SDK |
+| Codex | [docs/agents/codex.md](docs/agents/codex.md) | MCP |
+| n8n | [docs/agents/README.md](docs/agents/README.md) | MCP / HTTP |
+| Raw MCP client | [docs/agents/README.md](docs/agents/README.md) | MCP |
+| Built-in `cel_think` (fallback) | [docs/mcp-server.md](docs/mcp-server.md) | In-process |
+
+## Adapters
+
+First-party and community adapters. Full catalog in [docs/adapter-catalog.md](docs/adapter-catalog.md); build your own with [docs/adapter-sdk.md](docs/adapter-sdk.md).
+
+| Adapter | Status | Notes |
+|---|---|---|
+| Browser (CDP + DOM fusion) | Stable | Primary runtime today |
+| Numbers | In progress | Spreadsheet truth via app model, not AX guesswork |
+| Excel | Planned | COM bridge; roadmap in [docs/adapter-roadmap.md](docs/adapter-roadmap.md) |
+| Slack | Planned | Workspace-aware messaging/context |
+| Figma | Planned | Design-file structured operations |
+| Cursor (IDE adapter) | Planned | IDE-specific code/editor operations |
+| Docker Desktop | Planned | Container lifecycle + logs |
+
+Legend: Stable = shipping; In progress = active dev; Planned = on the roadmap.
 
 ## Hybrid Runtime: What It Handles That Screenshots Can't
 
@@ -29,6 +94,7 @@ Run these scenarios yourself: `./scripts/demo.sh` — see [DEMO.md](DEMO.md) for
 - **Continuous awareness** — Cortex tracks what *changed*, not just what's there now. Freshness model (fresh / soft-stale / hard-stale) prevents acting on stale state.
 - **Works everywhere** — browsers, desktop apps, terminals, legacy software. One runtime, not separate products for browser vs. desktop.
 - **Model-agnostic** — works with any LLM. Sends structured text, not screenshots. A local 7B model works for most workflows.
+- **Agent-agnostic** — LangGraph, Mastra, Claude Code, Codex, GPT, Gemini, Cursor, n8n, or future runtimes should all be able to use CEL.
 - **200x cheaper** — structured context extraction eliminates expensive vision model inference on every step.
 
 ## The Problem
@@ -182,10 +248,10 @@ cellar/
     cel-network/        ← traffic monitoring + idle detection
     cel-store/          ← embedded SQLite + FTS5 (memory, knowledge)
     cel-llm/            ← LLM provider abstraction
-    cel-planner/        ← LLM-driven observe-plan-act loop
+    cel-planner/        ← built-in planner / runner code (useful, but not the repo's main value)
     cel-napi/           ← Node.js native bindings (napi-rs)
-  agent/                ← strategy router + goal runner (TypeScript)
-  mcp-server/           ← MCP server (4 tools: see/act/think/perceive)
+  agent/                ← agent integrations and runtime experiments
+  mcp-server/           ← generic tool surface for external agents
   adapters/             ← app-specific adapters (browser, Excel, SAP)
   benchmarks/           ← eval harness (50+ tasks + 5 hybrid scenarios)
   live-view/            ← real-time debug surface (screen + runtime decisions)
@@ -221,7 +287,7 @@ pnpm install && pnpm -r build
 npx tsx examples/quickstart.ts https://github.com/login
 ```
 
-This launches a browser, extracts DOM elements as structured `ContextElement`s with confidence scores, and shows what the LLM planner would receive.
+This launches a browser, extracts DOM elements as structured `ContextElement`s with confidence scores, and shows the kind of context any external agent runtime would receive.
 
 ### Prerequisites
 

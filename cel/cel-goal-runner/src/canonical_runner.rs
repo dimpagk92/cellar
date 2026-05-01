@@ -123,6 +123,10 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
         // Loop-detection: same action fired consecutively with errors.
         let mut consecutive_repeat: u32 = 0;
         let mut last_action_hash: u64 = 0;
+        // Phase-gate: how many times we've injected a "budget past
+        // midpoint, terminal app not yet reached" synthetic record.
+        // On the 2nd fire we auto-dispatch activate_app(terminal_app).
+        let mut phase_gate_fires: u32 = 0;
 
         loop {
             if steps_used >= limits.max_steps {
@@ -138,6 +142,50 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             let mut caps = self.executor.capabilities().await;
             caps.steps_used = steps_used;
             caps.max_steps = limits.max_steps;
+
+            // Phase gate: past the budget midpoint with no terminal-
+            // app work yet → inject a synthetic history record telling
+            // the planner to pivot to the terminal app. Second ignore
+            // escalates to runner auto-dispatching activate_app.
+            if let Some(record) =
+                phase_gate_check(&limits, steps_used, &history, &perception, phase_gate_fires)
+            {
+                phase_gate_fires += 1;
+                warn!(
+                    fires = phase_gate_fires,
+                    terminal_app = ?limits.terminal_app,
+                    "phase gate fired — injecting synthetic history record"
+                );
+                history.push(record);
+                // Second ignore → auto-dispatch. Direct activation via
+                // the executor bypasses the planner for this one step.
+                if phase_gate_fires >= 2 {
+                    if let Some(term) = limits.terminal_app.as_deref() {
+                        warn!(
+                            terminal_app = %term,
+                            "phase gate escalated — runner auto-dispatching activate_app"
+                        );
+                        let activate_step = Step {
+                            purpose: format!("phase_gate_auto_activate:{term}"),
+                            kind: cel_planner::StepKind::Deterministic,
+                            action: PlannedAction::ActivateApp {
+                                app_name: term.to_string(),
+                            },
+                        };
+                        let _ = self.executor.execute(&activate_step, 1).await;
+                        steps_used += 1;
+                        // Loop back: next iteration will re-perceive
+                        // and likely see terminal app frontmost, so
+                        // the gate won't fire again.
+                        continue;
+                    }
+                }
+                steps_used += 1;
+                // Continue to decide_next — the planner sees the new
+                // history record and is expected to emit an
+                // activate_app or write_cells in its next batch.
+            }
+
             debug!(
                 steps_used,
                 perception_elements = perception.elements.len(),
@@ -371,7 +419,24 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                         };
 
                         if succeeded {
-                            merge_into_shared_memory(&mut shared_memory, &step.purpose, data.clone());
+                            // For ExtractWithFallback we key shared_memory
+                            // on the logical `name` (e.g. "btc_price"),
+                            // not on the step purpose. The action result
+                            // carries `{ name, value, selector_used, raw }`
+                            // — we expose just `value` so downstream
+                            // consumers see a clean `shared_memory.btc_price
+                            // = 108432.5` and can plug it into
+                            // write_cells directly.
+                            if let PlannedAction::ExtractWithFallback { name, .. } = &step.action {
+                                let value = data
+                                    .as_object()
+                                    .and_then(|o| o.get("value"))
+                                    .cloned()
+                                    .unwrap_or(data.clone());
+                                merge_into_shared_memory(&mut shared_memory, name, value);
+                            } else {
+                                merge_into_shared_memory(&mut shared_memory, &step.purpose, data.clone());
+                            }
                             consecutive_repeat = 0;
                         } else if action_hash == last_action_hash {
                             consecutive_repeat += 1;
@@ -397,6 +462,71 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                 error = %msg,
                                 "Step failed"
                             );
+                        }
+
+                        // Extraction retry budget: when an
+                        // ExtractWithFallback fails 3 times for the same
+                        // `name`, auto-null in shared_memory and append
+                        // a synthetic "abandoned" record so the planner
+                        // sees the field is lost and stops retrying.
+                        // This generalizes: any page that doesn't
+                        // surface a field after K selector lists will
+                        // free the budget instead of trapping the
+                        // agent in extraction polish.
+                        let mut extraction_budget_hit = false;
+                        if !succeeded {
+                            if let PlannedAction::ExtractWithFallback { name, .. } = &step.action {
+                                let failures_for_name = history
+                                    .iter()
+                                    .filter(|r| !r.succeeded)
+                                    .filter(|r| matches!(
+                                        &r.action,
+                                        PlannedAction::ExtractWithFallback { name: n, .. } if n == name
+                                    ))
+                                    .count();
+                                let already_nulled = shared_memory
+                                    .as_object()
+                                    .and_then(|o| o.get(name))
+                                    .map(|v| v.is_null())
+                                    .unwrap_or(false);
+                                if failures_for_name >= 3 && !already_nulled {
+                                    // Insert null directly —
+                                    // merge_into_shared_memory short-
+                                    // circuits on null values.
+                                    if let Some(obj) = shared_memory.as_object_mut() {
+                                        obj.insert(name.clone(), serde_json::Value::Null);
+                                    } else {
+                                        shared_memory = serde_json::json!({ name.clone(): serde_json::Value::Null });
+                                    }
+                                    history.push(AttemptRecord {
+                                        step_purpose: format!("extraction_budget:{name}"),
+                                        action: step.action.clone(),
+                                        succeeded: false,
+                                        error: Some(format!(
+                                            "extraction for `{name}` abandoned after {} failed attempts — shared_memory.{name} set to null. Stop retrying this field; move on with the goal's other parts.",
+                                            failures_for_name
+                                        )),
+                                        data: serde_json::Value::Null,
+                                    });
+                                    warn!(
+                                        target = %name,
+                                        attempts = failures_for_name,
+                                        "extraction budget exhausted; auto-null in shared_memory"
+                                    );
+                                    extraction_budget_hit = true;
+                                }
+                            }
+                        }
+
+                        // When the extraction retry budget fires, we
+                        // don't want the generic 3-strike failure below
+                        // to ALSO kill the run — the agent is meant to
+                        // continue with a null for this field. Reset
+                        // the consecutive counter so the 3-strike
+                        // guard below sees a clean slate.
+                        if extraction_budget_hit {
+                            consecutive_repeat = 0;
+                            last_action_hash = 0;
                         }
 
                         if non_recoverable {
@@ -432,6 +562,92 @@ fn budget_exhausted(kind: &str, last_purpose: &str, steps_used: u32) -> GoalOutc
             "{kind} budget exhausted after {steps_used} steps"
         )],
     })
+}
+
+/// Decide whether the phase gate should fire this turn.
+///
+/// Returns `Some(AttemptRecord)` when ALL of:
+/// 1. `limits.terminal_app` is set.
+/// 2. `steps_used >= max_steps / 2`.
+/// 3. No `WriteCells` or `SaveDocument` action has yet succeeded in
+///    history (i.e. the agent has not begun landing output).
+/// 4. `perception.app` differs from `terminal_app` (case-insensitive
+///    substring match — macOS reports "Google Chrome", the scenario
+///    might say "Chrome").
+///
+/// The injected record pushes the planner to pivot. If this is the
+/// second fire (caller tracks `phase_gate_fires` and escalates
+/// separately), the caller auto-dispatches activation.
+fn phase_gate_check(
+    limits: &RunLimits,
+    steps_used: u32,
+    history: &[AttemptRecord],
+    perception: &ScreenContext,
+    prior_fires: u32,
+) -> Option<AttemptRecord> {
+    let terminal_app = limits.terminal_app.as_ref()?;
+    if limits.max_steps == 0 {
+        return None;
+    }
+    // Fire at midpoint; then throttle so we don't re-inject every turn
+    // after. Specifically: fire once at >=50% used, and once more at
+    // >=75% used (which is where the auto-dispatch kicks in).
+    let used_pct = steps_used * 100 / limits.max_steps.max(1);
+    let should_consider = match prior_fires {
+        0 => used_pct >= 50,
+        1 => used_pct >= 75,
+        _ => false,
+    };
+    if !should_consider {
+        return None;
+    }
+
+    // Has the agent begun landing output?
+    let landed = history.iter().any(|r| {
+        r.succeeded
+            && matches!(
+                &r.action,
+                PlannedAction::WriteCells { .. }
+                // Future: SaveDocument goes here too.
+            )
+    });
+    if landed {
+        return None;
+    }
+
+    // Is the terminal app already frontmost?
+    let frontmost_matches = app_matches(&perception.app, terminal_app);
+    if frontmost_matches {
+        return None;
+    }
+
+    Some(AttemptRecord {
+        step_purpose: "phase_gate".into(),
+        action: PlannedAction::Wait { ms: 0 },
+        succeeded: false,
+        error: Some(format!(
+            "phase gate: you are {}% through your step budget ({}/{}), \
+             frontmost app is `{}`, but the goal's terminal app is `{}` \
+             and no write_cells/save_document has landed. \
+             Your NEXT batch MUST begin with activate_app({}). \
+             If you ignore this, the runner will dispatch it for you on the next gate fire.",
+            used_pct,
+            steps_used,
+            limits.max_steps,
+            if perception.app.is_empty() { "<unknown>" } else { &perception.app },
+            terminal_app,
+            terminal_app
+        )),
+        data: serde_json::Value::Null,
+    })
+}
+
+/// Loose app-name match: macOS reports `"Google Chrome"`, planners
+/// often say `"Chrome"`. Accept either direction as a substring match.
+fn app_matches(frontmost: &str, target: &str) -> bool {
+    let a = frontmost.trim().to_lowercase();
+    let b = target.trim().to_lowercase();
+    !a.is_empty() && (a.contains(&b) || b.contains(&a))
 }
 
 fn merge_into_shared_memory(memory: &mut serde_json::Value, key: &str, data: serde_json::Value) {
@@ -623,7 +839,6 @@ fn action_kind(action: &PlannedAction) -> String {
         PlannedAction::Wait { .. } => "wait".into(),
         PlannedAction::Custom { action, .. } => format!("custom:{action}"),
         PlannedAction::Extract { .. } => "extract".into(),
-        PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback".into(),
         PlannedAction::Batch { .. } => "batch".into(),
         PlannedAction::Act { .. } => "act".into(),
         PlannedAction::Done { .. } => "done".into(),
@@ -635,6 +850,8 @@ fn action_kind(action: &PlannedAction) -> String {
         PlannedAction::Navigate { .. } => "navigate".into(),
         PlannedAction::NotebookWrites { .. } => "notebook_writes".into(),
         PlannedAction::WriteCells { .. } => "write_cells".into(),
+        PlannedAction::ReadCells { .. } => "read_cells".into(),
+        PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback".into(),
     }
 }
 
@@ -673,6 +890,34 @@ fn action_args_summary(action: &PlannedAction) -> Option<String> {
         PlannedAction::KeyCombo { keys } => Some(keys.join("+")),
         PlannedAction::Wait { ms } => Some(ms.to_string()),
         PlannedAction::ActivateApp { app_name } => Some(app_name.clone()),
+        PlannedAction::WriteCells { app, writes, .. } => {
+            let mut summary = app.clone();
+            let preview = writes
+                .iter()
+                .take(6)
+                .map(|w| format!("{}={}", w.cell_ref, truncate(&w.value, 32)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !preview.is_empty() {
+                summary.push(' ');
+                summary.push_str(&preview);
+            }
+            if writes.len() > 6 {
+                summary.push_str(", ...");
+            }
+            Some(summary)
+        }
+        PlannedAction::ReadCells { app, cell_refs, .. } => {
+            let mut summary = app.clone();
+            if !cell_refs.is_empty() {
+                summary.push(' ');
+                summary.push_str(&cell_refs.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+            }
+            if cell_refs.len() > 8 {
+                summary.push_str(", ...");
+            }
+            Some(summary)
+        }
         PlannedAction::Done { summary, .. } => Some(truncate(summary, 200)),
         PlannedAction::Fail { reason } => Some(truncate(reason, 200)),
         _ => None,
@@ -833,6 +1078,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extraction_retry_budget_auto_nulls_after_three_failures() {
+        // Simulate 3 consecutive ExtractWithFallback failures for the
+        // same name, followed by Done. Expect: run succeeds (not
+        // killed by 3-strike guard), and the agent sees null in
+        // shared_memory for that name.
+        let action = PlannedAction::ExtractWithFallback {
+            name: "btc_price".into(),
+            selectors: vec!["bad.selector".into()],
+            parse_as: "float".into(),
+        };
+        let failing_step = Step {
+            purpose: "err:no match".into(),
+            kind: StepKind::Deterministic,
+            action: action.clone(),
+        };
+        let planner = ScriptedPlanner::new(vec![
+            NextMove::Batch {
+                purpose: "extract".into(),
+                steps: vec![failing_step.clone(), failing_step.clone(), failing_step.clone()],
+            },
+            NextMove::Done {
+                summary: "proceeded with partial data".into(),
+                extracted_data: serde_json::Value::Null,
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("x", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Succeeded { extracted_data, .. } => {
+                // shared_memory (exposed via extracted_data) should have
+                // btc_price: null
+                let got = extracted_data
+                    .as_object()
+                    .and_then(|o| o.get("btc_price"))
+                    .cloned();
+                assert_eq!(got, Some(serde_json::Value::Null), "got {extracted_data:?}");
+            }
+            other => panic!("expected Succeeded with null btc_price, got {other:?}"),
+        }
+    }
+
+    fn empty_perception(app: &str) -> ScreenContext {
+        let mut ctx = empty_context();
+        ctx.app = app.into();
+        ctx
+    }
+
+    #[test]
+    fn phase_gate_does_not_fire_below_midpoint() {
+        let limits = RunLimits {
+            max_steps: 100,
+            timeout_ms: 60_000,
+            max_step_retries: 3,
+            terminal_app: Some("Numbers".into()),
+        };
+        let history: Vec<AttemptRecord> = vec![];
+        let got = phase_gate_check(&limits, 40, &history, &empty_perception("Google Chrome"), 0);
+        assert!(got.is_none(), "below midpoint, gate should not fire");
+    }
+
+    #[test]
+    fn phase_gate_fires_at_midpoint_when_wrong_app_frontmost() {
+        let limits = RunLimits {
+            max_steps: 100,
+            timeout_ms: 60_000,
+            max_step_retries: 3,
+            terminal_app: Some("Numbers".into()),
+        };
+        let history: Vec<AttemptRecord> = vec![];
+        let got = phase_gate_check(&limits, 50, &history, &empty_perception("Google Chrome"), 0);
+        let rec = got.expect("gate should fire at 50% with wrong frontmost");
+        assert!(rec.error.as_ref().unwrap().contains("phase gate"));
+        assert!(rec.error.as_ref().unwrap().contains("activate_app(Numbers)"));
+    }
+
+    #[test]
+    fn phase_gate_suppressed_when_already_on_terminal_app() {
+        let limits = RunLimits {
+            max_steps: 100,
+            timeout_ms: 60_000,
+            max_step_retries: 3,
+            terminal_app: Some("Numbers".into()),
+        };
+        let history: Vec<AttemptRecord> = vec![];
+        // frontmost reports full macOS name; target is shorter —
+        // substring match should succeed.
+        let got = phase_gate_check(&limits, 60, &history, &empty_perception("Numbers"), 0);
+        assert!(got.is_none(), "already on terminal app, should not fire");
+    }
+
+    #[test]
+    fn phase_gate_suppressed_when_write_cells_has_landed() {
+        let limits = RunLimits {
+            max_steps: 100,
+            timeout_ms: 60_000,
+            max_step_retries: 3,
+            terminal_app: Some("Numbers".into()),
+        };
+        let history = vec![AttemptRecord {
+            step_purpose: "already landed".into(),
+            action: PlannedAction::WriteCells {
+                app: "Numbers".into(),
+                sheet: None,
+                table: None,
+                writes: vec![],
+                verify: true,
+            },
+            succeeded: true,
+            error: None,
+            data: serde_json::Value::Null,
+        }];
+        let got = phase_gate_check(&limits, 60, &history, &empty_perception("Google Chrome"), 0);
+        assert!(got.is_none(), "write_cells landed, gate should not fire");
+    }
+
+    #[test]
+    fn phase_gate_fires_once_at_midpoint_and_again_at_threequarter() {
+        let limits = RunLimits {
+            max_steps: 100,
+            timeout_ms: 60_000,
+            max_step_retries: 3,
+            terminal_app: Some("Numbers".into()),
+        };
+        // First fire at 50%: prior_fires=0
+        assert!(
+            phase_gate_check(&limits, 50, &[], &empty_perception("Chrome"), 0).is_some(),
+            "first fire at 50% expected"
+        );
+        // After one fire, at 60% we should NOT re-fire (throttled)
+        assert!(
+            phase_gate_check(&limits, 60, &[], &empty_perception("Chrome"), 1).is_none(),
+            "should throttle between 50 and 75"
+        );
+        // Second fire at 75%: prior_fires=1
+        assert!(
+            phase_gate_check(&limits, 75, &[], &empty_perception("Chrome"), 1).is_some(),
+            "second fire at 75% expected"
+        );
+        // After two fires, never again
+        assert!(
+            phase_gate_check(&limits, 90, &[], &empty_perception("Chrome"), 2).is_none(),
+            "after two fires, should stop"
+        );
+    }
+
+    #[test]
+    fn phase_gate_noop_without_terminal_app() {
+        let limits = RunLimits {
+            max_steps: 100,
+            timeout_ms: 60_000,
+            max_step_retries: 3,
+            terminal_app: None,
+        };
+        assert!(phase_gate_check(&limits, 80, &[], &empty_perception("Chrome"), 0).is_none());
+    }
+
+    #[tokio::test]
     async fn non_recoverable_error_fails_immediately() {
         let planner = ScriptedPlanner::new(vec![batch(
             "try",
@@ -862,6 +1264,7 @@ mod tests {
                     max_steps: 5,
                     timeout_ms: 30_000,
                     max_step_retries: 3,
+                    terminal_app: None,
                 },
             )
             .await;

@@ -35,7 +35,6 @@ Request body:
     "max_steps": 30,
     "step_delay_ms": 500,
     "timeout_ms": 120000,
-    "enable_vision": true,
     "llm_provider": "gemini",
     "llm_model": "gemini-2.5-flash"
   }

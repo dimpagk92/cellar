@@ -27,6 +27,15 @@ import type { Planner } from "./interfaces/planner.js";
 import type { KnowledgeStore } from "./interfaces/knowledge-store.js";
 import type { BrowserBridge } from "./interfaces/browser-bridge.js";
 import type { EventSource } from "./interfaces/event-source.js";
+import type {
+  AttemptRecord,
+  CanonicalStep,
+  CanonicalStepResult,
+  DoneVerdict,
+  NextMove,
+  PerceptionFrame,
+  RuntimeCaps,
+} from "./langgraph/canonical.js";
 
 /**
  * Sanitize a ScreenContext before passing to Rust planner.
@@ -202,6 +211,23 @@ export interface CelNative {
   cortexLastTickAgeMs(): number | null;
   cortexRefreshNow(timeoutMs?: number): Promise<number>;
   runGoalRust(configJson: string): Promise<string>;
+  canonicalPerceive(captureScreenshot?: boolean): Promise<string>;
+  canonicalDecideNext(
+    goal: string,
+    historyJson: string,
+    sharedMemoryJson: string,
+    perceptionJson: string,
+    screenshotBase64?: string | null,
+    capsJson?: string,
+  ): Promise<string>;
+  canonicalVerifyDone(
+    goal: string,
+    summary: string,
+    sharedMemoryJson: string,
+    perceptionJson: string,
+    screenshotBase64?: string | null,
+  ): Promise<string>;
+  canonicalExecuteStep(stepJson: string): Promise<string>;
   // Planner
   planStep(
     goal: string,
@@ -1076,6 +1102,68 @@ export class Cel implements
       throw new Error("Native CEL module not available");
     }
     return JSON.parse(await this.native.runGoalRust(JSON.stringify(config)));
+  }
+
+  /** Read a canonical perception frame for LangGraph orchestration. */
+  async canonicalPerceive(captureScreenshot = true): Promise<PerceptionFrame> {
+    if (!this.native) {
+      throw new Error("Native CEL module not available");
+    }
+    return JSON.parse(await this.native.canonicalPerceive(captureScreenshot));
+  }
+
+  /** Ask the Rust canonical planner for the next move. */
+  async canonicalDecideNext(
+    goal: string,
+    history: AttemptRecord[],
+    sharedMemory: unknown,
+    perception: ScreenContext,
+    screenshotBase64: string | null,
+    caps: RuntimeCaps,
+  ): Promise<NextMove> {
+    if (!this.native) {
+      throw new Error("Native CEL module not available");
+    }
+    return JSON.parse(
+      await this.native.canonicalDecideNext(
+        goal,
+        JSON.stringify(history),
+        JSON.stringify(sharedMemory ?? {}),
+        JSON.stringify(sanitizeContextForRust(perception)),
+        screenshotBase64,
+        JSON.stringify(caps ?? {}),
+      ),
+    );
+  }
+
+  /** Validate a Done claim against fresh Rust-side verification rules. */
+  async canonicalVerifyDone(
+    goal: string,
+    summary: string,
+    sharedMemory: unknown,
+    perception: ScreenContext,
+    screenshotBase64: string | null,
+  ): Promise<DoneVerdict> {
+    if (!this.native) {
+      throw new Error("Native CEL module not available");
+    }
+    return JSON.parse(
+      await this.native.canonicalVerifyDone(
+        goal,
+        summary,
+        JSON.stringify(sharedMemory ?? {}),
+        JSON.stringify(sanitizeContextForRust(perception)),
+        screenshotBase64,
+      ),
+    );
+  }
+
+  /** Execute one canonical Rust step through the booted Cortex. */
+  async canonicalExecuteStep(step: CanonicalStep): Promise<CanonicalStepResult> {
+    if (!this.native) {
+      throw new Error("Native CEL module not available");
+    }
+    return JSON.parse(await this.native.canonicalExecuteStep(JSON.stringify(step)));
   }
 
   // --- CDP ---

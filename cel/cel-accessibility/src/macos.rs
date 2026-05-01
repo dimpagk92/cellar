@@ -467,7 +467,6 @@ impl MacAccessibility {
         let label = get_ax_string(element, "AXTitle")
             .or_else(|| get_ax_string(element, "AXDescription"))
             .or_else(|| get_ax_string(element, "AXHelp"));
-        let bounds = get_ax_bounds(element);
 
         let id = {
             use std::collections::hash_map::DefaultHasher;
@@ -475,12 +474,12 @@ impl MacAccessibility {
             let mut hasher = DefaultHasher::new();
             role_str.hash(&mut hasher);
             label.hash(&mut hasher);
-            if let Some(ref b) = bounds {
-                b.x.hash(&mut hasher);
-                b.y.hash(&mut hasher);
-                b.width.hash(&mut hasher);
-                b.height.hash(&mut hasher);
-            }
+            // NOTE: bounds (x/y/width/height) are intentionally NOT hashed.
+            // Including them made IDs rotate whenever a window moved or content reflowed,
+            // breaking ax_action lookups (stored ID no longer matched the live element).
+            // Known limitation: sibling-index (my_count/*count) still causes rotation when
+            // tree membership changes. Fixing that requires replacing the global counter
+            // with a content-derived sibling key — separate follow-up.
             depth.hash(&mut hasher);
             (*count).hash(&mut hasher);
             format!("ax:{:016x}", hasher.finish())
@@ -682,6 +681,23 @@ impl MacAccessibility {
                 properties.insert("max_value".into(), v);
             }
         }
+        if role_str == "AXTable" || role_str == "AXOutline" {
+            if let Some(v) = get_ax_array_len(element, "AXRows") {
+                properties.insert("row_count".into(), v.to_string());
+            }
+            if let Some(v) = get_ax_array_len(element, "AXColumns") {
+                properties.insert("column_count".into(), v.to_string());
+            }
+        }
+        if matches!(role_str.as_str(), "AXDialog" | "AXSheet") {
+            properties.insert("dialog".into(), "true".into());
+        }
+        if role_str == "AXRow" {
+            properties.insert("table_row".into(), "true".into());
+        }
+        if role_str == "AXCell" {
+            properties.insert("table_cell".into(), "true".into());
+        }
 
         // Generate stable ID from content hash
         let id = {
@@ -690,12 +706,12 @@ impl MacAccessibility {
             let mut hasher = DefaultHasher::new();
             role_str.hash(&mut hasher);
             label.hash(&mut hasher);
-            if let Some(ref b) = bounds {
-                b.x.hash(&mut hasher);
-                b.y.hash(&mut hasher);
-                b.width.hash(&mut hasher);
-                b.height.hash(&mut hasher);
-            }
+            // NOTE: bounds (x/y/width/height) are intentionally NOT hashed.
+            // Including them made IDs rotate whenever a window moved or content reflowed,
+            // breaking ax_action lookups (stored ID no longer matched the live element).
+            // Known limitation: sibling-index (my_count/*count) still causes rotation when
+            // tree membership changes. Fixing that requires replacing the global counter
+            // with a content-derived sibling key — separate follow-up.
             depth.hash(&mut hasher);
             my_count.hash(&mut hasher);
             format!("ax:{:016x}", hasher.finish())
@@ -1335,7 +1351,6 @@ fn find_and_set_value(
     let label = get_ax_string(element, "AXTitle")
         .or_else(|| get_ax_string(element, "AXDescription"))
         .or_else(|| get_ax_string(element, "AXHelp"));
-    let bounds = get_ax_bounds(element);
 
     let id = {
         use std::collections::hash_map::DefaultHasher;
@@ -1343,12 +1358,8 @@ fn find_and_set_value(
         let mut hasher = DefaultHasher::new();
         role_str.hash(&mut hasher);
         label.hash(&mut hasher);
-        if let Some(ref b) = bounds {
-            b.x.hash(&mut hasher);
-            b.y.hash(&mut hasher);
-            b.width.hash(&mut hasher);
-            b.height.hash(&mut hasher);
-        }
+        // NOTE: bounds (x/y/width/height) are intentionally NOT hashed.
+        // See corresponding comment in build_element and find_and_perform_action.
         depth.hash(&mut hasher);
         (*count).hash(&mut hasher);
         format!("ax:{:016x}", hasher.finish())
@@ -1477,7 +1488,6 @@ fn find_and_check_settable(
     let label = get_ax_string(element, "AXTitle")
         .or_else(|| get_ax_string(element, "AXDescription"))
         .or_else(|| get_ax_string(element, "AXHelp"));
-    let bounds = get_ax_bounds(element);
 
     let id = {
         use std::collections::hash_map::DefaultHasher;
@@ -1485,12 +1495,8 @@ fn find_and_check_settable(
         let mut hasher = DefaultHasher::new();
         role_str.hash(&mut hasher);
         label.hash(&mut hasher);
-        if let Some(ref b) = bounds {
-            b.x.hash(&mut hasher);
-            b.y.hash(&mut hasher);
-            b.width.hash(&mut hasher);
-            b.height.hash(&mut hasher);
-        }
+        // NOTE: bounds (x/y/width/height) are intentionally NOT hashed.
+        // See corresponding comment in build_element and find_and_perform_action.
         depth.hash(&mut hasher);
         (*count).hash(&mut hasher);
         format!("ax:{:016x}", hasher.finish())
@@ -1592,6 +1598,21 @@ fn get_ax_bool(element: AXUIElementRef, attr: &str) -> Option<bool> {
             "0" => Some(false),
             _ => None,
         })
+    }
+}
+
+fn get_ax_array_len(element: AXUIElementRef, attr: &str) -> Option<usize> {
+    let cf = get_ax_attribute(element, attr)?;
+    let cf_ref = cf.as_CFTypeRef();
+    if unsafe { core_foundation::array::CFArrayGetTypeID() }
+        == unsafe { core_foundation::base::CFGetTypeID(cf_ref) }
+    {
+        let arr: CFArray<CFType> = unsafe {
+            CFArray::wrap_under_get_rule(cf_ref as core_foundation::array::CFArrayRef)
+        };
+        Some(arr.len() as usize)
+    } else {
+        None
     }
 }
 
@@ -1732,6 +1753,7 @@ fn get_ax_actions(element: AXUIElementRef) -> Vec<String> {
 fn map_role(role: &str, subrole: Option<&str>) -> ElementRole {
     match role {
         "AXButton" => ElementRole::Button,
+        "AXMenuButton" => ElementRole::Button,
         "AXTextField" | "AXTextArea" | "AXSearchField" | "AXSecureTextField" => ElementRole::Input,
         "AXStaticText" => ElementRole::Text,
         "AXWindow" => ElementRole::Window,
@@ -1742,7 +1764,7 @@ fn map_role(role: &str, subrole: Option<&str>) -> ElementRole {
                 ElementRole::List
             }
         }
-        "AXRow" => ElementRole::ListItem,
+        "AXRow" => ElementRole::TableRow,
         "AXCell" => ElementRole::TableCell,
         "AXMenu" | "AXMenuBar" | "AXMenuBarItem" => ElementRole::Menu,
         "AXMenuItem" => ElementRole::MenuItem,
@@ -1752,8 +1774,10 @@ fn map_role(role: &str, subrole: Option<&str>) -> ElementRole {
         "AXSlider" => ElementRole::Slider,
         "AXScrollBar" | "AXScrollArea" => ElementRole::ScrollBar,
         "AXTabGroup" => ElementRole::Tab,
+        "AXTabButton" => ElementRole::TabItem,
         "AXRadioGroup" => ElementRole::Group,
         "AXOutline" => ElementRole::TreeView,
+        "AXDisclosureTriangle" => ElementRole::TreeItem,
         "AXToolbar" => ElementRole::Toolbar,
         "AXGroup" => {
             // Check subrole for more specific types
@@ -1841,6 +1865,14 @@ mod tests {
             ElementRole::Custom(s) => assert_eq!(s, "AXSomethingNew"),
             _ => panic!("Expected Custom variant"),
         }
+    }
+
+    #[test]
+    fn test_map_role_table_and_dialog_variants() {
+        assert!(matches!(map_role("AXRow", None), ElementRole::TableRow));
+        assert!(matches!(map_role("AXCell", None), ElementRole::TableCell));
+        assert!(matches!(map_role("AXTabButton", None), ElementRole::TabItem));
+        assert!(matches!(map_role("AXDialog", None), ElementRole::Dialog));
     }
 
     #[test]

@@ -16,6 +16,7 @@
 
 use async_trait::async_trait;
 use cel_context::ScreenContext;
+use serde::{Deserialize, Serialize};
 
 use crate::canonical::{AttemptRecord, NextMove, RuntimeCaps};
 
@@ -86,7 +87,7 @@ pub trait PlanProducer: Send + Sync {
 }
 
 /// Outcome of a runtime Done-validation check.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoneVerdict {
     /// True if the current perception/screenshot supports the claimed
     /// summary. False rejects the terminal and makes the runner loop.

@@ -1,285 +1,188 @@
 # CEL Runtime Architecture
 
+> Current direction
+> The active architecture is defined by [docs/adapters-cel-agents.md](./adapters-cel-agents.md).
+> This document explains how that direction maps onto the current repository.
+
 ## Overview
 
-CEL (Computer Experience Layer) is a computer-use automation framework. It observes any application on screen, plans actions via LLM, executes them through app-specific adapters, and verifies the results — all in a tight loop.
+Cellar should be understood as a three-layer system:
 
-The architecture has four components with strict ownership boundaries.
+1. `Adapters` — app-specific truth and execution
+2. `CEL / crates` — device understanding, context fusion, and execution substrate
+3. `Agents` — pluggable planners and orchestrators
 
-## Components
+The repository's main value is not "a built-in planner."
+The main value is:
 
-### Cortex — The I/O Layer
+- understanding the device honestly
+- normalizing many signals into one usable context
+- exposing stable actions and execution results
+- routing work into the correct app substrate or adapter
 
-The Cortex owns all interaction with the outside world. It is CEL's nervous system.
+## Layer 1: Adapters
 
-**Perception**: Every 200ms, the Cortex reads from all available sources and builds one unified mental model:
+Adapters are the extensibility layer.
 
-```
-Cortex tick (200ms):
-  ├── Accessibility tree (macOS AXUIElement / Linux AT-SPI2)
-  ├── Vision (screenshot → LLM, when < 5 actionable elements)
-  ├── CDP (browser DOM extraction, when Chromium focused)
-  ├── Adapter: Excel (COM / AppleScript)           ← plugin
-  ├── Adapter: SAP GUI (scripting API)              ← plugin
-  └── ... any registered adapter                    ← plugin
-      │
-      ▼
-  Confidence scoring + dedup + noise suppression
-      │
-      ▼
-  MentalModel {
-      current_context    — all elements from all sources, unified
-      element_adapter_index — which adapter owns which element
-      temporal           — loading state, errors, idle tracking
-      stability          — stable vs volatile elements
-      anomalies          — dialogs, auth prompts, app switches
-      freshness          — how stale the model is
-  }
-```
+They should let first-party and third-party developers add or extend support for applications like:
 
-**Execution dispatch**: When the Goal Runner says "execute this action", the Cortex looks up which adapter owns the target element and routes the call:
+- Numbers
+- Figma
+- Slides
+- Cursor
+- Docker Desktop
+- Slack
+- richer browser/app domain integrations
 
-```
-cortex.execute(Click { target_id: "cell:A1" })
-  → lookup "cell:A1" in element_adapter_index
-  → found: adapter "excel"
-  → excel_adapter.execute("click", { target_id: "cell:A1" })
-  → return ActionResult { success: true }
-```
+Adapters own app-specific structured capabilities.
 
-The Cortex is a **dumb router** for execution. No retry, no escalation, no policy. Just dispatch.
+Examples:
 
-**Adapter lifecycle**: The Cortex discovers adapters from `~/.cellar/adapters/`, reads their manifests, activates them when their target app is frontmost, and deactivates when the app loses focus.
+- deterministic spreadsheet reads and writes
+- domain-specific document APIs
+- structured app state that generic AX or vision cannot expose well
 
-**Owns**: adapter lifecycle, context fusion, execution dispatch, mental model, freshness, anomalies.
-**Does NOT own**: planning, retry policy, escalation, verification decisions.
+AX, CDP, and generic system signals still matter, but adapters are where app truth should live when an app provides one.
 
----
+## Layer 2: CEL / Crates
 
-### Goal Runner — The Intelligence Layer
+CEL is the platform core.
 
-The Goal Runner is the main execution loop. It is the decision-making executive.
+It owns:
 
-```
-loop {
-    // PERCEIVE — read Cortex mental model (0ms, Arc<RwLock>)
-    context = cortex.read_model()
+- context fusion across AX, CDP, vision, signals, network, audio, and adapters
+- canonical data types for context, actions, and results
+- stream freshness and anomaly tracking
+- adapter lifecycle and dispatch
+- execution routing
+- MCP / CLI / SDK / N-API surfaces
+- memory and context management when they improve understanding and execution
 
-    // PLAN — call Planner (2-15s, LLM call)
-    step = planner.plan_step(goal, context, history)
+It should remain valuable regardless of which agent runtime sits above it.
 
-    // EXECUTE — dispatch through Cortex (routes to adapter, ~10ms)
-    result = cortex.execute(step.action, context)
+That means CEL should still make sense if the caller is:
 
-    // VERIFY — read fresh model, diff (0ms)
-    after = cortex.read_model()
-    verified = diff(context, after)
+- LangGraph
+- Mastra
+- Claude Code
+- Codex
+- GPT tool calling
+- Gemini
+- Cursor
+- n8n
+- a future in-house runtime
 
-    // REFLECT — update cognitive state
-    history.record(step, result, verified)
-    notebook.write(step.notebook_writes)
-    trail.add(step.reasoning, result)
+## Layer 3: Agents
 
-    // GATE — should we continue?
-    if done → return success
-    if budget exhausted → return max_steps
-    if loop_detected → escalate or replan
-    if consecutive_failures → replan (T1-T4 tiers)
-}
-```
+Agents are clients of CEL.
 
-**Execution policy** (absorbed from the former TS runtime kernel):
-- Strategy routing: structured → semantic → vision → terminal_failure
-- Escalation: if structured fails, try semantic; if semantic fails, try vision
-- Terminal failure: vision ceiling reached, stop
-- Refresh: if context is stale, re-read before acting
-- Side-effect detection: cross-app shift, no-diff warnings
+They own:
 
-**Cognitive loop** (orchestration intelligence):
-- Loop detection: same action repeated? ping-pong? stale context?
-- Replanning tiers:
-  - T1 (1-2 failures): nudge in next prompt
-  - T2 (3+ failures): new strategy, reset loop detector
-  - T3 (strategy exhausted): backtrack to checkpoint
-  - T4 (multiple milestones fail): full goal re-assessment
-- Notebook: persist data (prices, URLs, confirmation numbers) across replans
-- Cognitive trail: narrative log of decisions
-- Strategy tracker: prevent trying the same failed approach twice
-- Checkpoint manager: snapshot/restore for T3 backtracking
+- planning
+- orchestration
+- retries
+- branching
+- checkpointing
+- human approval policies
+- completion policies
 
-**Owns**: planning calls, execution policy, verification, cognitive loop, replanning.
-**Does NOT own**: adapter details, context extraction, I/O dispatch.
+The repo can include built-in planners and runners, but they should be treated as:
 
----
+- reference implementations
+- examples
+- integration paths
+- transitional code where useful
 
-### Planner — The Decision Maker
+They should not define the platform boundary.
 
-The Planner is a pure function: `(goal, context, history) → PlannedStep`.
+## Practical Boundary
 
-It does NOT run its own loop — it is called by the Goal Runner on each step.
+The preferred boundary is:
 
-**Internals**:
-1. Detect task type (navigation, extraction, form fill, comparison, general)
-2. Build composable system prompt (rules tailored to task type)
-3. Build user prompt with numbered element table
-4. Inject adapter-specific actions when available (e.g., `write_cell` for Excel)
-5. Call LLM (Gemini Flash default, Claude Sonnet for escalation)
-6. Parse PlannedStep from response
-7. Resolve numbered indices back to real element IDs
-
-**Context distillation**: Before sending context to the LLM, the Planner scores elements by goal relevance (keyword matching, semantic synonyms, phrase boost, extraction-goal awareness) and sends only the top N elements.
-
-**Owns**: prompt construction, model routing, context distillation, index resolution.
-**Does NOT own**: when to plan (Runner decides), what to do on failure (Runner decides).
-
----
-
-### Adapters — Cortex Drivers
-
-Adapters are I/O + execution plugins for specific applications. They are managed by the Cortex.
-
-**Declaration** (`adapter.json`):
-```json
-{
-  "name": "excel",
-  "display_name": "Microsoft Excel",
-  "app_patterns": ["Microsoft Excel", "LibreOffice Calc"],
-  "platform": ["macos", "windows"],
-  "context": {
-    "element_types": ["cell", "sheet_tab", "formula_bar", "ribbon_button"],
-    "refresh_ms": 500,
-    "confidence": 0.95
-  },
-  "actions": {
-    "read_cell": { "params": {"row": "number", "col": "number"} },
-    "write_cell": { "params": {"row": "number", "col": "number", "value": "string"} },
-    "select_range": { "params": {"range": "string"} }
-  }
-}
+```mermaid
+flowchart LR
+  A["Agent Runtime"] --> B["MCP / CLI / SDK / N-API"]
+  B --> C["CEL Core"]
+  C --> D["AX / CDP / Vision / Signals"]
+  C --> E["Adapters"]
+  E --> F["Numbers / Figma / Slack / etc."]
 ```
 
-**Interface** (all adapters implement this, regardless of language):
-```
-activate()      — connect to the target app's API
-deactivate()    — disconnect and release resources
-get_context()   → ContextElement[]  (CEL's native type)
-execute(action, params) → ActionResult
-probe()         → bool  (is the target app running?)
-```
+In plain terms:
 
-**Three runtimes**:
+- agents ask CEL what the machine looks like
+- agents ask CEL to execute actions
+- CEL decides how to fulfill that action
+- adapters provide app-specific truth where needed
 
-| Runtime | Language | Overhead | Use case |
-|---------|----------|----------|----------|
-| Native (Rust) | Rust `.dylib` | 0ms, in-process | First-party, performance-critical |
-| Process | Any (Python, TS, Go) | ~0.5ms, stdio JSON lines | Community adapters |
-| WASM | WASM-compilable | ~1ms, wasmtime | Sandboxed, portable (future) |
+## Numbers Example
 
-**Owns**: app-specific I/O (reading context, executing actions), capability declaration.
-**Does NOT own**: lifecycle (Cortex manages), routing (Cortex dispatches), policy (Runner decides).
+Numbers is a good example of the intended split.
 
----
+- AX should remain strong for window handoff, dialogs, focus, and generic desktop understanding.
+- A `Numbers` adapter should own spreadsheet-model truth such as deterministic `write_cells` and future `read_cells`.
 
-## Data Flow
+So the right approach is not "Numbers must be solved only through AX."
+The right approach is:
 
-```
-Goal Runner                    Cortex                         Adapters
-    │                            │                              │
-    │── read_model() ──────────►│                              │
-    │◄── MentalModel ──────────│  (200ms tick reads from:)    │
-    │                            │  ├── a11y tree              │
-    │── plan_step() ──►Planner  │  ├── CDP                    │
-    │◄── PlannedStep           │  ├── adapter.get_context() ─►│
-    │                            │  └── merge + score          │◄── ContextElement[]
-    │── cortex.execute(action) ─►│                              │
-    │                            │── lookup element→adapter ───►│
-    │                            │◄── adapter.execute(action) ──│
-    │◄── ActionResult ─────────│                              │
-    │                            │                              │
-    │── read_model() (verify) ──►│                              │
-    │◄── MentalModel (fresh) ──│                              │
-```
+- improve AX because it helps every desktop workflow
+- add adapter-backed truth because spreadsheets are not a pure AX problem
 
-The Goal Runner never touches adapters. It talks only to the Cortex and the Planner. The Cortex handles all I/O routing. The Planner handles all LLM interaction.
+## Current Repository Mapping
 
----
+### Core CEL crates
 
-## Ownership Boundaries
+- `cel-accessibility` — AX / desktop structure
+- `cel-context` — context fusion and normalization
+- `cel-cortex` — execution routing, runtime state, adapter dispatch
+- `cel-input` — input primitives and app scripting bridges
+- `cel-cdp` — browser/CDP substrate
+- `cel-signals` / `cel-network` / `cel-display` / `cel-vision` — supporting streams
+- `cel-napi` — native boundary for JS/TS callers
 
-| Concern | Owner | NOT |
-|---------|-------|-----|
-| Adapter lifecycle | Cortex | Runner, Planner |
-| Context reading (perception) | Cortex | Runner |
-| Execution dispatch | Cortex | Runner |
-| Mental model | Cortex | Runner |
-| Freshness tracking | Cortex | Runner |
-| Planning (LLM calls) | Planner (called by Runner) | Cortex |
-| Context distillation | Planner | Cortex |
-| Prompt construction | Planner | Runner |
-| Execution policy (retry, escalate) | Runner | Cortex, Planner |
-| Verification (did it land?) | Runner | Cortex |
-| Loop detection | Runner | Planner |
-| Replanning (T1-T4) | Runner | Planner |
-| Cognitive state (notebook, trail) | Runner | Cortex |
-| App-specific I/O | Adapters | Cortex, Runner |
+### Adapter surface
 
----
+- `adapters/` — app/domain-specific integrations
+- app-specific execution helpers in core crates are acceptable when they are clearly adapter-like, but they should evolve toward explicit adapter surfaces
 
-## Implementation
+### Agent integrations
 
-| Component | Language | Crate/Package | Key file |
-|-----------|----------|--------------|----------|
-| Cortex | Rust | `cel-cortex` | `cortex.rs`, `adapter.rs` |
-| Goal Runner | Rust | `cel-goal-runner` | `runner.rs` |
-| Planner | Rust | `cel-planner` | `planner.rs`, `prompt.rs` |
-| Adapters (native) | Rust | `adapter-common` | per-adapter crate |
-| Adapters (process) | Any | SDK packages | `cellar-adapter-sdk` |
-| MCP Server | TypeScript | `mcp-server` | `server.ts` |
-| NAPI Bridge | Rust | `cel-napi` | `goal_runner.rs`, `cortex.rs` |
+- `agent/` — JS/TS agent integrations and runtime experiments
+- `mcp-server/` — tool surface for external agents
+- `cli/` — local entrypoints and debugging surfaces
+- `cel-planner` / `cel-goal-runner` — built-in planner/runner implementations that may continue to exist, but should be viewed as clients of CEL rather than the platform's identity
 
-The MCP server is the TS entry point. It boots the Cortex, creates the NAPI bridge, and exposes CEL's 4 MCP tools (cel_see, cel_act, cel_think, cel_perceive). The `run_goal` mode in cel_think calls the Rust Goal Runner via NAPI.
+## Evaluation Strategy
 
----
+Evals should primarily test CEL and adapters.
 
-## Adapter Development
+That means:
 
-Community adapters communicate with CEL via a simple JSON-lines protocol over stdio:
+- prefer agent-agnostic scenarios when possible
+- focus on context quality, grounding, handoff reliability, and execution truth
+- isolate runtime-specific acceptance tests under clearly named folders
 
-```
-← {"method":"activate"}
-→ {"ok":true}
+The main eval question should be:
 
-← {"method":"get_context"}
-→ {"elements":[{"id":"A1","element_type":"cell","label":"Revenue","value":"1420000",...}]}
+"Can a competent external agent use CEL to do this task?"
 
-← {"method":"execute","action":"write_cell","params":{"row":1,"col":2,"value":"hello"}}
-→ {"success":true}
+not:
 
-← {"method":"deactivate"}
-→ {"ok":true}
-```
+"Did our preferred planner implementation pass?"
 
-An adapter package is a directory in `~/.cellar/adapters/` with:
-- `adapter.json` — manifest declaring capabilities
-- An entrypoint (e.g., `adapter.py`, `adapter.ts`, `adapter` binary)
+## Design Rules
 
-SDKs handle the protocol boilerplate:
-- Python: `pip install cellar-adapter-sdk`
-- TypeScript: `npm install @cellar/adapter-sdk`
-- Rust: `cargo add cellar-adapter-sdk` (in-process, zero overhead)
+1. Keep contracts stable.
+   Context, actions, results, and adapter interfaces matter more than planner internals.
 
----
+2. Keep planning pluggable.
+   Adding one more planner integration is acceptable. Baking the whole architecture around one is not.
 
-## Benchmark Results (April 2026)
+3. Prefer app truth over UI guessing.
+   If an app exposes a structured model, use an adapter.
 
-Hybrid suite — 5 tasks testing browser-desktop handoff, stale state recovery, ambiguous targets, side-effect detection, and terminal failure handling.
+4. Keep the generic substrate strong.
+   AX, signals, CDP, and fusion quality still matter for all apps, including apps with adapters.
 
-| Tool | Avg Time | LLM Calls | Cost/Task | Success |
-|------|----------|-----------|-----------|---------|
-| **CEL** | **20.8s** | **1.4** | **$0.0005** | **100%** |
-| Browser-Use OSS | 23.4s | 3.0 | $0.001 | 100% |
-| Stagehand v3 | 35.6s | 18.2 | $0.005 | 20% |
-| Computer Use | 36.2s | 6.2 | $0.155 | 100% |
-| Browser-Use Cloud | 46.5s | 5.6 | $0.003 | 100% |
-
-CEL is **1.7x faster** and **310x cheaper** than Anthropic Computer Use, with the same accuracy.
+5. Treat built-in planners as optional.
+   They can be good products, examples, or benchmarks, but they are not the main moat right now.

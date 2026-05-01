@@ -112,8 +112,8 @@ pub fn boot_cortex() -> napi::Result<()> {
     let display = cel_display::create_capture();
     let network = cel_network::create_monitor();
     let signals = cel_signals::create_signal_bus();
-    let mut merger = cel_context::ContextMerger::with_all(a11y, display, network)
-        .with_signals(signals);
+    let mut merger =
+        cel_context::ContextMerger::with_all(a11y, display, network).with_signals(signals);
     if let Ok(vision) = cel_vision::create_provider_from_env() {
         merger = merger.with_vision(vision).with_runtime(handle.clone());
     }
@@ -125,6 +125,7 @@ pub fn boot_cortex() -> napi::Result<()> {
     // automatically when a CDP target is bound; this is the fallback for
     // desktop apps.
     let mut cortex = cel_cortex::Cortex::new("mcp-default".into()).with_native_input_unsafe();
+    cortex.register_adapter(Box::new(adapter_numbers::NumbersAdapter::new()));
     if let Some((capture, config)) = default_audio_capture() {
         cortex = cortex.with_audio(capture, config);
         stream_status.audio_capture = true;
@@ -169,9 +170,10 @@ pub fn read_cortex_model() -> napi::Result<String> {
         .lock()
         .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
 
-    let model_lock = state.model_handle.as_ref().ok_or_else(|| {
-        napi::Error::from_reason("Cortex not running. Call boot_cortex() first.")
-    })?;
+    let model_lock = state
+        .model_handle
+        .as_ref()
+        .ok_or_else(|| napi::Error::from_reason("Cortex not running. Call boot_cortex() first."))?;
 
     let mut model = handle.block_on(async { model_lock.read().await.clone() });
     let last_event_ms = model
@@ -202,7 +204,9 @@ pub fn notify_cortex_action(action: String) -> napi::Result<()> {
         .lock()
         .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
 
-    let cortex = state.cortex.as_ref()
+    let cortex = state
+        .cortex
+        .as_ref()
         .ok_or_else(|| napi::Error::from_reason("Cortex not running"))?;
 
     handle.block_on(cortex.notify_action(&action));
@@ -217,7 +221,9 @@ pub fn report_cortex_action_failure() -> napi::Result<()> {
         .lock()
         .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
 
-    let cortex = state.cortex.as_ref()
+    let cortex = state
+        .cortex
+        .as_ref()
         .ok_or_else(|| napi::Error::from_reason("Cortex not running"))?;
 
     handle.block_on(cortex.report_action_failure());
@@ -232,7 +238,9 @@ pub fn report_cortex_action_success() -> napi::Result<()> {
         .lock()
         .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
 
-    let cortex = state.cortex.as_ref()
+    let cortex = state
+        .cortex
+        .as_ref()
         .ok_or_else(|| napi::Error::from_reason("Cortex not running"))?;
 
     handle.block_on(cortex.report_action_success());
@@ -247,7 +255,9 @@ pub fn consume_cortex_anomalies() -> napi::Result<String> {
         .lock()
         .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
 
-    let cortex = state.cortex.as_ref()
+    let cortex = state
+        .cortex
+        .as_ref()
         .ok_or_else(|| napi::Error::from_reason("Cortex not running"))?;
 
     let anomalies = handle.block_on(cortex.consume_anomalies());
@@ -324,11 +334,9 @@ pub async fn cortex_refresh_now(timeout_ms: Option<u32>) -> napi::Result<u32> {
         let state = get_state()
             .lock()
             .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
-        state
-            .cortex
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| napi::Error::from_reason("Cortex not running. Call boot_cortex() first."))?
+        state.cortex.as_ref().cloned().ok_or_else(|| {
+            napi::Error::from_reason("Cortex not running. Call boot_cortex() first.")
+        })?
     };
 
     let timeout = timeout_ms.map(|v| v as u64);

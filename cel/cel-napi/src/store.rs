@@ -113,7 +113,9 @@ pub fn update_working_memory(
     workflow_name: String,
     content: String,
 ) -> napi::Result<()> {
-    with_store(&db_path, |s| s.update_working_memory(&workflow_name, &content))
+    with_store(&db_path, |s| {
+        s.update_working_memory(&workflow_name, &content)
+    })
 }
 
 /// Add an observation. Returns the observation ID.
@@ -189,6 +191,11 @@ pub fn add_scoped_knowledge(
     tags: Option<String>,
 ) -> napi::Result<i64> {
     with_store(&db_path, |s| {
-        s.add_scoped_knowledge(&content, &source, workflow_scope.as_deref(), tags.as_deref())
+        s.add_scoped_knowledge(
+            &content,
+            &source,
+            workflow_scope.as_deref(),
+            tags.as_deref(),
+        )
     })
 }

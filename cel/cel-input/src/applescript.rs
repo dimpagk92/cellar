@@ -1,4 +1,4 @@
-//! AppleScript / JXA bridge for deterministic spreadsheet cell writes.
+//! AppleScript / JXA bridge for deterministic spreadsheet cell I/O.
 //!
 //! The problem this solves: driving Numbers (or any spreadsheet) via
 //! raw keystrokes is not atomic. The sequence `navigate → Delete →
@@ -14,15 +14,22 @@
 //! One JXA script handles a whole batch of cells in a single
 //! `osascript` spawn.
 //!
-//! This module is the Rust side of that bridge. It builds a JXA
-//! script from the requested writes, spawns `osascript`, parses the
-//! pipe-separated readback, and surfaces a structured
-//! `InputError::AppleScriptPermission` when macOS Automation
-//! permission hasn't been granted (error code `-1743`).
+//! This module is the Rust side of that bridge. It builds JXA
+//! scripts for deterministic cell reads / writes, spawns
+//! `osascript`, parses the pipe-separated readback, and surfaces a
+//! structured `InputError::AppleScriptPermission` when macOS
+//! Automation permission hasn't been granted (error code `-1743`).
 
 use std::process::Command;
 
 use crate::InputError;
+
+const NUMBERS_APP_CANDIDATES: &[&str] = &[
+    "/Applications/Numbers Creator Studio.app",
+    "/Applications/Numbers.app",
+    "Numbers",
+    "com.apple.Numbers",
+];
 
 /// One cell write request.
 #[derive(Debug, Clone)]
@@ -34,6 +41,23 @@ pub struct CellWrite {
     /// according to the cell's display format. Text values pass
     /// through unchanged.
     pub value: String,
+}
+
+/// Read a batch of cells from Numbers in a single AppleScript call.
+///
+/// Resolves to `sheet 1 / table 1` of the frontmost Numbers document
+/// when `sheet` and `table` are `None`.
+pub fn read_numbers_cells(
+    sheet: Option<&str>,
+    table: Option<&str>,
+    cell_refs: &[String],
+) -> Result<Vec<String>, InputError> {
+    if cell_refs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let script = build_jxa_read_script(sheet, table, cell_refs);
+    run_numbers_jxa(&script)
 }
 
 /// Write a batch of cells into Numbers in a single AppleScript call.
@@ -71,13 +95,21 @@ pub fn write_numbers_cells(
         return Ok(Vec::new());
     }
 
-    let script = build_jxa_script(sheet, table, writes, verify);
+    let script = build_jxa_write_script(sheet, table, writes, verify);
+    let readbacks = run_numbers_jxa(&script)?;
+    if verify {
+        Ok(readbacks)
+    } else {
+        Ok(Vec::new())
+    }
+}
 
+fn run_numbers_jxa(script: &str) -> Result<Vec<String>, InputError> {
     let output = Command::new("osascript")
         .arg("-l")
         .arg("JavaScript")
         .arg("-e")
-        .arg(&script)
+        .arg(script)
         .output()
         .map_err(|e| InputError::Failed(format!("failed to spawn osascript: {e}")))?;
 
@@ -109,17 +141,12 @@ pub fn write_numbers_cells(
         )));
     }
 
-    if !verify {
-        return Ok(Vec::new());
-    }
-
-    // Verification mode: stdout is pipe-separated readbacks.
     Ok(stdout.split('|').map(|s| s.to_string()).collect())
 }
 
-/// Build the JXA script. Strings are embedded via JSON encoding to
+/// Build the write JXA script. Strings are embedded via JSON encoding to
 /// dodge quoting landmines (apostrophes, backslashes, unicode).
-fn build_jxa_script(
+fn build_jxa_write_script(
     sheet: Option<&str>,
     table: Option<&str>,
     writes: &[CellWrite],
@@ -127,6 +154,7 @@ fn build_jxa_script(
 ) -> String {
     let sheet_js = sheet_selector(sheet);
     let table_js = table_selector(table);
+    let numbers_app_resolver = numbers_app_resolver_jxa();
 
     // Encode the writes as a JSON array so embedding is safe regardless
     // of the values' content. `serde_json::to_string` produces valid
@@ -140,7 +168,8 @@ fn build_jxa_script(
 
     format!(
         r#"
-        var numbers = Application('Numbers');
+        {numbers_app_resolver}
+        var numbers = resolveNumbersApp();
         if (numbers.documents.length === 0) {{
             throw new Error('-1728: no open Numbers document');
         }}
@@ -160,10 +189,69 @@ fn build_jxa_script(
         }}
         results.join('|')
         "#,
+        numbers_app_resolver = numbers_app_resolver,
         sheet_js = sheet_js,
         table_js = table_js,
         writes_json_literal = writes_json_literal,
         verify = if verify { "true" } else { "false" },
+    )
+}
+
+/// Build the read JXA script.
+fn build_jxa_read_script(
+    sheet: Option<&str>,
+    table: Option<&str>,
+    cell_refs: &[String],
+) -> String {
+    let sheet_js = sheet_selector(sheet);
+    let table_js = table_selector(table);
+    let numbers_app_resolver = numbers_app_resolver_jxa();
+    let refs_json_literal =
+        serde_json::to_string(cell_refs).unwrap_or_else(|_| "[]".into());
+
+    format!(
+        r#"
+        {numbers_app_resolver}
+        var numbers = resolveNumbersApp();
+        if (numbers.documents.length === 0) {{
+            throw new Error('-1728: no open Numbers document');
+        }}
+        var doc = numbers.documents[0];
+        var sheet = {sheet_js};
+        var table = {table_js};
+        var refs = {refs_json_literal};
+        var results = [];
+        for (var i = 0; i < refs.length; i++) {{
+            var cell = table.cells[refs[i]];
+            var got = cell.value();
+            results.push(got === null || got === undefined ? '' : String(got));
+        }}
+        results.join('|')
+        "#,
+        numbers_app_resolver = numbers_app_resolver,
+        sheet_js = sheet_js,
+        table_js = table_js,
+        refs_json_literal = refs_json_literal,
+    )
+}
+
+fn numbers_app_resolver_jxa() -> String {
+    let candidates = serde_json::to_string(NUMBERS_APP_CANDIDATES)
+        .unwrap_or_else(|_| "[]".into());
+    format!(
+        r#"
+        function resolveNumbersApp() {{
+            var candidates = {candidates};
+            for (var i = 0; i < candidates.length; i++) {{
+                try {{
+                    var app = Application(candidates[i]);
+                    app.name();
+                    return app;
+                }} catch (e) {{}}
+            }}
+            throw new Error('Numbers application not found');
+        }}
+        "#
     )
 }
 
@@ -197,12 +285,13 @@ mod tests {
             cell_ref: "A1".into(),
             value: "he said \"hi\"\nand\\goodbye".into(),
         }];
-        let script = build_jxa_script(None, None, &writes, true);
+        let script = build_jxa_write_script(None, None, &writes, true);
         // JSON encoding inside the script source
         assert!(script.contains(r#""value":"he said \"hi\"\nand\\goodbye""#));
         // Default sheet / table addressing
         assert!(script.contains("doc.sheets[0]"));
         assert!(script.contains("sheet.tables[0]"));
+        assert!(script.contains("/Applications/Numbers Creator Studio.app"));
         // Verify readback enabled
         assert!(script.contains("cell.value()"));
     }
@@ -213,14 +302,30 @@ mod tests {
             cell_ref: "B2".into(),
             value: "108432.50".into(),
         }];
-        let script = build_jxa_script(Some("Prices"), Some("Main"), &writes, false);
+        let script = build_jxa_write_script(Some("Prices"), Some("Main"), &writes, false);
         assert!(script.contains(r#"doc.sheets["Prices"]"#));
         assert!(script.contains(r#"sheet.tables["Main"]"#));
     }
 
     #[test]
+    fn read_script_handles_named_sheet_and_refs() {
+        let refs = vec!["A1".to_string(), "B2".to_string()];
+        let script = build_jxa_read_script(Some("Prices"), Some("Main"), &refs);
+        assert!(script.contains(r#"doc.sheets["Prices"]"#));
+        assert!(script.contains(r#"sheet.tables["Main"]"#));
+        assert!(script.contains(r#"["A1","B2"]"#));
+        assert!(script.contains("cell.value()"));
+    }
+
+    #[test]
     fn empty_writes_returns_empty_without_spawning() {
         let res = write_numbers_cells(None, None, &[], true).unwrap();
+        assert!(res.is_empty());
+    }
+
+    #[test]
+    fn empty_reads_returns_empty_without_spawning() {
+        let res = read_numbers_cells(None, None, &[]).unwrap();
         assert!(res.is_empty());
     }
 }

@@ -524,12 +524,11 @@ impl ContextMerger {
             .as_ref()
             .and_then(|s| {
                 let snap = s.snapshot();
-                frontmost_app_from_signals(&snap).or_else(|| {
-                    snap.window_list
-                        .iter()
-                        .find(|w| w.is_on_screen && w.title == window_title)
-                        .map(|w| w.app_name.clone())
-                })
+                snap.window_list
+                    .iter()
+                    .find(|w| w.title == window_title && !w.app_name.is_empty())
+                    .map(|w| w.app_name.clone())
+                    .or_else(|| frontmost_app_from_signals(&snap))
             })
             .or_else(|| {
                 // Fallback to display layer when signals not wired
@@ -1664,6 +1663,30 @@ mod tests {
         }
     }
 
+    struct MockA11y {
+        tree: AccessibilityElement,
+    }
+
+    impl AccessibilityTree for MockA11y {
+        fn get_tree(&self) -> Result<AccessibilityElement, cel_accessibility::AccessibilityError> {
+            Ok(self.tree.clone())
+        }
+
+        fn find_elements(
+            &self,
+            _role: Option<&ElementRole>,
+            _label: Option<&str>,
+        ) -> Result<Vec<AccessibilityElement>, cel_accessibility::AccessibilityError> {
+            Ok(vec![])
+        }
+
+        fn focused_element(
+            &self,
+        ) -> Result<Option<AccessibilityElement>, cel_accessibility::AccessibilityError> {
+            Ok(None)
+        }
+    }
+
     #[test]
     fn test_signals_frontmost_app_overrides_window_title_as_app_name() {
         let stub = Box::new(cel_accessibility::StubAccessibility);
@@ -1696,6 +1719,86 @@ mod tests {
 
         assert_eq!(ctx.app, "Google Chrome");
         assert_eq!(ctx.window, "Stub Window");
+    }
+
+    #[test]
+    fn test_a11y_window_title_match_beats_stale_frontmost_app() {
+        let a11y = Box::new(MockA11y {
+            tree: AccessibilityElement {
+                id: "root".into(),
+                role: ElementRole::Window,
+                label: Some("crypto-prices-30d.numbers".into()),
+                description: None,
+                value: None,
+                bounds: None,
+                normalized_bounds: None,
+                state: cel_accessibility::ElementState {
+                    focused: true,
+                    enabled: true,
+                    visible: true,
+                    selected: false,
+                    expanded: None,
+                    checked: None,
+                },
+                parent_id: None,
+                actions: vec![],
+                automation_id: None,
+                class_name: None,
+                subrole: None,
+                role_description: None,
+                placeholder: None,
+                help_text: None,
+                url: None,
+                is_password: None,
+                is_keyboard_focusable: None,
+                accelerator_key: None,
+                access_key: None,
+                properties: std::collections::HashMap::new(),
+                children: vec![],
+            },
+        });
+        let signals = Box::new(MockSignals {
+            snapshot: cel_signals::SignalSnapshot {
+                clipboard: None,
+                window_list: vec![
+                    cel_signals::WindowState {
+                        app_name: "Numbers".into(),
+                        title: "crypto-prices-30d.numbers".into(),
+                        x: 0,
+                        y: 0,
+                        width: 1440,
+                        height: 900,
+                        layer: 0,
+                        is_on_screen: false,
+                        pid: 99,
+                    },
+                    cel_signals::WindowState {
+                        app_name: "Google Chrome".into(),
+                        title: "Yahoo Finance".into(),
+                        x: 0,
+                        y: 0,
+                        width: 1440,
+                        height: 900,
+                        layer: 0,
+                        is_on_screen: false,
+                        pid: 42,
+                    },
+                ],
+                audio: None,
+                power: None,
+                running_apps: vec![cel_signals::RunningApp {
+                    name: "Google Chrome".into(),
+                    is_frontmost: true,
+                }],
+                recent_files: vec![],
+            },
+        });
+        let mut merger = ContextMerger::new(a11y).with_signals(signals);
+
+        let ctx = merger.get_context();
+
+        assert_eq!(ctx.app, "Numbers");
+        assert_eq!(ctx.window, "crypto-prices-30d.numbers");
     }
 
     #[test]

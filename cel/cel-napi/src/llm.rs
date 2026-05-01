@@ -42,7 +42,13 @@ pub async fn llm_complete(
     endpoint: Option<String>,
     max_tokens: Option<u32>,
 ) -> napi::Result<String> {
-    let client = build_llm_client(provider, api_key, model, endpoint, Some(cel_llm::LlmRole::General))?;
+    let client = build_llm_client(
+        provider,
+        api_key,
+        model,
+        endpoint,
+        Some(cel_llm::LlmRole::General),
+    )?;
     client
         .complete(&system_prompt, &user_prompt, max_tokens.unwrap_or(4096))
         .await
@@ -91,7 +97,13 @@ pub async fn llm_complete_with_image(
     endpoint: Option<String>,
     max_tokens: Option<u32>,
 ) -> napi::Result<String> {
-    let client = build_llm_client(provider, api_key, model, endpoint, Some(cel_llm::LlmRole::Vision))?;
+    let client = build_llm_client(
+        provider,
+        api_key,
+        model,
+        endpoint,
+        Some(cel_llm::LlmRole::Vision),
+    )?;
     let data_url = format!("data:image/png;base64,{}", image_base64);
     client
         .complete_with_image(

@@ -57,7 +57,7 @@
     "@cellar/adapter-browser": "workspace:*",
     "@cellar/agent": "workspace:*",
     "esbuild": "^0.28.0",
-    "typescript": "^5.5.0"
+    "typescript": "^6.0.3"
   },
   "publishConfig": { "access": "public" },
   "engines": { "node": ">=20.0.0" }

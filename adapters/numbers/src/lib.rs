@@ -29,6 +29,7 @@ use cel_cortex::{
     ContextDeclaration,
 };
 use cel_cortex::adapter::{LifecycleDeclaration, VerificationDeclaration};
+#[cfg(target_os = "macos")]
 use cel_input::CellWrite;
 use serde_json::{json, Value};
 
@@ -146,6 +147,7 @@ impl NumbersAdapter {
         elements
     }
 
+    #[cfg(target_os = "macos")]
     fn read_preview_values(&self) -> Result<Vec<String>, AdapterError> {
         let refs = preview_refs();
         match cel_input::read_numbers_cells(None, None, &refs) {
@@ -159,6 +161,7 @@ impl NumbersAdapter {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn preview_payload(&self) -> Result<Value, AdapterError> {
         let values = self.read_preview_values()?;
         let refs = preview_refs();
@@ -176,6 +179,7 @@ impl NumbersAdapter {
         }))
     }
 
+    #[cfg(target_os = "macos")]
     fn read_cells_payload(&self, params: &Value) -> Result<Value, AdapterError> {
         let sheet = optional_string_field(params, "sheet");
         let table = optional_string_field(params, "table");
@@ -192,6 +196,7 @@ impl NumbersAdapter {
         }))
     }
 
+    #[cfg(target_os = "macos")]
     fn write_cells_payload(&self, params: &Value) -> Result<Value, AdapterError> {
         let sheet = optional_string_field(params, "sheet");
         let table = optional_string_field(params, "table");
@@ -223,6 +228,7 @@ impl NumbersAdapter {
         }))
     }
 
+    #[cfg(target_os = "macos")]
     fn verify_cells_result(&self, params: &Value) -> Result<ActionResult, AdapterError> {
         let reads = self.read_cells_payload(params)?;
         let requested = parse_cell_writes(params)?;
@@ -462,6 +468,7 @@ fn string_array_field(params: &Value, key: &str) -> Result<Vec<String>, AdapterE
         .collect())
 }
 
+#[cfg(target_os = "macos")]
 fn parse_cell_writes(params: &Value) -> Result<Vec<CellWrite>, AdapterError> {
     let writes = params
         .get("writes")
@@ -586,6 +593,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn parse_cell_writes_requires_cell_ref_and_value() {
         let params = json!({
             "writes": [

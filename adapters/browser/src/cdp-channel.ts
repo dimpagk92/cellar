@@ -112,7 +112,7 @@ export class CdpChannel {
                   handler(msg.params ?? {});
                 } catch (e) {
                   const safeMethod = String(msg.method ?? "").replace(/[\r\n]/g, "");
-                  console.warn(`CDP event handler error for ${safeMethod}:`, e);
+                  console.warn("CDP event handler error for %s:", safeMethod, e);
                 }
               }
             }

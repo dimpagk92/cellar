@@ -81,13 +81,20 @@ function sanitizeContextForRust(context: ScreenContext): ScreenContext {
       // and the whole thing is >40 chars, compact the parenthesized part.
       // "Remove Jamie Rodriguez (jamie.rodriguez@acme.io, viewer)"
       //  → "Remove Jamie Rodriguez viewer jamie.rodriguez@acme.io"
-      const parenMatch = el.label.match(/^(.+?)\s*\(([^)]+)\)\s*$/);
-      if (parenMatch && el.label.length > 40) {
-        const [, prefix, inner] = parenMatch;
-        // Reverse the parts inside parens so the most unique info comes first
-        const parts = inner.split(/,\s*/);
-        const compacted = `${prefix} ${parts.reverse().join(" ")}`;
-        return { ...el, label: compacted };
+      if (el.label.length > 40) {
+        const trimmed = el.label.trimEnd();
+        if (trimmed.endsWith(")")) {
+          const lastOpen = trimmed.lastIndexOf("(");
+          if (lastOpen > 0) {
+            const inner = trimmed.slice(lastOpen + 1, -1);
+            if (!inner.includes("(") && !inner.includes(")")) {
+              const prefix = trimmed.slice(0, lastOpen).trimEnd();
+              const parts = inner.split(/,\s*/);
+              const compacted = `${prefix} ${parts.reverse().join(" ")}`;
+              return { ...el, label: compacted };
+            }
+          }
+        }
       }
       return el;
     });

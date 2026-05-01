@@ -461,7 +461,12 @@ impl ContextMerger {
         tracing::info!("Running vision fallback ({} provider)", vision.name());
 
         let vision_prompt = "Focus on interactive elements: buttons, inputs, links, dropdowns, checkboxes, tabs, and menu items. Include text labels and visible headings. Ignore decorative images, backgrounds, and layout containers.";
-        let vision_elements = match runtime.block_on(vision.analyze(&frame, vision_prompt, None)) {
+        let analyze = || vision.analyze(&frame, vision_prompt, None);
+        let vision_elements = match if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| runtime.block_on(analyze()))
+        } else {
+            runtime.block_on(analyze())
+        } {
             Ok(ve) => ve,
             Err(e) => {
                 tracing::warn!("Vision fallback: analysis failed: {}", e);

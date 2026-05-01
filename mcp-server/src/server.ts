@@ -34,12 +34,29 @@ export function filterBrowserCdpTargets<T extends CdpTargetLike>(targets: T[]): 
 
 export function createCelMcpServer(cel?: Cel): McpServer {
   const instance = cel ?? new Cel();
+  const degraded = !instance.isNativeAvailable;
 
-  if (!instance.isNativeAvailable) {
-    throw new Error(
-      "CEL native module not available. Make sure the cel-napi binary is built.",
+  if (degraded) {
+    console.warn(
+      "[cellar-mcp] cel-napi not available — running in schema-only mode. " +
+      "Tool definitions are exposed but real calls return errors. " +
+      "Install on macOS for full functionality: https://github.com/dimpagk92/cellar",
     );
   }
+
+  const stubResult = {
+    isError: true,
+    content: [
+      {
+        type: "text" as const,
+        text:
+          "Cellar MCP server is running in schema-only mode (no cel-napi native module). " +
+          "Real tool calls require a macOS host with the cel-napi binary built. " +
+          "See https://github.com/dimpagk92/cellar#installation",
+      },
+    ],
+  };
+  const stubHandler = async (_args: unknown) => stubResult;
 
   const server = new McpServer(
     {
@@ -197,7 +214,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "Limits: CDP enrichment caps at 50 text_blocks, 50 interactive_elements, 3000 char body_text.",
       inputSchema: celSeeSchema,
     },
-    async (args) => handleCelSee(instance, args),
+    degraded ? stubHandler : async (args) => handleCelSee(instance, args),
   );
 
   server.registerTool(
@@ -226,7 +243,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "Re-observe with cel_see after each batch to avoid stale-state cascading failures.",
       inputSchema: celActSchema,
     },
-    async (args) => handleCelAct(instance, args),
+    degraded ? stubHandler : async (args) => handleCelAct(instance, args),
   );
 
   server.registerTool(
@@ -258,7 +275,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "Maintenance: eviction (TTL cleanup — default 90 days runs, 365 days knowledge).",
       inputSchema: celThinkSchema,
     },
-    async (args) => handleCelThink(instance, args),
+    degraded ? stubHandler : async (args) => handleCelThink(instance, args),
   );
 
   server.registerTool(
@@ -286,7 +303,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "focus trail) and element stability classification (stable vs volatile targets).",
       inputSchema: celPerceiveSchema,
     },
-    async (args) => handleCelPerceive(instance, args),
+    degraded ? stubHandler : async (args) => handleCelPerceive(instance, args),
   );
 
   return server;
@@ -309,10 +326,14 @@ export async function startStdioServer(cel?: Cel): Promise<void> {
     await server.connect(transport);
     console.error("CEL MCP server started (stdio transport)");
 
-    // Boot Rust Cortex via NAPI — always-on perception starts immediately.
-    // The mental model is warm before Claude's first tool call.
-    instance.bootCortex();
-    console.error("Rust Cortex booted — perception active");
+    if (instance.isNativeAvailable) {
+      // Boot Rust Cortex via NAPI — always-on perception starts immediately.
+      // The mental model is warm before Claude's first tool call.
+      instance.bootCortex();
+      console.error("Rust Cortex booted — perception active");
+    } else {
+      console.error("Schema-only mode: cel-napi unavailable, Cortex boot skipped");
+    }
 
     // CDP is launched on-demand by tools that need it (e.g. run_goal)
     // rather than eagerly at startup, to avoid interfering with the user's Chrome.

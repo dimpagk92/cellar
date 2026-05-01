@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-**Do not open a public issue.** Security reports go to [private security advisory](https://github.com/dimpagk92/cellar/security/advisories/new) (PGP key on request).
+**Do not open a public issue.** Security reports go to **dimpagk92@gmail.com** (PGP key on request).
 
 We aim to:
 - Acknowledge within **72 hours**.
@@ -62,8 +62,8 @@ A few features can execute attacker-influenced content on the user's machine. Ea
 
 If you find a vulnerability:
 
-1. Open a [private security advisory](https://github.com/dimpagk92/cellar/security/advisories/new) with the details, a proof-of-concept if safe to share, and your preferred credit.
+1. Email dimpagk92@gmail.com with the details, a proof-of-concept if safe to share, and your preferred credit.
 2. Give us the timeline above to respond.
-3. Please do not exploit the issue against systems you don't own, don't test against production infrastructure you do not operate, and don't access data that isn't yours.
+3. Please do not exploit the issue against systems you don't own, don't test against production Dilipod infrastructure, and don't access data that isn't yours.
 
 Thank you — security reports make this safer for every Cellar user.

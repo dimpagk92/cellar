@@ -8,8 +8,8 @@ pub fn get_context() -> napi::Result<String> {
     let display = cel_display::create_capture();
     let network = cel_network::create_monitor();
     let signals = cel_signals::create_signal_bus();
-    let mut merger = cel_context::ContextMerger::with_all(a11y, display, network)
-        .with_signals(signals);
+    let mut merger =
+        cel_context::ContextMerger::with_all(a11y, display, network).with_signals(signals);
 
     if let Ok(vision) = cel_vision::create_provider_from_env() {
         let handle = crate::rt_handle()?;
@@ -27,8 +27,8 @@ pub fn capture_screen() -> napi::Result<napi::bindgen_prelude::Buffer> {
     let frame = capture
         .capture_frame()
         .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    let png = cel_display::encode_png(&frame)
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let png =
+        cel_display::encode_png(&frame).map_err(|e| napi::Error::from_reason(e.to_string()))?;
     Ok(png.into())
 }
 
@@ -48,8 +48,7 @@ pub fn list_monitors() -> napi::Result<String> {
 pub fn list_windows() -> napi::Result<String> {
     let bus = cel_signals::create_signal_bus();
     let snap = bus.snapshot();
-    serde_json::to_string(&snap.window_list)
-        .map_err(|e| napi::Error::from_reason(e.to_string()))
+    serde_json::to_string(&snap.window_list).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
 /// Create a resilient ContextReference from a ContextElement JSON.
@@ -108,12 +107,10 @@ pub fn build_context_from_elements(
 ) -> napi::Result<String> {
     let elements: Vec<cel_context::ContextElement> = serde_json::from_str(&elements_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid elements JSON: {}", e)))?;
-    let http_events: Vec<cel_network::HttpEvent> =
-        serde_json::from_str(&network_events_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid network events JSON: {}", e)))?;
+    let http_events: Vec<cel_network::HttpEvent> = serde_json::from_str(&network_events_json)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid network events JSON: {}", e)))?;
 
-    let context =
-        cel_context::build_from_external(elements, http_events, app_name, window_title);
+    let context = cel_context::build_from_external(elements, http_events, app_name, window_title);
     serde_json::to_string(&context).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
@@ -125,12 +122,16 @@ pub fn get_quick_context() -> napi::Result<String> {
     let signals = cel_signals::create_signal_bus();
     let snap = signals.snapshot();
 
-    let app_name = snap.running_apps.iter()
+    let app_name = snap
+        .running_apps
+        .iter()
         .find(|a| a.is_frontmost)
         .map(|a| a.name.clone())
         .unwrap_or_default();
 
-    let window_title = snap.window_list.iter()
+    let window_title = snap
+        .window_list
+        .iter()
         .find(|w| w.app_name == app_name && w.is_on_screen)
         .map(|w| w.title.clone())
         .unwrap_or_default();
@@ -159,8 +160,8 @@ pub fn get_context_focused(element_id: String) -> napi::Result<String> {
     let display = cel_display::create_capture();
     let network = cel_network::create_monitor();
     let signals = cel_signals::create_signal_bus();
-    let mut merger = cel_context::ContextMerger::with_all(a11y, display, network)
-        .with_signals(signals);
+    let mut merger =
+        cel_context::ContextMerger::with_all(a11y, display, network).with_signals(signals);
     if let Ok(vision) = cel_vision::create_provider_from_env() {
         let handle = crate::rt_handle()?;
         merger = merger.with_vision(vision).with_runtime(handle);

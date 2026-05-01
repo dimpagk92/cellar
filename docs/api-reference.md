@@ -1,6 +1,16 @@
 # API Reference
 
-CEL exposes its functionality at three levels: the MCP server (for AI agents), the TypeScript library (for custom agents), and the Rust core (for low-level integration). The MCP server provides 4 tools: `cel_see`, `cel_act`, `cel_think`, and `cel_perceive`.
+CEL exposes its functionality at three levels:
+
+1. the MCP server for agent runtimes
+2. the TypeScript library for custom integrations
+3. the Rust core for low-level embedding
+
+The MCP server provides 4 tools: `cel_see`, `cel_act`, `cel_think`, and `cel_perceive`.
+
+Architecture rule:
+- `cel_see`, `cel_act`, and `cel_perceive` are the core agent-facing device layer
+- `cel_think` is an optional built-in planning / memory surface, not the definition of CEL
 
 ## MCP Tools (v0.2.0)
 
@@ -43,6 +53,8 @@ See [mcp-server.md](mcp-server.md) for usage examples with each tool.
 | `ax_action` | `element_id`, `ax_action` | Native accessibility action |
 | `set_value` | `element_id`, `value` | Direct value injection |
 | `cdp_eval` | `expression` | Execute JavaScript in browser via CDP |
+| `write_cells` | `app?`, `sheet?`, `table?`, `writes[]`, `verify?` | Deterministic spreadsheet write via app model (currently Numbers) |
+| `read_cells` | `app?`, `sheet?`, `table?`, `cell_refs[]` | Deterministic spreadsheet read via app model (currently Numbers) |
 
 **Batch actions:**
 
@@ -51,11 +63,11 @@ See [mcp-server.md](mcp-server.md) for usage examples with each tool.
 | `actions` | `Action[]` (1-4) | Array of single actions |
 | `delay_between_ms` | `number` (default: 100) | Delay between actions |
 
-### cel_think — Plan, Remember, Track
+### cel_think — Optional Built-In Planner / Memory
 
 | Mode | Parameters | Description |
 |------|-----------|-------------|
-| `run_goal` | `goal`, `max_steps?`, `timeout_ms?`, `enable_vision?`, `self_heal?`, `context_lazy?`, `decompose?`, `workflow_name?`, `enable_notebook?` | Full autonomous see→plan→act loop |
+| `run_goal` | `goal`, `max_steps?` (default 80), `timeout_ms?` (default 900000) | Canonical see→plan→act loop. Vision, self-healing, decomposition, and notebook are implicit — no per-invocation knobs (see [canonical-agent-plan.md](canonical-agent-plan.md)). |
 | `plan` | `goal`, `history?`, `max_steps?`, `loop_warning?` | LLM step planning |
 | `plan_with_vision` | `goal`, `history?`, `max_steps?` | Plan with screenshot |
 | `search_knowledge` | `query`, `workflow_scope?`, `limit` | FTS5 search |
@@ -174,7 +186,7 @@ const cel = new Cel(dbPath?: string); // default: ~/.cellar/cel-store.db
 | `getRunHistory(limit?)` | `RunRecord[]` | Recent runs |
 | `getStepResults(runId)` | `StepRecord[]` | Steps for a run |
 
-#### Planner
+#### Built-In Planner
 
 | Method | Returns | Description |
 |--------|---------|-------------|

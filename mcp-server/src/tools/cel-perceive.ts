@@ -8,26 +8,58 @@ import { textResult, errorResult, sleep } from "./shared.js";
 export const celPerceiveSchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("start"),
-    goal: z.string().describe("The goal this perception session is tracking"),
-    enable_suggestions: z.boolean().optional()
-      .describe("Generate LLM next-action suggestions on read. Default true"),
+    goal: z.string().describe(
+      "Natural-language goal driving this session. Cortex parses it into independently-checkable " +
+      "constraints (factual / action / navigation / verification) and uses it as the target for " +
+      "suggestion generation. Be specific — vague goals produce vague suggestions.",
+    ),
+    enable_suggestions: z.boolean().optional().describe(
+      "When true (default), each `read` returns LLM-generated next-action recommendations grounded " +
+      "in the current cortex model. Adds one LLM call per read (latency + cost). Disable for " +
+      "passive monitoring or when the host already plans next actions.",
+    ),
   }),
   z.object({ mode: z.literal("stop") }),
   z.object({ mode: z.literal("read") }),
   z.object({
     mode: z.literal("feed"),
-    action: z.string().describe("Description of the action taken"),
-    target: z.string().optional().describe("Element ID or description of the action target"),
-    expected: z.string().optional().describe("Expected outcome"),
+    action: z.string().describe(
+      "What you just executed, in plain language (e.g. 'click Submit button', 'type \"hello\" into " +
+      "search field'). Cortex uses this to attribute screen changes to the action and to detect " +
+      "side effects vs. expected outcomes. Free-form — verb-first phrasing works best.",
+    ),
+    target: z.string().optional().describe(
+      "Element id from a prior `cel_see` snapshot or a human description of what was acted on. " +
+      "Used to correlate the action with the relevant region of the cortex model. Omit only if " +
+      "the action has no specific target (e.g. global keyboard shortcut).",
+    ),
+    expected: z.string().optional().describe(
+      "What you expected to happen (e.g. 'modal closes', 'page navigates to /dashboard'). " +
+      "Cortex compares this against the diffed model after the screen settles and flags " +
+      "discrepancies (anomalies, side effects, action did not land). Omit if you have no " +
+      "specific expectation.",
+    ),
   }),
   z.object({
     mode: z.literal("configure"),
-    goal: z.string().optional().describe("Updated goal"),
-    enable_suggestions: z.boolean().optional().describe("Toggle LLM suggestions"),
+    goal: z.string().optional().describe(
+      "Replace the session goal mid-flight. Triggers re-extraction of constraints from the new " +
+      "goal — prior progress on satisfied constraints is preserved where the new constraints " +
+      "match by text. Use when the user pivots scope; otherwise keep the original goal.",
+    ),
+    enable_suggestions: z.boolean().optional().describe(
+      "Turn LLM next-action suggestions on or off without ending the session. Useful to silence " +
+      "suggestion costs during long passive observation, then re-enable when planning resumes.",
+    ),
   }),
   z.object({
     mode: z.literal("checkpoint"),
-    summary: z.string().describe("Summary of what was accomplished so far"),
+    summary: z.string().describe(
+      "One-paragraph summary of progress so far — what was accomplished, what's still pending. " +
+      "Stored in the session log with a timestamp and the action count, surfaced on subsequent " +
+      "`read` calls to anchor the LLM's understanding of session history. Write it as you would " +
+      "write a status update to a colleague.",
+    ),
   }),
   z.object({ mode: z.literal("status") }),
 ]);

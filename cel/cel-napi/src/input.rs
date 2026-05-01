@@ -2,7 +2,9 @@ use napi_derive::napi;
 use std::sync::Mutex;
 
 /// Browser app names recognized for CDP-aware activation.
-const CDP_BROWSERS: &[&str] = &["chrome", "chromium", "brave", "edge", "opera", "vivaldi", "arc"];
+const CDP_BROWSERS: &[&str] = &[
+    "chrome", "chromium", "brave", "edge", "opera", "vivaldi", "arc",
+];
 
 static INPUT_CONTROLLER: std::sync::OnceLock<Mutex<Box<dyn cel_input::InputController>>> =
     std::sync::OnceLock::new();
@@ -18,9 +20,7 @@ fn with_ax_tree<F, R>(f: F) -> napi::Result<R>
 where
     F: FnOnce(&dyn cel_accessibility::AccessibilityTree) -> R,
 {
-    let mutex = AX_TREE.get_or_init(|| {
-        Mutex::new(cel_accessibility::create_tree())
-    });
+    let mutex = AX_TREE.get_or_init(|| Mutex::new(cel_accessibility::create_tree()));
     let guard = mutex
         .lock()
         .map_err(|e| napi::Error::from_reason(format!("AX tree lock poisoned: {}", e)))?;
@@ -177,13 +177,12 @@ pub fn ax_is_settable(element_id: String) -> bool {
 /// Returns JSON AccessibilityElement, or "null" if nothing found.
 #[napi]
 pub fn ax_element_at_position(x: f64, y: f64) -> napi::Result<String> {
-    with_ax_tree(|tree| {
-        match tree.element_at_position(x as f32, y as f32) {
-            Ok(Some(el)) => serde_json::to_string(&el)
-                .map_err(|e| napi::Error::from_reason(e.to_string())),
-            Ok(None) => Ok("null".to_string()),
-            Err(e) => Err(napi::Error::from_reason(e.to_string())),
+    with_ax_tree(|tree| match tree.element_at_position(x as f32, y as f32) {
+        Ok(Some(el)) => {
+            serde_json::to_string(&el).map_err(|e| napi::Error::from_reason(e.to_string()))
         }
+        Ok(None) => Ok("null".to_string()),
+        Err(e) => Err(napi::Error::from_reason(e.to_string())),
     })?
 }
 
@@ -192,12 +191,11 @@ pub fn ax_element_at_position(x: f64, y: f64) -> napi::Result<String> {
 /// This is the AI's "command palette" — all discoverable app commands.
 #[napi]
 pub fn ax_get_menu_bar() -> napi::Result<String> {
-    with_ax_tree(|tree| {
-        match tree.get_menu_bar() {
-            Ok(items) => serde_json::to_string(&items)
-                .map_err(|e| napi::Error::from_reason(e.to_string())),
-            Err(e) => Err(napi::Error::from_reason(e.to_string())),
+    with_ax_tree(|tree| match tree.get_menu_bar() {
+        Ok(items) => {
+            serde_json::to_string(&items).map_err(|e| napi::Error::from_reason(e.to_string()))
         }
+        Err(e) => Err(napi::Error::from_reason(e.to_string())),
     })?
 }
 
@@ -205,12 +203,11 @@ pub fn ax_get_menu_bar() -> napi::Result<String> {
 /// Returns JSON array of AccessibilityElement (shallow trees — title/bounds per window).
 #[napi]
 pub fn ax_get_all_windows() -> napi::Result<String> {
-    with_ax_tree(|tree| {
-        match tree.get_all_windows() {
-            Ok(windows) => serde_json::to_string(&windows)
-                .map_err(|e| napi::Error::from_reason(e.to_string())),
-            Err(e) => Err(napi::Error::from_reason(e.to_string())),
+    with_ax_tree(|tree| match tree.get_all_windows() {
+        Ok(windows) => {
+            serde_json::to_string(&windows).map_err(|e| napi::Error::from_reason(e.to_string()))
         }
+        Err(e) => Err(napi::Error::from_reason(e.to_string())),
     })?
 }
 
@@ -222,7 +219,9 @@ pub fn ax_get_all_windows() -> napi::Result<String> {
 /// one already exists. It never quits or relaunches the user's browser.
 #[napi]
 pub fn activate_app(app_name: String) -> napi::Result<bool> {
-    let is_browser = CDP_BROWSERS.iter().any(|b| app_name.to_lowercase().contains(b));
+    let is_browser = CDP_BROWSERS
+        .iter()
+        .any(|b| app_name.to_lowercase().contains(b));
 
     if is_browser {
         if cel_cdp::activate_preferred_browser_target() {
@@ -252,11 +251,19 @@ pub fn activate_app(app_name: String) -> napi::Result<bool> {
 #[napi]
 pub fn shell_exec(command: String, args: Vec<String>) -> napi::Result<String> {
     // Allowlist of safe commands
-    const ALLOWED: &[&str] = &["open", "osascript", "defaults", "system_profiler", "pmset", "sw_vers"];
+    const ALLOWED: &[&str] = &[
+        "open",
+        "osascript",
+        "defaults",
+        "system_profiler",
+        "pmset",
+        "sw_vers",
+    ];
     let cmd_name = command.split('/').last().unwrap_or(&command);
     if !ALLOWED.contains(&cmd_name) {
         return Err(napi::Error::from_reason(format!(
-            "Command '{}' not in allowlist: {:?}", cmd_name, ALLOWED
+            "Command '{}' not in allowlist: {:?}",
+            cmd_name, ALLOWED
         )));
     }
 
@@ -284,13 +291,14 @@ static GESTURE_OBSERVER: std::sync::OnceLock<cel_signals::GestureObserver> =
 /// Requires accessibility permissions on macOS.
 #[napi]
 pub fn gesture_start() -> napi::Result<()> {
-    GESTURE_OBSERVER.get_or_init(|| {
-        match cel_signals::GestureObserver::start() {
-            Ok(observer) => observer,
-            Err(e) => {
-                tracing::warn!("Gesture observer failed to start (gesture recording unavailable): {}", e);
-                cel_signals::GestureObserver::no_op()
-            }
+    GESTURE_OBSERVER.get_or_init(|| match cel_signals::GestureObserver::start() {
+        Ok(observer) => observer,
+        Err(e) => {
+            tracing::warn!(
+                "Gesture observer failed to start (gesture recording unavailable): {}",
+                e
+            );
+            cel_signals::GestureObserver::no_op()
         }
     });
     Ok(())

@@ -310,7 +310,7 @@ pub struct FailureReport {
 /// that used to set `enable_vision` / `enable_decomposition` / `self_heal`
 /// / `enable_notebook` are expected to stop — those behaviors are now
 /// implicit in the canonical agent loop.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunLimits {
     /// Total step budget across all sub-goals. A step that retries 3
     /// times still counts as 1 step.
@@ -323,6 +323,19 @@ pub struct RunLimits {
     /// Per-step retry cap. Default: 3. See the 3-strike rule in
     /// `docs/canonical-agent-plan.md`.
     pub max_step_retries: u32,
+
+    /// App name the goal should ultimately land its output in (e.g.
+    /// `"Numbers"` for a spreadsheet scenario). When set, the runner
+    /// enforces a phase-gate: once `steps_used >= max_steps / 2` with
+    /// no terminal-app work recorded (no `write_cells`/`save_document`
+    /// action, and frontmost app != `terminal_app`), it injects a
+    /// synthetic history record telling the planner its next batch
+    /// MUST begin with `activate_app(terminal_app)`. On a second
+    /// ignore the runner auto-dispatches the activation itself.
+    ///
+    /// `None` = no phase-gate enforcement (legacy behaviour).
+    #[serde(default)]
+    pub terminal_app: Option<String>,
 }
 
 impl Default for RunLimits {
@@ -331,6 +344,7 @@ impl Default for RunLimits {
             max_steps: 80,
             timeout_ms: 900_000,
             max_step_retries: 3,
+            terminal_app: None,
         }
     }
 }

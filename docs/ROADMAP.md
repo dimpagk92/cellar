@@ -2,7 +2,29 @@
 
 Forward-looking plan for Cellar and the CEL runtime. Living document — priorities shift as we learn from users and customers. Supersedes scattered issue wishlists.
 
-Last updated: 2026-04-17.
+Last updated: 2026-04-24.
+
+## How to read this doc
+
+Cellar roadmapping is two-dimensional:
+
+- **Phases** (below) give the cross-cutting timeline — Phase 0 current state, Phase 1 execution-backend breadth, and so on. Each phase is primarily sequenced around one load-bearing thing we're unblocking.
+- **Four pillars** (next section) give the parallel workstreams. Each pillar has its own priority list, its own owner-able detail doc, and its own stability criteria. A single phase usually advances several pillars.
+
+When in doubt, phases answer "what's next," pillars answer "what area does this belong in."
+
+## Four Pillars
+
+The three-layer architecture (see [`adapters-cel-agents.md`](./adapters-cel-agents.md)) plus the evaluation discipline that keeps it honest produce four pillars:
+
+| Pillar | Question it answers | Detail doc |
+|---|---|---|
+| **Adapters** | What app-specific truth can CEL expose? | [adapter-roadmap.md](./adapter-roadmap.md), [adapter-catalog.md](./adapter-catalog.md), [adapter-sdk.md](./adapter-sdk.md) |
+| **CEL / crates** | What must the core platform own? | [TODO-replan-architecture.md](./TODO-replan-architecture.md), [canonical-agent-plan.md](./canonical-agent-plan.md), [rust-port-plan.md](./rust-port-plan.md) |
+| **Agents** | Which runtimes can drive CEL today? | [agent-integration-roadmap.md](./agent-integration-roadmap.md), [agents/README.md](./agents/README.md) |
+| **Evals / leaderboard** | How do we prove it works across agents? | [eval-leaderboard.md](./eval-leaderboard.md), [eval-harness.md](./eval-harness.md) |
+
+Per-pillar detail sections live at the bottom of this doc; the Phase sections continue to drive sequencing.
 
 ## Legend
 
@@ -49,15 +71,16 @@ Shipped as of April 2026.
 
 ---
 
-## Phase 1 — Worker Protocol & Docker Image ⏳
+## Phase 1 — Execution backend breadth (Worker Protocol & Docker Image) ⏳
 
-**Target: 4–8 weeks.** Make Cellar runnable outside the user's Mac for browser-first workloads.
+**Target: 4–8 weeks.** Make Cellar runnable outside the user's Mac for browser-first workloads. This phase is primarily the CEL pillar's "execution backend" track — the three-layer model only holds if agents can target local, remote, and containerized CEL through the same canonical tool surface.
 
 ### Goals
 
 - Define a stable worker protocol mirroring the MCP tool surface.
 - Ship a `cellar/worker` Docker image — headless Linux CEL with Playwright/Chromium.
 - Add a `RuntimeBackend` abstraction so `cellar` can target a remote worker.
+- Preserve agent-agnosticism: every worker deployment must speak the same `cel_see` / `cel_act` / `cel_perceive` / `cel_think` surface, so any agent in [`agents/README.md`](./agents/README.md) can drive it without change.
 
 ### Deliverables
 
@@ -176,6 +199,53 @@ To avoid over-committing:
 
 ---
 
+## Pillar detail
+
+The per-pillar sections below complement the phase sequencing above. Each pillar can advance independently when its blockers are clear, and each links out to a dedicated detail doc for ticket-level work.
+
+### Adapter pillar roadmap
+
+Adapters are the only way app-specific structured truth enters CEL. Goals for this pillar:
+
+- Land a stable `AdapterDriver` trait and matching TypeScript interface (see [adapter-sdk.md](./adapter-sdk.md)).
+- Reach at least two first-party adapters at "production" status, validated by the eval suite.
+- Cut a clean third-party adapter bootstrap path so external teams can ship without patching CEL core.
+
+Priority list and status matrix: [adapter-roadmap.md](./adapter-roadmap.md). Live inventory: [adapter-catalog.md](./adapter-catalog.md).
+
+### Agent integration roadmap
+
+Every agent runtime in [`agents/README.md`](./agents/README.md) should be able to drive CEL end-to-end through MCP, the CLI, the SDK, or the N-API bridge. Goals:
+
+- Keep one working cookbook per major agent (Claude Code, Cursor, LangGraph, Mastra, Codex, n8n, raw MCP).
+- Publish eval numbers for at least two agent frameworks driving the same task set, to prove CEL is not secretly planner-specific.
+- Maintain the "agent boundary" contract: any MCP-speaking client should work without CEL knowing which framework it is.
+
+Priority list, integration gaps, and cookbook status: [agent-integration-roadmap.md](./agent-integration-roadmap.md).
+
+### Eval / leaderboard roadmap
+
+Evals exist to prove CEL and adapter capabilities — not to reward any single planner. Goals:
+
+- Run agent-agnostic scenarios on a public leaderboard, with per-agent submissions clearly tagged.
+- Require at least one full submission cycle (multiple agents, multiple runs, reproducible manifest) before declaring "leaderboard open."
+- Keep runtime-specific evals boxed off in their own folders and clearly labeled as secondary.
+
+Submission format, scoring rules, governance: [eval-leaderboard.md](./eval-leaderboard.md). Harness details: [eval-harness.md](./eval-harness.md).
+
+### CEL-crates consolidation
+
+The durable platform lives in the Rust crates under `cel/`. This pillar tracks the internal re-architecture work so that adapters and agents see a clean, stable surface:
+
+- Follow the consolidation plan in [TODO-replan-architecture.md](./TODO-replan-architecture.md).
+- Complete the canonical agent/runner surface captured in [canonical-agent-plan.md](./canonical-agent-plan.md).
+- Finish the Rust port captured in [rust-port-plan.md](./rust-port-plan.md) so planning/execution splits cleanly across the `cel-*` crates.
+
+This pillar is mostly invisible to agents — but an unstable core here shows up as churn everywhere else.
+
+---
+
 ## Changelog
 
+- 2026-04-24: restructured around the three-layer pivot. Added four-pillar framing, reframed Phase 1 as "execution backend breadth," and introduced pillar-detail sections (Adapters / Agents / Evals / CEL-crates) below the phase narrative. Phase content preserved verbatim.
 - 2026-04-17: initial roadmap draft. Captures the OSS + runtime backend direction after Ollama/`cellar init` landed.

@@ -17,15 +17,27 @@ use crate::differ::{diff_contexts, is_diff_significant, ContextDiff};
 use crate::model::*;
 use crate::skeleton::{is_skeleton_screen, skeleton_wait_ms};
 
-use cel_accessibility::AccessibilityTree;
+use cel_accessibility::{AccessibilityTree, ElementRole};
 use cel_context::{CelEvent, ContextMerger, ContextWatchdog, ScreenContext};
-use cel_input::{create_controller, MouseButton};
+use cel_input::{create_controller, InputError, MouseButton};
 use cel_planner::PlannedAction;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, trace, warn};
+
+#[cfg(target_os = "macos")]
+const NUMBERS_DOCUMENT_BOOTSTRAP_CANDIDATES: &[&str] = &[
+    "/Applications/Numbers Creator Studio.app/Contents/Resources/SampleDocument.numbers",
+    "/Applications/Numbers.app/Contents/Resources/SampleDocument.numbers",
+];
+
+#[cfg(target_os = "macos")]
+const NUMBERS_BLANK_TEMPLATE_CANDIDATES: &[&str] = &[
+    "/Applications/Numbers Creator Studio.app/Contents/SharedSupport/Templates/Blank/Traditional.nmbtemplate",
+    "/Applications/Numbers.app/Contents/SharedSupport/Templates/Blank/Traditional.nmbtemplate",
+];
 
 /// Check if a CelEvent is significant (triggers full context read).
 fn is_significant_event(event: &CelEvent) -> bool {
@@ -81,6 +93,61 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn command_status_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let mut child = command.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+fn command_output_with_timeout(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 /// The Cortex perception engine.
@@ -469,7 +536,15 @@ impl Cortex {
 
                 let mut adapters_guard = adapters.write().await;
                 for adapter in adapters_guard.iter_mut() {
-                    let should_be_active = adapter.matches_app(current_app);
+                    let lifecycle = adapter.driver.manifest().lifecycle.clone();
+                    let frontmost_match = adapter.matches_app(current_app);
+                    let should_be_active = if lifecycle.requires_frontmost {
+                        frontmost_match
+                    } else if lifecycle.background_refresh {
+                        frontmost_match || adapter.driver.probe().await
+                    } else {
+                        frontmost_match
+                    };
 
                     match (adapter.state, should_be_active) {
                         (
@@ -481,8 +556,18 @@ impl Cortex {
                                 warn!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter activation failed: {e}");
                                 adapter.state = crate::adapter::AdapterState::Error;
                             } else {
-                                adapter.state = crate::adapter::AdapterState::Active;
-                                debug!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter activated");
+                                if lifecycle.bootstrap_on_activate {
+                                    if let Err(e) = adapter.driver.bootstrap().await {
+                                        warn!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter bootstrap failed: {e}");
+                                        adapter.state = crate::adapter::AdapterState::Error;
+                                    } else {
+                                        adapter.state = crate::adapter::AdapterState::Active;
+                                        debug!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter activated and bootstrapped");
+                                    }
+                                } else {
+                                    adapter.state = crate::adapter::AdapterState::Active;
+                                    debug!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter activated");
+                                }
                             }
                         }
                         (crate::adapter::AdapterState::Active, false) => {
@@ -496,7 +581,7 @@ impl Cortex {
 
                     // Read context from active adapters
                     if adapter.state == crate::adapter::AdapterState::Active && adapter.should_read(tick_ms) {
-                        match adapter.driver.get_context().await {
+                        match adapter.driver.snapshot().await {
                             Ok(elements) => {
                                 let adapter_name = adapter.driver.manifest().name.clone();
                                 let confidence = adapter.driver.manifest().context.confidence;
@@ -1084,9 +1169,9 @@ impl Cortex {
                end tell"#,
             safe_name, safe_name
         );
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .status();
+        let mut command = std::process::Command::new("osascript");
+        command.args(["-e", &script]);
+        let _ = command_status_with_timeout(command, std::time::Duration::from_secs(2));
         // Short settle so the window server flushes the activation
         // before the keystroke lands. 150ms is empirically enough on
         // fast dev machines; shorter and the next CGEvent races the
@@ -1325,8 +1410,26 @@ impl Cortex {
                 let adapters = self.adapters.read().await;
                 if let Some(registered) = adapters.iter().find(|a| a.driver.manifest().name == *adapter) {
                     if registered.state == crate::adapter::AdapterState::Active {
+                        let action_decl = registered.driver.manifest().actions.get(action).cloned();
                         match registered.driver.execute(action, params.clone()).await {
-                            Ok(r) => r,
+                            Ok(result) => {
+                                if result.success
+                                    && action_decl
+                                        .as_ref()
+                                        .map(|decl| decl.requires_verification)
+                                        .unwrap_or(false)
+                                {
+                                    match registered.driver.verify_action(action, params, &result).await {
+                                        Ok(Some(verified)) => verified,
+                                        Ok(None) => result,
+                                        Err(e) => ActionResult::fail(format!(
+                                            "Adapter \"{adapter}\" verification error: {e}"
+                                        )),
+                                    }
+                                } else {
+                                    result
+                                }
+                            }
                             Err(e) => ActionResult::fail(format!("Adapter \"{adapter}\" error: {e}")),
                         }
                     } else {
@@ -1434,9 +1537,23 @@ impl Cortex {
                 table,
                 writes,
                 verify,
-            } => self.dispatch_write_cells(app, sheet.as_deref(), table.as_deref(), writes, *verify),
+            } => self
+                .dispatch_write_cells(app, sheet.as_deref(), table.as_deref(), writes, *verify)
+                .await,
+            PlannedAction::ReadCells {
+                app,
+                sheet,
+                table,
+                cell_refs,
+            } => self
+                .dispatch_read_cells(app, sheet.as_deref(), table.as_deref(), cell_refs)
+                .await,
+            PlannedAction::ExtractWithFallback {
+                name,
+                selectors,
+                parse_as,
+            } => self.dispatch_extract_with_fallback(name, selectors, parse_as),
             PlannedAction::Extract { .. }
-            | PlannedAction::ExtractWithFallback { .. }
             | PlannedAction::Done { .. }
             | PlannedAction::Fail { .. }
             | PlannedAction::NotebookWrites { .. } => ActionResult::ok(),
@@ -1451,11 +1568,183 @@ impl Cortex {
         Ok(result)
     }
 
+    /// Extract a single value from the focused CDP page by trying a
+    /// list of candidate selectors in order and parsing the first
+    /// match. Replaces the "LLM hand-writes document.querySelector in
+    /// a loop" failure mode — the runtime owns the retry/parse
+    /// machinery and the planner just supplies the selector candidates
+    /// plus a logical `name` under which the result is persisted.
+    ///
+    /// Selector entry is auto-detected:
+    ///   * Starts with `function` / `(function` / `(() =>` / `return` →
+    ///     treated as a raw JS expression, evaluated directly.
+    ///   * Otherwise treated as a CSS selector; wrapped into
+    ///     `document.querySelector(SEL)?.textContent ?? null`.
+    ///
+    /// Returns `ActionResult::ok` with `data = { "name": ..., "value":
+    /// <parsed>, "selector_used": <which one hit>, "raw": <raw string> }`
+    /// on success. On failure (no selector yielded a non-null value)
+    /// returns `ActionResult::fail` with a diagnostic listing every
+    /// selector tried and what each yielded — this goes into the
+    /// planner's history so the next turn sees exactly what was
+    /// tried and why it didn't work.
+    fn dispatch_extract_with_fallback(
+        &self,
+        name: &str,
+        selectors: &[String],
+        parse_as: &str,
+    ) -> crate::adapter::ActionResult {
+        use crate::adapter::ActionResult;
+        if selectors.is_empty() {
+            return ActionResult::fail(format!(
+                "extract_with_fallback({name}): empty selector list — provide at least one candidate"
+            ));
+        }
+        let mut diagnostics: Vec<String> = Vec::with_capacity(selectors.len());
+        for sel in selectors {
+            let expr = build_extract_expression(sel);
+            let eval = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    let client = cel_cdp::connect_to_focused_app().await;
+                    match client {
+                        Some(c) => c.evaluate(&expr).await.map_err(|e| e.to_string()),
+                        None => Err("No CDP target available".into()),
+                    }
+                })
+            });
+            let raw = match eval {
+                Ok(v) => v,
+                Err(e) => {
+                    diagnostics.push(format!("[{sel}] cdp error: {e}"));
+                    continue;
+                }
+            };
+            let raw_str = cdp_value_to_string(&raw);
+            if raw_str.is_none() {
+                diagnostics.push(format!("[{sel}] selector yielded null"));
+                continue;
+            }
+            let raw_str = raw_str.unwrap();
+            let parsed = match parse_extracted(&raw_str, parse_as) {
+                Some(v) => v,
+                None => {
+                    diagnostics.push(format!(
+                        "[{sel}] parse_as={parse_as} failed on raw={:?}",
+                        truncate(&raw_str, 60)
+                    ));
+                    continue;
+                }
+            };
+            let data = serde_json::json!({
+                "name": name,
+                "value": parsed,
+                "selector_used": sel,
+                "raw": raw_str,
+            });
+            return ActionResult {
+                success: true,
+                error: None,
+                data: Some(data),
+            };
+        }
+        ActionResult::fail(format!(
+            "extract_with_fallback({name}): no selector yielded a usable value — tried {} candidates. {}",
+            selectors.len(),
+            diagnostics.join("; ")
+        ))
+    }
+
     /// Route a `WriteCells` action to the correct scripting backend.
     /// Currently only Numbers is wired up; other apps return a clean
     /// runtime error so the planner can pivot instead of silently
     /// falling back to a path we know produces garbage (keystrokes).
-    fn dispatch_write_cells(
+    #[cfg(target_os = "macos")]
+    fn with_numbers_document_bootstrap<T, F>(
+        &self,
+        operation_name: &str,
+        mut operation: F,
+    ) -> Result<T, InputError>
+    where
+        F: FnMut() -> Result<T, InputError>,
+    {
+        match operation() {
+            Ok(value) => Ok(value),
+            Err(original_error) if should_attempt_numbers_document_bootstrap(&original_error) => {
+                warn!(
+                    operation = operation_name,
+                    error = %original_error,
+                    "Numbers scripting unavailable; attempting document bootstrap"
+                );
+                let bootstrap_result = bootstrap_numbers_document();
+                if let Err(ref bootstrap_error) = bootstrap_result {
+                    warn!(
+                        operation = operation_name,
+                        error = bootstrap_error,
+                        "Numbers document bootstrap did not confirm success before retry"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                match operation() {
+                    Ok(value) => Ok(value),
+                    Err(retry_error) => {
+                        if let Err(bootstrap_error) = bootstrap_result {
+                            Err(InputError::Failed(format!(
+                                "{operation_name} retry failed after Numbers bootstrap attempt ({bootstrap_error}). \
+                                 Original error: {original_error}. Retry error: {retry_error}"
+                            )))
+                        } else {
+                            Err(retry_error)
+                        }
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn dispatch_adapter_standard_action(
+        &self,
+        app: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Option<crate::adapter::ActionResult> {
+        let adapters = self.adapters.read().await;
+        let registered = adapters.iter().find(|candidate| {
+            candidate.state == crate::adapter::AdapterState::Active
+                && (candidate.driver.manifest().name.eq_ignore_ascii_case(app)
+                    || candidate.matches_app(app))
+                && candidate.driver.manifest().actions.contains_key(action)
+        })?;
+
+        let action_decl = registered.driver.manifest().actions.get(action).cloned();
+        match registered.driver.execute(action, params.clone()).await {
+            Ok(result) => {
+                if result.success
+                    && action_decl
+                        .as_ref()
+                        .map(|decl| decl.requires_verification)
+                        .unwrap_or(false)
+                {
+                    match registered.driver.verify_action(action, &params, &result).await {
+                        Ok(Some(verified)) => Some(verified),
+                        Ok(None) => Some(result),
+                        Err(err) => Some(crate::adapter::ActionResult::fail(format!(
+                            "Adapter \"{}\" verification error: {err}",
+                            registered.driver.manifest().name
+                        ))),
+                    }
+                } else {
+                    Some(result)
+                }
+            }
+            Err(err) => Some(crate::adapter::ActionResult::fail(format!(
+                "Adapter \"{}\" execution error for {action}: {err}",
+                registered.driver.manifest().name
+            ))),
+        }
+    }
+
+    async fn dispatch_write_cells(
         &self,
         app: &str,
         sheet: Option<&str>,
@@ -1464,6 +1753,24 @@ impl Cortex {
         verify: bool,
     ) -> crate::adapter::ActionResult {
         use crate::adapter::ActionResult;
+        let adapter_params = serde_json::json!({
+            "sheet": sheet,
+            "table": table,
+            "verify": verify,
+            "writes": writes
+                .iter()
+                .map(|write| serde_json::json!({
+                    "cell_ref": write.cell_ref,
+                    "value": write.value,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        if let Some(result) = self
+            .dispatch_adapter_standard_action(app, "write_cells", adapter_params)
+            .await
+        {
+            return result;
+        }
         if !app.eq_ignore_ascii_case("Numbers") {
             return ActionResult::fail(format!(
                 "write_cells currently only supports app=\"Numbers\"; got \"{app}\". \
@@ -1479,8 +1786,11 @@ impl Cortex {
                     value: w.value.clone(),
                 })
                 .collect();
-            match cel_input::write_numbers_cells(sheet, table, &cell_writes, verify) {
+            match self.with_numbers_document_bootstrap("write_cells", || {
+                cel_input::write_numbers_cells(sheet, table, &cell_writes, verify)
+            }) {
                 Ok(readbacks) => {
+                    dismiss_numbers_dialog_if_present();
                     if verify {
                         // Compare readback vs requested, with numeric
                         // tolerance (Numbers canonicalizes "108432.50"
@@ -1531,6 +1841,168 @@ impl Cortex {
                 "write_cells requires macOS (AppleScript backend)".to_string(),
             )
         }
+    }
+
+    /// Deterministic spreadsheet cell reads from the app model.
+    ///
+    /// This is the read-side twin of `write_cells`: use it when AX does
+    /// not faithfully surface spreadsheet contents and we need app truth
+    /// instead of UI guesswork.
+    async fn dispatch_read_cells(
+        &self,
+        app: &str,
+        sheet: Option<&str>,
+        table: Option<&str>,
+        cell_refs: &[String],
+    ) -> crate::adapter::ActionResult {
+        use crate::adapter::ActionResult;
+        let adapter_params = serde_json::json!({
+            "sheet": sheet,
+            "table": table,
+            "cell_refs": cell_refs,
+        });
+        if let Some(result) = self
+            .dispatch_adapter_standard_action(app, "read_cells", adapter_params)
+            .await
+        {
+            return result;
+        }
+        if !app.eq_ignore_ascii_case("Numbers") {
+            return ActionResult::fail(format!(
+                "read_cells currently only supports app=\"Numbers\"; got \"{app}\"."
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            match self.with_numbers_document_bootstrap("read_cells", || {
+                cel_input::read_numbers_cells(sheet, table, cell_refs)
+            }) {
+                Ok(readbacks) => {
+                    dismiss_numbers_dialog_if_present();
+                    let data = serde_json::json!({
+                        "app": app,
+                        "reads": cell_refs
+                            .iter()
+                            .zip(readbacks.iter())
+                            .map(|(cell_ref, value)| {
+                                serde_json::json!({
+                                    "ref": cell_ref,
+                                    "value": value,
+                                })
+                            })
+                            .collect::<Vec<_>>(),
+                    });
+                    ActionResult {
+                        success: true,
+                        error: None,
+                        data: Some(data),
+                    }
+                }
+                Err(e) => ActionResult::fail(format!("read_cells failed: {e}")),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (sheet, table, cell_refs);
+            ActionResult::fail(
+                "read_cells requires macOS (AppleScript backend)".to_string(),
+            )
+        }
+    }
+}
+
+/// Detect whether a selector-string entry is a raw JS expression
+/// (common prefixes the LLM uses) vs a bare CSS selector, and wrap
+/// bare selectors into `querySelector` calls that safely fall through
+/// to `null` on miss.
+fn build_extract_expression(sel: &str) -> String {
+    let trimmed = sel.trim();
+    let looks_like_js = trimmed.starts_with("function")
+        || trimmed.starts_with("(function")
+        || trimmed.starts_with("(() =>")
+        || trimmed.starts_with("(()=>")
+        || trimmed.starts_with("return ")
+        || trimmed.starts_with("document.")
+        || trimmed.starts_with("window.")
+        || trimmed.contains("=>");
+    if looks_like_js {
+        trimmed.to_string()
+    } else {
+        // Bare CSS selector. Escape single quotes for JS-string embedding.
+        let escaped = trimmed.replace('\\', "\\\\").replace('\'', "\\'");
+        format!(
+            "(function() {{ var el = document.querySelector('{escaped}'); \
+             return el ? (el.textContent == null ? null : el.textContent.trim()) : null; }})()"
+        )
+    }
+}
+
+/// Flatten a CDP `Runtime.evaluate` result into a string we can parse.
+/// Returns `None` when the JS side returned `null`/`undefined` or an
+/// empty result object.
+fn cdp_value_to_string(v: &serde_json::Value) -> Option<String> {
+    // The client already extracts `result.result.value` — the raw value
+    // is at the top of `v`. Accept strings, numbers, booleans; reject
+    // null/undefined/missing.
+    if v.is_null() {
+        return None;
+    }
+    if let Some(s) = v.as_str() {
+        if s.is_empty() {
+            return None;
+        }
+        return Some(s.to_string());
+    }
+    if let Some(n) = v.as_f64() {
+        return Some(n.to_string());
+    }
+    if let Some(b) = v.as_bool() {
+        return Some(b.to_string());
+    }
+    // Object/array: stringify. This catches cases where the JS returned
+    // a node ref (rare) or an object.
+    let s = serde_json::to_string(v).ok()?;
+    if s == "null" || s == "\"\"" {
+        return None;
+    }
+    Some(s)
+}
+
+/// Parse the raw string yielded by a selector according to the
+/// planner's `parse_as` hint. Unknown hints fall back to "text".
+fn parse_extracted(raw: &str, parse_as: &str) -> Option<serde_json::Value> {
+    let cleaned = raw.trim();
+    match parse_as.to_lowercase().as_str() {
+        "float" | "number" => {
+            let stripped: String = cleaned
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                .collect();
+            stripped.parse::<f64>().ok().map(|n| {
+                serde_json::Number::from_f64(n)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::String(raw.to_string()))
+            })
+        }
+        "int" | "integer" => {
+            let stripped: String = cleaned
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
+            stripped
+                .parse::<i64>()
+                .ok()
+                .map(|n| serde_json::Value::Number(n.into()))
+        }
+        "html" | "text" | _ => Some(serde_json::Value::String(cleaned.to_string())),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
     }
 }
 
@@ -1901,10 +2373,12 @@ fn action_requires_native_input(action: &PlannedAction) -> bool {
         | PlannedAction::Done { .. }
         | PlannedAction::Fail { .. }
         | PlannedAction::Extract { .. }
-        | PlannedAction::ExtractWithFallback { .. }
         | PlannedAction::NotebookWrites { .. }
         | PlannedAction::CdpEval { .. }
-        | PlannedAction::Navigate { .. } => false,
+        | PlannedAction::Navigate { .. }
+        | PlannedAction::ReadCells { .. }
+        // extract_with_fallback runs over CDP only — no native input.
+        | PlannedAction::ExtractWithFallback { .. } => false,
         // Batch is a wrapper — recurse and require native input only if any
         // inner action does.
         PlannedAction::Batch { actions } => {
@@ -1925,7 +2399,6 @@ fn action_type_str(action: &PlannedAction) -> &str {
         PlannedAction::Wait { .. } => "wait",
         PlannedAction::Custom { .. } => "custom",
         PlannedAction::Extract { .. } => "extract",
-        PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback",
         PlannedAction::Batch { .. } => "batch",
         PlannedAction::Act { .. } => "act",
         PlannedAction::Done { .. } => "done",
@@ -1937,6 +2410,8 @@ fn action_type_str(action: &PlannedAction) -> &str {
         PlannedAction::Navigate { .. } => "navigate",
         PlannedAction::NotebookWrites { .. } => "notebook_writes",
         PlannedAction::WriteCells { .. } => "write_cells",
+        PlannedAction::ReadCells { .. } => "read_cells",
+        PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback",
     }
 }
 
@@ -2073,13 +2548,12 @@ fn activate_app_with_verification(
         //      what actually pins the app to the front when another
         //      session process is fighting for focus.
         let safe_name = app_name.replace('"', "\\\"");
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &format!("tell application \"{safe_name}\" to activate")])
-            .status();
-        let _ = std::process::Command::new("open")
-            .arg("-a")
-            .arg(app_name)
-            .status();
+        let mut activate_command = std::process::Command::new("osascript");
+        activate_command.args(["-e", &format!("tell application \"{safe_name}\" to activate")]);
+        let _ = command_status_with_timeout(activate_command, std::time::Duration::from_secs(2));
+        let mut open_command = std::process::Command::new("open");
+        open_command.arg("-a").arg(app_name);
+        let _ = command_status_with_timeout(open_command, std::time::Duration::from_secs(3));
         // Force-frontmost via System Events. Run twice with a short
         // gap — the first call tends to wake the process, the second
         // actually flips frontmost once the window server catches up.
@@ -2090,13 +2564,13 @@ fn activate_app_with_verification(
                  end repeat
                end tell"#
         );
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &force_frontmost])
-            .status();
+        let mut frontmost_command = std::process::Command::new("osascript");
+        frontmost_command.args(["-e", &force_frontmost]);
+        let _ = command_status_with_timeout(frontmost_command, std::time::Duration::from_secs(2));
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = std::process::Command::new("osascript")
-            .args(["-e", &force_frontmost])
-            .status();
+        let mut frontmost_retry = std::process::Command::new("osascript");
+        frontmost_retry.args(["-e", &force_frontmost]);
+        let _ = command_status_with_timeout(frontmost_retry, std::time::Duration::from_secs(2));
     }
 
     // Poll to verify the app actually became frontmost. Cold-start
@@ -2143,10 +2617,11 @@ fn app_is_running_with_visible_window(name_lower: &str) -> bool {
            end tell"#,
         name_lower, name_lower
     );
-    std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .output()
-        .ok()
+    {
+        let mut command = std::process::Command::new("osascript");
+        command.args(["-e", &script]);
+        command_output_with_timeout(command, std::time::Duration::from_secs(1))
+    }
         .and_then(|out| {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             s.parse::<u32>().ok()
@@ -2168,13 +2643,12 @@ fn frontmost_is_browser() -> bool {
 }
 
 fn get_frontmost_app_name() -> Option<String> {
-    let output = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            "tell application \"System Events\" to name of first process whose frontmost is true",
-        ])
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new("osascript");
+    command.args([
+        "-e",
+        "tell application \"System Events\" to name of first process whose frontmost is true",
+    ]);
+    let output = command_output_with_timeout(command, std::time::Duration::from_secs(1))?;
     if output.status.success() {
         let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !name.is_empty() {
@@ -2184,9 +2658,351 @@ fn get_frontmost_app_name() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn should_attempt_numbers_document_bootstrap(error: &InputError) -> bool {
+    matches!(
+        error,
+        InputError::ScriptingUnavailable { app, .. } if app.eq_ignore_ascii_case("Numbers")
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn bootstrap_numbers_document() -> Result<(), String> {
+    let mut attempts = Vec::new();
+
+    match activate_app_with_verification("Numbers") {
+        Ok(_) => attempts.push("activated Numbers".to_string()),
+        Err(err) => attempts.push(format!("activate_app failed: {err}")),
+    }
+
+    if numbers_document_ready() {
+        attempts.push("existing Numbers document already scriptable".into());
+        return Ok(());
+    }
+
+    if let Some(document_path) = NUMBERS_DOCUMENT_BOOTSTRAP_CANDIDATES
+        .iter()
+        .copied()
+        .find(|path| std::path::Path::new(path).exists())
+    {
+        let mut open_command = std::process::Command::new("open");
+        open_command.arg(document_path);
+        match command_status_with_timeout(open_command, std::time::Duration::from_secs(5)) {
+            Some(status) if status.success() => {
+                attempts.push(format!("opened sample document {}", document_path));
+                std::thread::sleep(std::time::Duration::from_millis(1400));
+                record_numbers_reactivation(&mut attempts);
+                if numbers_document_ready() {
+                    return Ok(());
+                }
+            }
+            Some(status) => attempts.push(format!(
+                "open sample document exited with status {:?}",
+                status.code()
+            )),
+            None => attempts.push("open sample document timed out".into()),
+        }
+    } else {
+        attempts.push("no bundled Numbers sample document found".into());
+    }
+
+    if let Some(template_path) = NUMBERS_BLANK_TEMPLATE_CANDIDATES
+        .iter()
+        .copied()
+        .find(|path| std::path::Path::new(path).exists())
+    {
+        let mut open_command = std::process::Command::new("open");
+        open_command.arg(template_path);
+        match command_status_with_timeout(open_command, std::time::Duration::from_secs(5)) {
+            Some(status) if status.success() => {
+                attempts.push(format!("opened template {}", template_path));
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+                if numbers_document_ready() {
+                    record_numbers_reactivation(&mut attempts);
+                    return Ok(());
+                }
+            }
+            Some(status) => attempts.push(format!(
+                "open template exited with status {:?}",
+                status.code()
+            )),
+            None => attempts.push("open template timed out".into()),
+        }
+    } else {
+        attempts.push("no bundled Numbers blank template found".into());
+    }
+
+    if let Some(clicked) = click_numbers_dialog_button(&[
+        "New Spreadsheet",
+        "New Document",
+        "Create Document",
+        "Create",
+        "Blank",
+    ]) {
+        attempts.push(format!("clicked {}", clicked));
+        record_numbers_reactivation(&mut attempts);
+        if numbers_document_ready() {
+            return Ok(());
+        }
+    }
+
+    if send_system_keystroke("n", true) {
+        attempts.push("sent Cmd+N".into());
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        if let Some(clicked) = click_numbers_dialog_button(&[
+            "New Spreadsheet",
+            "New Document",
+            "Create Document",
+            "Create",
+            "Blank",
+        ]) {
+            attempts.push(format!("clicked {}", clicked));
+            record_numbers_reactivation(&mut attempts);
+            if numbers_document_ready() {
+                return Ok(());
+            }
+        }
+    } else {
+        attempts.push("failed to send Cmd+N".into());
+    }
+
+    if send_system_key_code(36) {
+        attempts.push("sent Return".into());
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        record_numbers_reactivation(&mut attempts);
+        if numbers_document_ready() {
+            return Ok(());
+        }
+        return Err(attempts.join("; "));
+    }
+
+    attempts.push("failed to send Return".into());
+    Err(attempts.join("; "))
+}
+
+#[cfg(target_os = "macos")]
+fn record_numbers_reactivation(attempts: &mut Vec<String>) {
+    match activate_app_with_verification("Numbers") {
+        Ok(_) => attempts.push("re-activated Numbers".into()),
+        Err(err) => attempts.push(format!("re-activate Numbers failed: {err}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn numbers_document_ready() -> bool {
+    let probe_refs = vec![String::from("A1")];
+    cel_input::read_numbers_cells(None, None, &probe_refs).is_ok()
+}
+
+#[cfg(target_os = "macos")]
+fn dismiss_numbers_dialog_if_present() {
+    if let Some(label) = click_numbers_dialog_button_via_ax(&["Cancel"]) {
+        trace!(button = %label, "dismissed Numbers dialog via AX cancel");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return;
+    }
+    if let Some(label) = click_numbers_dialog_button_via_system_events(&["Cancel"]) {
+        trace!(button = %label, "dismissed Numbers dialog via System Events cancel");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        return;
+    }
+    if send_system_key_code(53) {
+        trace!("dismissed Numbers dialog via Escape");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn click_numbers_dialog_button(candidates: &[&str]) -> Option<String> {
+    for _ in 0..5 {
+        if let Some(label) = click_numbers_dialog_button_via_ax(candidates) {
+            return Some(label);
+        }
+        if let Some(label) = click_numbers_dialog_button_via_system_events(candidates) {
+            return Some(label);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn click_numbers_dialog_button_via_ax(candidates: &[&str]) -> Option<String> {
+    let tree = cel_accessibility::create_tree();
+    for candidate in candidates {
+        let matches = tree
+            .find_elements(Some(&ElementRole::Button), Some(candidate))
+            .ok()?;
+        for element in matches {
+            if !element.state.enabled || !element.state.visible {
+                continue;
+            }
+            if tree.perform_action(&element.id, "click").ok()? {
+                let label = element
+                    .label
+                    .unwrap_or_else(|| (*candidate).to_string());
+                return Some(label);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn click_numbers_dialog_button_via_system_events(candidates: &[&str]) -> Option<String> {
+    let quoted_candidates = candidates
+        .iter()
+        .map(|candidate| {
+            let escaped = candidate.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("\"{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let script = format!(
+        r#"set targetNames to {{{quoted_candidates}}}
+tell application "System Events"
+  repeat with p in (every application process whose name is "Numbers" or name contains "Numbers")
+    repeat with w in windows of p
+      repeat with uiElem in entire contents of w
+        try
+          set buttonName to (name of uiElem) as text
+          repeat with targetName in targetNames
+            if buttonName contains (targetName as text) then
+              click uiElem
+              return buttonName
+            end if
+          end repeat
+        end try
+      end repeat
+    end repeat
+  end repeat
+end tell
+return ""#
+    );
+
+    let mut command = std::process::Command::new("osascript");
+    command.args(["-e", &script]);
+    let output = command_output_with_timeout(command, std::time::Duration::from_secs(2))?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_system_keystroke(key: &str, command_down: bool) -> bool {
+    let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = if command_down {
+        format!(
+            r#"tell application "System Events" to keystroke "{escaped}" using command down"#
+        )
+    } else {
+        format!(r#"tell application "System Events" to keystroke "{escaped}""#)
+    };
+    let mut command = std::process::Command::new("osascript");
+    command.args(["-e", &script]);
+    command_status_with_timeout(command, std::time::Duration::from_secs(2))
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn send_system_key_code(key_code: u16) -> bool {
+    let mut command = std::process::Command::new("osascript");
+    command.args([
+        "-e",
+        &format!("tell application \"System Events\" to key code {key_code}"),
+    ]);
+    command_status_with_timeout(command, std::time::Duration::from_secs(2))
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_extract_expression_wraps_bare_css_selector() {
+        let expr = build_extract_expression("fin-streamer[data-field='price']");
+        // Should wrap with querySelector + textContent + null-guard
+        assert!(expr.contains("document.querySelector"));
+        assert!(expr.contains("textContent"));
+        // Original selector must be present, with the inner ' escaped
+        // for JS string embedding.
+        assert!(expr.contains(r"fin-streamer[data-field=\'price\']"));
+    }
+
+    #[test]
+    fn build_extract_expression_passes_raw_js_through() {
+        let js = "(function() { return document.title; })()";
+        assert_eq!(build_extract_expression(js), js);
+        let arrow = "(() => document.title)()";
+        assert_eq!(build_extract_expression(arrow), arrow);
+    }
+
+    #[test]
+    fn parse_extracted_float_strips_currency() {
+        let parsed = parse_extracted("$108,432.50", "float").unwrap();
+        // Numbers round-trip via serde_json::Number — compare as f64.
+        assert_eq!(parsed.as_f64().unwrap(), 108432.50);
+    }
+
+    #[test]
+    fn parse_extracted_int_handles_negative() {
+        let parsed = parse_extracted("-42", "int").unwrap();
+        assert_eq!(parsed.as_i64().unwrap(), -42);
+    }
+
+    #[test]
+    fn parse_extracted_text_trims() {
+        let parsed = parse_extracted("  hello  ", "text").unwrap();
+        assert_eq!(parsed.as_str().unwrap(), "hello");
+    }
+
+    #[test]
+    fn parse_extracted_unknown_hint_falls_back_to_text() {
+        let parsed = parse_extracted("BTC", "weirdo_format").unwrap();
+        assert_eq!(parsed.as_str().unwrap(), "BTC");
+    }
+
+    #[test]
+    fn cdp_value_to_string_rejects_null_and_empty() {
+        assert!(cdp_value_to_string(&serde_json::Value::Null).is_none());
+        assert!(cdp_value_to_string(&serde_json::Value::String(String::new())).is_none());
+    }
+
+    #[test]
+    fn cdp_value_to_string_returns_str() {
+        let v = serde_json::Value::String("hello".into());
+        assert_eq!(cdp_value_to_string(&v).unwrap(), "hello");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn numbers_bootstrap_only_triggers_for_numbers_scripting_unavailable() {
+        assert!(should_attempt_numbers_document_bootstrap(
+            &InputError::ScriptingUnavailable {
+                app: "Numbers".into(),
+                reason: "no open document".into(),
+            }
+        ));
+        assert!(!should_attempt_numbers_document_bootstrap(
+            &InputError::Failed("random".into())
+        ));
+        assert!(!should_attempt_numbers_document_bootstrap(
+            &InputError::ScriptingUnavailable {
+                app: "Pages".into(),
+                reason: "no open document".into(),
+            }
+        ));
+    }
 
     #[test]
     fn test_context_fingerprint_stable() {

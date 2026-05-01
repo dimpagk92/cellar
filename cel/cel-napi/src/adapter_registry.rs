@@ -47,33 +47,35 @@ pub async fn register_adapter(name: String) -> napi::Result<()> {
 #[napi]
 pub async fn connect_adapter(name: String) -> napi::Result<()> {
     let mut map = adapters().lock().await;
-    let adapter = map.get_mut(&name).ok_or_else(|| {
-        napi::Error::from_reason(format!("Adapter \"{name}\" not registered"))
-    })?;
-    adapter.connect().await.map_err(|e| {
-        napi::Error::from_reason(format!("Connect failed: {e}"))
-    })
+    let adapter = map
+        .get_mut(&name)
+        .ok_or_else(|| napi::Error::from_reason(format!("Adapter \"{name}\" not registered")))?;
+    adapter
+        .connect()
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("Connect failed: {e}")))
 }
 
 /// Disconnect a registered adapter.
 #[napi]
 pub async fn disconnect_adapter(name: String) -> napi::Result<()> {
     let mut map = adapters().lock().await;
-    let adapter = map.get_mut(&name).ok_or_else(|| {
-        napi::Error::from_reason(format!("Adapter \"{name}\" not registered"))
-    })?;
-    adapter.disconnect().await.map_err(|e| {
-        napi::Error::from_reason(format!("Disconnect failed: {e}"))
-    })
+    let adapter = map
+        .get_mut(&name)
+        .ok_or_else(|| napi::Error::from_reason(format!("Adapter \"{name}\" not registered")))?;
+    adapter
+        .disconnect()
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("Disconnect failed: {e}")))
 }
 
 /// Check if a registered adapter's target app is running.
 #[napi]
 pub async fn probe_adapter(name: String) -> napi::Result<bool> {
     let map = adapters().lock().await;
-    let adapter = map.get(&name).ok_or_else(|| {
-        napi::Error::from_reason(format!("Adapter \"{name}\" not registered"))
-    })?;
+    let adapter = map
+        .get(&name)
+        .ok_or_else(|| napi::Error::from_reason(format!("Adapter \"{name}\" not registered")))?;
     Ok(adapter.is_available().await)
 }
 
@@ -81,15 +83,15 @@ pub async fn probe_adapter(name: String) -> napi::Result<bool> {
 #[napi]
 pub async fn adapter_get_elements(name: String) -> napi::Result<String> {
     let map = adapters().lock().await;
-    let adapter = map.get(&name).ok_or_else(|| {
-        napi::Error::from_reason(format!("Adapter \"{name}\" not registered"))
-    })?;
-    let elements = adapter.get_elements().await.map_err(|e| {
-        napi::Error::from_reason(format!("get_elements failed: {e}"))
-    })?;
-    serde_json::to_string(&elements).map_err(|e| {
-        napi::Error::from_reason(format!("JSON serialization failed: {e}"))
-    })
+    let adapter = map
+        .get(&name)
+        .ok_or_else(|| napi::Error::from_reason(format!("Adapter \"{name}\" not registered")))?;
+    let elements = adapter
+        .get_elements()
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("get_elements failed: {e}")))?;
+    serde_json::to_string(&elements)
+        .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
 }
 
 /// Execute a named action on a registered adapter (JSON in/out).
@@ -100,29 +102,27 @@ pub async fn adapter_execute_action(
     params: String,
 ) -> napi::Result<String> {
     let map = adapters().lock().await;
-    let adapter = map.get(&name).ok_or_else(|| {
-        napi::Error::from_reason(format!("Adapter \"{name}\" not registered"))
-    })?;
-    let params_val: serde_json::Value = serde_json::from_str(&params).map_err(|e| {
-        napi::Error::from_reason(format!("Invalid params JSON: {e}"))
-    })?;
-    let result = adapter.execute_action(&action, params_val).await.map_err(|e| {
-        napi::Error::from_reason(format!("execute_action failed: {e}"))
-    })?;
-    serde_json::to_string(&result).map_err(|e| {
-        napi::Error::from_reason(format!("JSON serialization failed: {e}"))
-    })
+    let adapter = map
+        .get(&name)
+        .ok_or_else(|| napi::Error::from_reason(format!("Adapter \"{name}\" not registered")))?;
+    let params_val: serde_json::Value = serde_json::from_str(&params)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid params JSON: {e}")))?;
+    let result = adapter
+        .execute_action(&action, params_val)
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("execute_action failed: {e}")))?;
+    serde_json::to_string(&result)
+        .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
 }
 
 /// Get adapter info (JSON-serialized).
 #[napi]
 pub async fn adapter_info(name: String) -> napi::Result<String> {
     let map = adapters().lock().await;
-    let adapter = map.get(&name).ok_or_else(|| {
-        napi::Error::from_reason(format!("Adapter \"{name}\" not registered"))
-    })?;
+    let adapter = map
+        .get(&name)
+        .ok_or_else(|| napi::Error::from_reason(format!("Adapter \"{name}\" not registered")))?;
     let info: AdapterInfo = adapter.info();
-    serde_json::to_string(&info).map_err(|e| {
-        napi::Error::from_reason(format!("JSON serialization failed: {e}"))
-    })
+    serde_json::to_string(&info)
+        .map_err(|e| napi::Error::from_reason(format!("JSON serialization failed: {e}")))
 }

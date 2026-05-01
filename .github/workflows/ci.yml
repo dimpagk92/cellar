@@ -94,7 +94,7 @@ jobs:
             target
           key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: linux-cargo-
-      - name: Check workspace (no runtime tests — Linux CI lacks AT-SPI2 bus)
+      - name: Run tests
         run: cargo check --workspace --lib --bins --tests
       - name: Clippy
         run: cargo clippy --workspace --lib --bins --tests

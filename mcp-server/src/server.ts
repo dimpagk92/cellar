@@ -283,24 +283,41 @@ export function createCelMcpServer(cel?: Cel): McpServer {
     {
       title: "CEL Perceive",
       description:
-        "Always-on perception engine (Cortex). Maintains a continuously-updated " +
-        "mental model via background event streams with periodic accessibility tree refreshes " +
-        "on significant changes, and vision/screenshots when flagged as needed.\n\n" +
-        "IMPORTANT: Singleton — only one perception session can be active at a time. " +
-        "cel_see 'watch' mode is unavailable during an active session.\n\n" +
+        "Stateful perception engine (Cortex). Replaces repeated cel_see polling with a warm, " +
+        "continuously-updated mental model that ingests accessibility events in the background " +
+        "and surfaces diffs, anomalies, and stability signals on demand.\n\n" +
+        "When to use: any task that takes more than 3 observations OR that needs to detect " +
+        "side effects between actions (modals appearing, focus shifts, stale state). For one-shot " +
+        "reads or simple act→verify cycles, prefer cel_see — it's lighter and doesn't require a session.\n\n" +
+        "Lifecycle: start → (read | feed | checkpoint | configure | status)* → stop. The session is " +
+        "a singleton — only one cortex can run at a time, and cel_see 'watch' mode is unavailable " +
+        "while active. Always pair start with stop to flush the run summary and free the cortex.\n\n" +
         "Modes:\n" +
-        "- start: Boot the cortex with a goal. Set enable_suggestions=true (default) " +
-        "for LLM-powered next-action recommendations on each read.\n" +
-        "- read: Get the mental model snapshot (instant — model is kept warm by background events).\n" +
-        "- feed: Report an action you took (action, target, expected outcome). " +
-        "Cortex waits for screen to settle, diffs against current model, returns verification.\n" +
-        "- checkpoint: Summarize completed work and reset action history. Use between phases of multi-step tasks.\n" +
-        "- configure: Update goal or enable_suggestions mid-session.\n" +
-        "- status: Cortex health — confidence score, uptime, cycle count, " +
-        "element counts (stable vs volatile), temporal state (loading, errors, focus trail).\n" +
-        "- stop: Shutdown the cortex and get a summary.\n\n" +
-        "The model includes temporal awareness (loading states, error persistence, " +
-        "focus trail) and element stability classification (stable vs volatile targets).",
+        "- start: Open a session with a natural-language goal. Cortex parses constraints from the " +
+        "goal (factual / action / navigation / verification), boots its event listeners, and primes " +
+        "the model. Optional enable_suggestions=true (default) generates LLM next-action hints on " +
+        "each read; disable for passive observation to save tokens.\n" +
+        "- read: Return the current mental-model snapshot. Instant — the model is kept warm by " +
+        "background events. Output: stable elements, volatile elements, focus trail, recent diffs, " +
+        "anomalies, optional next-action suggestions, constraint-satisfaction state.\n" +
+        "- feed: Report an action you just executed (action verb, target id/description, expected " +
+        "outcome). Cortex waits for the screen to settle, diffs against the prior model, and returns " +
+        "{landed, anomalies, side_effects} so the host can decide whether to retry or proceed.\n" +
+        "- checkpoint: Record a one-paragraph progress summary and reset the recent-actions log. " +
+        "Use at natural phase boundaries — login complete, form filled, file saved — so subsequent " +
+        "reads anchor on the right context window.\n" +
+        "- configure: Mid-session adjustments. Replace goal (re-extracts constraints, preserves " +
+        "satisfied ones by text match) or toggle enable_suggestions without dropping the session.\n" +
+        "- status: Cortex telemetry — confidence score, uptime, cycle count, stable/volatile " +
+        "element counts, temporal flags (is_loading, has_errors), focus trail. Use for health " +
+        "checks or to inspect why suggestions look off.\n" +
+        "- stop: End the session and emit a run summary (actions taken, checkpoints, final " +
+        "constraint satisfaction). Idempotent — safe to call from cleanup paths.\n\n" +
+        "Cost model: read is free (memoized); feed pays one a11y diff (~50ms); start/configure pay " +
+        "one LLM call to extract constraints when enable_suggestions=true; stop is free.\n\n" +
+        "Cross-tool rules: cel_see 'watch' mode is blocked during an active session — use perceive " +
+        "read instead. cel_act calls do NOT auto-feed Cortex; you must explicitly call feed after " +
+        "each action group for diff tracking to work.",
       inputSchema: celPerceiveSchema,
     },
     degraded ? stubHandler : async (args) => handleCelPerceive(instance, args),

@@ -81,7 +81,6 @@ pub struct MentalModel {
     pub uptime_ms: u64,
 
     // ── Adapter state ──────────────────────────────────────────────────────
-
     /// Maps element IDs to the adapter that sourced them.
     /// Used by the Cortex to route execution requests to the right adapter.
     #[serde(default)]
@@ -399,7 +398,9 @@ impl MentalModel {
             } else {
                 parts.push(format!("Using {}", self.current_context.app));
             }
-            if !self.current_context.window.is_empty() && self.current_context.window != self.current_context.app {
+            if !self.current_context.window.is_empty()
+                && self.current_context.window != self.current_context.app
+            {
                 parts.push(format!("in {}", self.current_context.window));
             }
             if let Some(focused) = &self.focused_element {
@@ -470,7 +471,10 @@ impl MentalModel {
             })
             .or_else(|| {
                 if self.vision_needed {
-                    Some("Structured streams are still sparse; a richer read may be needed.".to_string())
+                    Some(
+                        "Structured streams are still sparse; a richer read may be needed."
+                            .to_string(),
+                    )
                 } else {
                     None
                 }
@@ -489,7 +493,10 @@ impl MentalModel {
                 })
         });
         let first_actionable = self.current_context.elements.iter().find(|element| {
-            element.state.enabled && element.state.visible && !element.actions.is_empty() && element.label.is_some()
+            element.state.enabled
+                && element.state.visible
+                && !element.actions.is_empty()
+                && element.label.is_some()
         });
 
         let suggested_next_step = if let Some(anomaly) = first_anomaly {
@@ -527,11 +534,9 @@ impl MentalModel {
             TaskPhase::Input
         } else if self.temporal.idle_since.is_some() {
             TaskPhase::Idle
-        } else if self
-            .last_diff_summary
-            .as_ref()
-            .map_or(false, |diff| diff.added_count + diff.removed_count + diff.changed_count > 0)
-        {
+        } else if self.last_diff_summary.as_ref().map_or(false, |diff| {
+            diff.added_count + diff.removed_count + diff.changed_count > 0
+        }) {
             TaskPhase::Navigation
         } else {
             TaskPhase::Review
@@ -651,7 +656,9 @@ mod tests {
             added_labels: vec!["Pay now".into()],
             changed_labels: vec!["Email".into()],
         });
-        model.element_adapter_index.insert("btn-pay".into(), "browser".into());
+        model
+            .element_adapter_index
+            .insert("btn-pay".into(), "browser".into());
         model.confidence = 0.72;
 
         model.refresh_derived(12_400, Some(12_000), None);
@@ -669,6 +676,9 @@ mod tests {
         let semantic = model.semantic.as_ref().expect("semantic insight");
         assert_eq!(semantic.task_phase, TaskPhase::Input);
         assert!(semantic.current_activity.contains("Google Chrome"));
-        assert!(semantic.suggested_next_step.as_ref().is_some_and(|step| step.contains("Email")));
+        assert!(semantic
+            .suggested_next_step
+            .as_ref()
+            .is_some_and(|step| step.contains("Email")));
     }
 }

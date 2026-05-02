@@ -47,18 +47,16 @@ pub mod process_driver;
 pub mod skeleton;
 
 // Re-export primary types for convenience.
+pub use adapter::{
+    discover_adapters, load_manifest, ActionDeclaration, ActionResult, AdapterDriver, AdapterError,
+    AdapterManifest, AdapterState, ContextDeclaration, RegisteredAdapter,
+};
 pub use cortex::{Cortex, CortexError, TargetValidation};
 pub use manager::CortexManager;
 pub use memory::{Memory, MemoryEntry, MemoryError, MemoryLenses};
 pub use model::{
-    Anomaly, AnomalyType, DialogType, DismissableDialog, ElementStability,
-    ErrorState, FocusedElement, FreshnessAssessment, FreshnessState,
-    LoadingState, MentalModel, PerceptionDiff, DiffSummary, SemanticInsight,
-    SourceSummary, StalenessCause, TaskPhase, TemporalFlags,
-};
-pub use adapter::{
-    ActionResult, AdapterDriver, AdapterError, AdapterManifest, AdapterState,
-    ContextDeclaration, ActionDeclaration, RegisteredAdapter,
-    discover_adapters, load_manifest,
+    Anomaly, AnomalyType, DialogType, DiffSummary, DismissableDialog, ElementStability, ErrorState,
+    FocusedElement, FreshnessAssessment, FreshnessState, LoadingState, MentalModel, PerceptionDiff,
+    SemanticInsight, SourceSummary, StalenessCause, TaskPhase, TemporalFlags,
 };
 pub use process_driver::ProcessDriver;

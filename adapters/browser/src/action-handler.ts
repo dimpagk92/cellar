@@ -342,19 +342,30 @@ export class ActionHandler {
             }
           }
 
-          // Set the value via native setter to trigger React/Vue reactivity
-          const nativeSetter = Object.getOwnPropertyDescriptor(
-            HTMLInputElement.prototype, "value",
-          )?.set;
-          if (nativeSetter) {
-            nativeSetter.call(input, val);
-          } else {
-            input.value = val;
-          }
+          // Set through the correct native setter and dispatch the same
+          // commit events a real browser edit would produce.
+          const tag = input.tagName.toUpperCase();
+          const proto = tag === "TEXTAREA"
+            ? HTMLTextAreaElement.prototype
+            : tag === "SELECT"
+              ? HTMLSelectElement.prototype
+              : HTMLInputElement.prototype;
+          const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set
+            || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
+          if (nativeSetter) nativeSetter.call(input, val);
+          else input.value = val;
 
-          // Dispatch events to notify frameworks
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
+          try {
+            input.dispatchEvent(new InputEvent("input", {
+              bubbles: true,
+              composed: true,
+              inputType: "insertReplacementText",
+              data: val,
+            }));
+          } catch {
+            input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+          }
+          input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 
           // Restore readonly if it was originally set
           if (wasReadonly) input.setAttribute("readonly", "");

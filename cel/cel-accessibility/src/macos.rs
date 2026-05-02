@@ -310,6 +310,13 @@ struct ObserverHandle {
 unsafe impl Send for ObserverHandle {}
 unsafe impl Sync for ObserverHandle {}
 
+/// Whether the host process has been granted macOS Accessibility permission.
+/// Cheap (microseconds), no UI prompt — safe to call frequently as a pre-flight
+/// guard before doing real AX work.
+pub fn is_process_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() }
+}
+
 impl MacAccessibility {
     pub fn new() -> Result<Self, AccessibilityError> {
         if !unsafe { AXIsProcessTrusted() } {

@@ -130,3 +130,37 @@ export function errorResult(message: string) {
     isError: true as const,
   };
 }
+
+/**
+ * Pre-flight: ensure the host process has macOS Accessibility permission.
+ * Returns null when granted (or on non-macOS where AX permission isn't a thing).
+ * Returns a structured error response when denied — caller should `return` it
+ * directly from the tool handler so the user sees a clear remediation path
+ * instead of an empty context or a deep AX traversal error.
+ */
+export function axPermissionGuard(cel: Cel) {
+  if (cel.isAxPermissionGranted) return null;
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: [
+          "macOS Accessibility permission required.",
+          "",
+          "Cellar reads the screen via the macOS Accessibility API, which requires",
+          "explicit user grant for the host process running this MCP server",
+          "(typically Terminal.app, iTerm.app, or your IDE — Cursor, Claude Code, etc.).",
+          "",
+          "Grant it:",
+          "  1. Open System Settings → Privacy & Security → Accessibility",
+          "  2. Add the host process and toggle it ON",
+          "  3. Restart the host process — macOS does not pick up permission changes mid-process",
+          "",
+          "Or run from a shell:",
+          '  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"',
+        ].join("\n"),
+      },
+    ],
+    isError: true as const,
+  };
+}

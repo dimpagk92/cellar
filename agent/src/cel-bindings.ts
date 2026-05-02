@@ -107,6 +107,7 @@ function sanitizeContextForRust(context: ScreenContext): ScreenContext {
 /** CEL native module interface — matches the napi exports from cel-napi. */
 export interface CelNative {
   celVersion(): string;
+  axPermissionGranted(): boolean;
   getContext(): string;
   captureScreen(): Buffer;
   listMonitors(): string;
@@ -455,6 +456,18 @@ export class Cel implements
   /** Whether the native module is available. */
   get isNativeAvailable(): boolean {
     return this.native !== null;
+  }
+
+  /**
+   * Whether the host process has macOS Accessibility permission granted.
+   * Returns true on non-macOS platforms (no-op — Accessibility is macOS-only).
+   * Returns false when the native module isn't loaded (can't check).
+   *
+   * Cheap (microseconds), no UI prompt — safe to call as a pre-flight guard
+   * before any AX-touching tool invocation.
+   */
+  get isAxPermissionGranted(): boolean {
+    return this.native?.axPermissionGranted() ?? false;
   }
 
   /** Get CEL version. */

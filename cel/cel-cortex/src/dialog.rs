@@ -21,33 +21,133 @@ struct DismissPattern {
 /// E.g., "Reject all" over "Accept all" for cookies.
 static DISMISS_PATTERNS: &[DismissPattern] = &[
     // Cookie consent — prefer reject
-    DismissPattern { label_lower: "reject all", dialog_type: DialogType::CookieConsent, priority: 10 },
-    DismissPattern { label_lower: "reject", dialog_type: DialogType::CookieConsent, priority: 10 },
-    DismissPattern { label_lower: "decline all", dialog_type: DialogType::CookieConsent, priority: 10 },
-    DismissPattern { label_lower: "decline", dialog_type: DialogType::CookieConsent, priority: 10 },
-    DismissPattern { label_lower: "deny all", dialog_type: DialogType::CookieConsent, priority: 9 },
-    DismissPattern { label_lower: "deny", dialog_type: DialogType::CookieConsent, priority: 9 },
-    DismissPattern { label_lower: "only essential", dialog_type: DialogType::CookieConsent, priority: 9 },
-    DismissPattern { label_lower: "accept all cookies", dialog_type: DialogType::CookieConsent, priority: 5 },
-    DismissPattern { label_lower: "accept cookies", dialog_type: DialogType::CookieConsent, priority: 5 },
-    DismissPattern { label_lower: "accept all", dialog_type: DialogType::CookieConsent, priority: 5 },
-    DismissPattern { label_lower: "i agree", dialog_type: DialogType::CookieConsent, priority: 4 },
-    DismissPattern { label_lower: "agree", dialog_type: DialogType::CookieConsent, priority: 4 },
+    DismissPattern {
+        label_lower: "reject all",
+        dialog_type: DialogType::CookieConsent,
+        priority: 10,
+    },
+    DismissPattern {
+        label_lower: "reject",
+        dialog_type: DialogType::CookieConsent,
+        priority: 10,
+    },
+    DismissPattern {
+        label_lower: "decline all",
+        dialog_type: DialogType::CookieConsent,
+        priority: 10,
+    },
+    DismissPattern {
+        label_lower: "decline",
+        dialog_type: DialogType::CookieConsent,
+        priority: 10,
+    },
+    DismissPattern {
+        label_lower: "deny all",
+        dialog_type: DialogType::CookieConsent,
+        priority: 9,
+    },
+    DismissPattern {
+        label_lower: "deny",
+        dialog_type: DialogType::CookieConsent,
+        priority: 9,
+    },
+    DismissPattern {
+        label_lower: "only essential",
+        dialog_type: DialogType::CookieConsent,
+        priority: 9,
+    },
+    DismissPattern {
+        label_lower: "accept all cookies",
+        dialog_type: DialogType::CookieConsent,
+        priority: 5,
+    },
+    DismissPattern {
+        label_lower: "accept cookies",
+        dialog_type: DialogType::CookieConsent,
+        priority: 5,
+    },
+    DismissPattern {
+        label_lower: "accept all",
+        dialog_type: DialogType::CookieConsent,
+        priority: 5,
+    },
+    DismissPattern {
+        label_lower: "i agree",
+        dialog_type: DialogType::CookieConsent,
+        priority: 4,
+    },
+    DismissPattern {
+        label_lower: "agree",
+        dialog_type: DialogType::CookieConsent,
+        priority: 4,
+    },
     // Notification prompts — prefer deny
-    DismissPattern { label_lower: "no thanks", dialog_type: DialogType::NotificationPrompt, priority: 8 },
-    DismissPattern { label_lower: "not now", dialog_type: DialogType::NotificationPrompt, priority: 8 },
-    DismissPattern { label_lower: "later", dialog_type: DialogType::NotificationPrompt, priority: 8 },
-    DismissPattern { label_lower: "maybe later", dialog_type: DialogType::NotificationPrompt, priority: 8 },
-    DismissPattern { label_lower: "skip", dialog_type: DialogType::NotificationPrompt, priority: 8 },
-    DismissPattern { label_lower: "deny", dialog_type: DialogType::NotificationPrompt, priority: 8 },
-    DismissPattern { label_lower: "block", dialog_type: DialogType::NotificationPrompt, priority: 7 },
+    DismissPattern {
+        label_lower: "no thanks",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 8,
+    },
+    DismissPattern {
+        label_lower: "not now",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 8,
+    },
+    DismissPattern {
+        label_lower: "later",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 8,
+    },
+    DismissPattern {
+        label_lower: "maybe later",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 8,
+    },
+    DismissPattern {
+        label_lower: "skip",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 8,
+    },
+    DismissPattern {
+        label_lower: "deny",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 8,
+    },
+    DismissPattern {
+        label_lower: "block",
+        dialog_type: DialogType::NotificationPrompt,
+        priority: 7,
+    },
     // Generic dismiss
-    DismissPattern { label_lower: "dismiss", dialog_type: DialogType::GenericDismiss, priority: 6 },
-    DismissPattern { label_lower: "close", dialog_type: DialogType::GenericDismiss, priority: 6 },
-    DismissPattern { label_lower: "got it", dialog_type: DialogType::GenericDismiss, priority: 6 },
-    DismissPattern { label_lower: "ok", dialog_type: DialogType::GenericDismiss, priority: 6 },
-    DismissPattern { label_lower: "okay", dialog_type: DialogType::GenericDismiss, priority: 6 },
-    DismissPattern { label_lower: "\u{00d7}", dialog_type: DialogType::GenericDismiss, priority: 3 }, // × close button
+    DismissPattern {
+        label_lower: "dismiss",
+        dialog_type: DialogType::GenericDismiss,
+        priority: 6,
+    },
+    DismissPattern {
+        label_lower: "close",
+        dialog_type: DialogType::GenericDismiss,
+        priority: 6,
+    },
+    DismissPattern {
+        label_lower: "got it",
+        dialog_type: DialogType::GenericDismiss,
+        priority: 6,
+    },
+    DismissPattern {
+        label_lower: "ok",
+        dialog_type: DialogType::GenericDismiss,
+        priority: 6,
+    },
+    DismissPattern {
+        label_lower: "okay",
+        dialog_type: DialogType::GenericDismiss,
+        priority: 6,
+    },
+    DismissPattern {
+        label_lower: "\u{00d7}",
+        dialog_type: DialogType::GenericDismiss,
+        priority: 3,
+    }, // × close button
 ];
 
 /// Scan the current context for dismissable blocking dialogs.
@@ -101,7 +201,12 @@ mod tests {
             description: None,
             element_type: "button".to_string(),
             value: None,
-            bounds: Some(Bounds { x: 0, y: 0, width: 100, height: 30 }),
+            bounds: Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            }),
             state: ElementState {
                 focused: false,
                 enabled: true,
@@ -178,10 +283,7 @@ mod tests {
 
     #[test]
     fn test_no_dialog_on_normal_page() {
-        let ctx = make_context(vec![
-            make_button("1", "Submit"),
-            make_button("2", "Cancel"),
-        ]);
+        let ctx = make_context(vec![make_button("1", "Submit"), make_button("2", "Cancel")]);
         assert!(find_dismissable_dialog(&ctx).is_none());
     }
 

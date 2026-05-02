@@ -163,8 +163,7 @@ fn build_jxa_write_script(
         .iter()
         .map(|w| serde_json::json!({ "ref": w.cell_ref, "value": w.value }))
         .collect();
-    let writes_json_literal =
-        serde_json::to_string(&writes_json).unwrap_or_else(|_| "[]".into());
+    let writes_json_literal = serde_json::to_string(&writes_json).unwrap_or_else(|_| "[]".into());
 
     format!(
         r#"
@@ -198,16 +197,11 @@ fn build_jxa_write_script(
 }
 
 /// Build the read JXA script.
-fn build_jxa_read_script(
-    sheet: Option<&str>,
-    table: Option<&str>,
-    cell_refs: &[String],
-) -> String {
+fn build_jxa_read_script(sheet: Option<&str>, table: Option<&str>, cell_refs: &[String]) -> String {
     let sheet_js = sheet_selector(sheet);
     let table_js = table_selector(table);
     let numbers_app_resolver = numbers_app_resolver_jxa();
-    let refs_json_literal =
-        serde_json::to_string(cell_refs).unwrap_or_else(|_| "[]".into());
+    let refs_json_literal = serde_json::to_string(cell_refs).unwrap_or_else(|_| "[]".into());
 
     format!(
         r#"
@@ -236,8 +230,7 @@ fn build_jxa_read_script(
 }
 
 fn numbers_app_resolver_jxa() -> String {
-    let candidates = serde_json::to_string(NUMBERS_APP_CANDIDATES)
-        .unwrap_or_else(|_| "[]".into());
+    let candidates = serde_json::to_string(NUMBERS_APP_CANDIDATES).unwrap_or_else(|_| "[]".into());
     format!(
         r#"
         function resolveNumbersApp() {{

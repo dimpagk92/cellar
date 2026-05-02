@@ -2,9 +2,6 @@
 //!
 //! Usage: cargo run -p cel-accessibility --example dump_deep
 
-
-#![cfg(target_os = "macos")]
-
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
@@ -23,10 +20,7 @@ extern "C" {
         attr: CFStringRef,
         value: *mut CFTypeRef,
     ) -> AXError;
-    fn AXUIElementCopyAttributeNames(
-        el: AXUIElementRef,
-        names: *mut CFTypeRef,
-    ) -> AXError;
+    fn AXUIElementCopyAttributeNames(el: AXUIElementRef, names: *mut CFTypeRef) -> AXError;
     fn CFRelease(cf: *const c_void);
 }
 
@@ -84,7 +78,13 @@ fn main() {
     unsafe { CFRelease(app as *const c_void) };
 }
 
-fn dump_children(el: AXUIElementRef, depth: usize, count: &mut usize, max_depth: usize, max_count: usize) {
+fn dump_children(
+    el: AXUIElementRef,
+    depth: usize,
+    count: &mut usize,
+    max_depth: usize,
+    max_count: usize,
+) {
     if depth >= max_depth || *count >= max_count {
         return;
     }
@@ -139,7 +139,13 @@ fn dump_children(el: AXUIElementRef, depth: usize, count: &mut usize, max_depth:
                     break;
                 }
                 if let Some(child) = arr.get(i) {
-                    dump_children(child.as_CFTypeRef() as AXUIElementRef, depth + 1, count, max_depth, max_count);
+                    dump_children(
+                        child.as_CFTypeRef() as AXUIElementRef,
+                        depth + 1,
+                        count,
+                        max_depth,
+                        max_count,
+                    );
                 }
             }
         }
@@ -154,9 +160,8 @@ fn dump_attributes(el: AXUIElementRef, _depth: usize) {
         return;
     }
 
-    let arr: CFArray<CFType> = unsafe {
-        CFArray::wrap_under_create_rule(names_ref as core_foundation::array::CFArrayRef)
-    };
+    let arr: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_create_rule(names_ref as core_foundation::array::CFArrayRef) };
 
     for i in 0..arr.len() {
         if let Some(item) = arr.get(i) {
@@ -180,7 +185,8 @@ fn dump_attributes(el: AXUIElementRef, _depth: usize) {
 fn get_attr(el: AXUIElementRef, attr: &str) -> Option<CFType> {
     let attr_cf = CFString::new(attr);
     let mut value: CFTypeRef = ptr::null();
-    let err = unsafe { AXUIElementCopyAttributeValue(el, attr_cf.as_concrete_TypeRef(), &mut value) };
+    let err =
+        unsafe { AXUIElementCopyAttributeValue(el, attr_cf.as_concrete_TypeRef(), &mut value) };
     if err != 0 || value.is_null() {
         return None;
     }
@@ -195,7 +201,11 @@ fn get_string(el: AXUIElementRef, attr: &str) -> Option<String> {
     {
         let s: CFString = unsafe { CFString::wrap_under_get_rule(cf_ref as CFStringRef) };
         let r = s.to_string();
-        if r.is_empty() { None } else { Some(r) }
+        if r.is_empty() {
+            None
+        } else {
+            Some(r)
+        }
     } else {
         None
     }

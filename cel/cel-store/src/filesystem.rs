@@ -104,11 +104,7 @@ impl FsStore {
     }
 
     /// Load a screenshot for a specific run step.
-    pub fn load_screenshot(
-        &self,
-        run_id: i64,
-        step_index: u32,
-    ) -> Result<Vec<u8>, StoreError> {
+    pub fn load_screenshot(&self, run_id: i64, step_index: u32) -> Result<Vec<u8>, StoreError> {
         let path = self
             .base_dir
             .join("captures")
@@ -294,7 +290,10 @@ mod tests {
 
         let entries = store.read_transcript(1).unwrap();
         assert_eq!(entries.len(), 2);
-        assert!(matches!(entries[0].entry_type, TranscriptEntryType::RunStart));
+        assert!(matches!(
+            entries[0].entry_type,
+            TranscriptEntryType::RunStart
+        ));
         assert_eq!(entries[1].step_index, Some(0));
     }
 

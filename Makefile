@@ -1,4 +1,4 @@
-.PHONY: build build-rust build-ts build-cortex build-napi build-mcp-sidecar test test-all test-rust test-ts test-cortex test-cortex-napi test-cortex-mcp test-e2e test-real-extraction lint lint-rust lint-ts clean dev-tauri build-tauri
+.PHONY: build build-rust build-ts build-cortex build-napi build-mcp-sidecar test test-all test-rust test-ts test-cortex test-cortex-napi test-cortex-mcp test-e2e test-real-extraction lint lint-rust lint-rust-fmt lint-rust-clippy lint-ts fmt fmt-rust clean dev-tauri build-tauri
 
 build: build-rust build-ts
 
@@ -6,7 +6,11 @@ build-rust:
 	cargo build --workspace
 
 build-ts:
+ifdef CI
+	pnpm install --frozen-lockfile
+else
 	pnpm install
+endif
 	pnpm build
 
 test: test-rust test-ts
@@ -29,12 +33,22 @@ test-e2e-ui:
 
 lint: lint-rust lint-ts
 
-lint-rust:
-	cargo clippy --workspace -- -D warnings
+lint-rust: lint-rust-fmt lint-rust-clippy
+
+lint-rust-fmt:
 	cargo fmt --all -- --check
+
+lint-rust-clippy:
+	cargo clippy --workspace -- -D warnings
 
 lint-ts:
 	pnpm lint
+
+# Auto-fix formatting (companion to lint-rust-fmt)
+fmt: fmt-rust
+
+fmt-rust:
+	cargo fmt --all
 
 build-cortex:
 	cargo build -p cel-cortex

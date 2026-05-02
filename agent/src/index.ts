@@ -181,10 +181,6 @@ export {
   hasActiveSpinner,
 } from "./skeleton-detector.js";
 export {
-  findDismissableDialog,
-  type DismissableDialog,
-} from "./dialog-dismisser.js";
-export {
   compressContext,
   type CompressionOptions,
 } from "./context-compressor.js";

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Cel } from "@cellar/agent";
 import { normalizeCortexAnomalies, normalizeCortexModel } from "@cellar/agent";
-import { textResult, errorResult, sleep } from "./shared.js";
+import { textResult, errorResult, sleep, axPermissionGuard } from "./shared.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
 
@@ -162,6 +162,8 @@ function checkConstraintSatisfaction(
 // ─── Handler ────────────────────────────────────────────────────────────────
 
 export async function handleCelPerceive(cel: Cel, args: Input) {
+  const denied = axPermissionGuard(cel);
+  if (denied) return denied;
   try {
     switch (args.mode) {
       case "start": {

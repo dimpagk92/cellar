@@ -86,6 +86,9 @@ struct AnthropicResponseContent {
     text: Option<String>,
 }
 
+type MockFn =
+    std::sync::Arc<dyn Fn(Vec<ChatMessage>, u32) -> Result<String, LlmError> + Send + Sync>;
+
 /// Reusable LLM client that speaks both the OpenAI-compatible chat completions
 /// protocol and the Anthropic Messages API.
 pub struct LlmClient {
@@ -95,9 +98,7 @@ pub struct LlmClient {
     model: String,
     /// When set, `chat()` calls this function instead of making an HTTP request.
     /// Used by tests to inject deterministic responses without a real LLM endpoint.
-    mock_fn: Option<
-        std::sync::Arc<dyn Fn(Vec<ChatMessage>, u32) -> Result<String, LlmError> + Send + Sync>,
-    >,
+    mock_fn: Option<MockFn>,
 }
 
 impl LlmClient {

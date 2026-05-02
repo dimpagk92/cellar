@@ -947,7 +947,7 @@ fn test_deep_tree_does_not_stack_overflow() {
     // Should have processed the deep tree without stack overflow.
     // Noise filter may remove unlabeled leaf groups, but the leaf button must survive.
     assert!(
-        ctx.elements.len() >= 1,
+        !ctx.elements.is_empty(),
         "Deep tree should produce at least the leaf element"
     );
 

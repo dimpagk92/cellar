@@ -97,21 +97,16 @@ impl From<&str> for ProviderKind {
 }
 
 /// Model capability tier — determines prompt complexity and context budget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelTier {
     /// Small/fast models (gemini-flash, gpt-4o-mini, haiku). Short prompts, aggressive filtering.
     Flash,
     /// Standard models (gpt-4o, claude-sonnet, gemini-pro). Default behavior.
+    #[default]
     Standard,
     /// Premium models (claude-opus, o3, gpt-5). Extended prompts, more context.
     Premium,
-}
-
-impl Default for ModelTier {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 /// Profile describing a model's capabilities.

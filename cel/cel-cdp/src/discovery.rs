@@ -350,7 +350,7 @@ fn extract_app_name(line: &str) -> String {
     if fields.len() > 10 {
         fields[10]
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("unknown")
             .to_string()
     } else {

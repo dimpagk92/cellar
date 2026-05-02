@@ -179,7 +179,7 @@ pub fn uninstall_cdp_launch_agent() -> Result<bool, String> {
 
 /// Check if the LaunchAgent is installed.
 pub fn is_cdp_setup_installed() -> bool {
-    launch_agent_path().map_or(false, |p| p.exists())
+    launch_agent_path().is_some_and(|p| p.exists())
 }
 
 #[cfg(test)]

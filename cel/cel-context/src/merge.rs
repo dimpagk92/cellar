@@ -430,18 +430,14 @@ impl ContextMerger {
         let context = self.get_context();
 
         // Try exact ID match first
-        let target = context
-            .elements
-            .iter()
-            .find(|e| e.id == element_id)
-            .or_else(|| {
-                // Fallback: parse the element_id to extract type+label hints.
-                // If the caller provides "button:Submit", match by type and label.
-                // Otherwise, try to find by reference resolution.
-                // For now, just try to find by the element's old type+label combo
-                // using the resolve_reference system.
-                None
-            })?;
+        let target = context.elements.iter().find(|e| e.id == element_id).or({
+            // Fallback: parse the element_id to extract type+label hints.
+            // If the caller provides "button:Submit", match by type and label.
+            // Otherwise, try to find by reference resolution.
+            // For now, just try to find by the element's old type+label combo
+            // using the resolve_reference system.
+            None
+        })?;
 
         // Build ancestor path by following parent_id chain
         let mut ancestor_path = Vec::new();
@@ -557,6 +553,7 @@ impl ContextMerger {
     /// Strategy:
     /// 1. Try the accessibility tree's focused element (most reliable).
     /// 2. Fall back to the display layer's window list (first non-minimized).
+    ///
     /// Detect foreground app/window from the accessibility tree.
     /// Returns (app_name, window_title) if available.
     fn detect_foreground_from_a11y(&self) -> Option<(String, String)> {
@@ -658,6 +655,7 @@ impl ContextMerger {
     /// When a vision element overlaps an existing element (IoU > 0.5):
     /// - Upgrades bounds if vision bounds are more precise (smaller area)
     /// - Boosts confidence by 0.05 for cross-source confirmation
+    ///
     /// When no overlap exists, adds the vision element as a new discovery.
     pub fn merge_vision_elements(&self, base: &mut ScreenContext, vision: Vec<ContextElement>) {
         for elem in vision {
@@ -697,6 +695,7 @@ impl ContextMerger {
     /// - +0.10 if has valid bounds (non-zero area)
     /// - +0.05 if state indicates visible and enabled
     /// - +0.05 if element is an actionable type (button, input, etc.)
+    ///
     /// Maximum: ~0.90 for a fully-qualified element
     fn flatten_a11y_tree(&self, node: &AccessibilityElement, out: &mut Vec<ContextElement>) {
         let element_type = role_to_string(&node.role);
@@ -710,8 +709,8 @@ impl ContextMerger {
 
         // Filter out noise: skip elements that are invisible AND have no useful data.
         // Keep the element if it has children (they might be useful), or if it has a label/value.
-        let has_label = node.label.as_ref().map_or(false, |l| !l.is_empty());
-        let has_value = node.value.as_ref().map_or(false, |v| !v.is_empty());
+        let has_label = node.label.as_ref().is_some_and(|l| !l.is_empty());
+        let has_value = node.value.as_ref().is_some_and(|v| !v.is_empty());
         if !node.state.visible && !has_label && !has_value && node.children.is_empty() {
             return; // Skip invisible leaf elements with no data
         }
@@ -745,7 +744,7 @@ impl ContextMerger {
             actions: node.actions.clone(),
             confidence: 0.0, // Will be scored below
             source: ContextSource::AccessibilityTree,
-            content_role: crate::classify_content_role(&element_type, &node.actions, &node.state),
+            content_role: crate::classify_content_role(element_type, &node.actions, &node.state),
             properties: node.properties.clone(),
         };
         elem.confidence = score_element_confidence(&elem);
@@ -801,8 +800,8 @@ fn role_to_string(role: &ElementRole) -> &str {
 pub fn score_element_confidence(element: &ContextElement) -> f64 {
     let mut confidence: f64 = 0.60;
 
-    let has_label = element.label.as_ref().map_or(false, |l| !l.is_empty());
-    let has_value = element.value.as_ref().map_or(false, |v| !v.is_empty());
+    let has_label = element.label.as_ref().is_some_and(|l| !l.is_empty());
+    let has_value = element.value.as_ref().is_some_and(|v| !v.is_empty());
     if has_label || has_value {
         confidence += 0.10;
     }
@@ -909,8 +908,8 @@ pub fn build_from_external(
         .into_iter()
         .filter(|e| {
             // Filter invisible leaf elements with no data
-            let has_label = e.label.as_ref().map_or(false, |l| !l.is_empty());
-            let has_value = e.value.as_ref().map_or(false, |v| !v.is_empty());
+            let has_label = e.label.as_ref().is_some_and(|l| !l.is_empty());
+            let has_value = e.value.as_ref().is_some_and(|v| !v.is_empty());
             if !e.state.visible && !has_label && !has_value {
                 return false;
             }
@@ -1105,7 +1104,7 @@ fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextEleme
     }
     let mut filtered: Vec<ContextElement> = Vec::with_capacity(elements.len());
     let mut filtered_norm: Vec<String> = Vec::with_capacity(elements.len());
-    for (i, (el, n)) in elements.into_iter().zip(normalized.into_iter()).enumerate() {
+    for (i, (el, n)) in elements.into_iter().zip(normalized).enumerate() {
         if keep[i] {
             filtered_norm.push(n);
             filtered.push(el);
@@ -1224,7 +1223,7 @@ fn has_structural_identity_cached(
                     || elements[i]
                         .value
                         .as_ref()
-                        .map_or(false, |v| !normalized_text(Some(v)).is_empty())
+                        .is_some_and(|v| !normalized_text(Some(v)).is_empty())
             })
             .count();
         if sibling_labels >= 2 {

@@ -212,6 +212,7 @@ impl Planner {
     /// `&CortexSignals::default()` from callers that don't track them.
     /// `recent_memory` — pre-rendered "## Recent runs" block from the
     /// runner's cross-goal memory (Phase 3B). Pass `""` to skip.
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan_step(
         &self,
         system: &str,
@@ -261,6 +262,7 @@ impl Planner {
     /// No retry logic (vision is already expensive — a parse failure
     /// falls back to the non-vision path on the next step via normal
     /// runner gating).
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan_step_with_vision(
         &self,
         system: &str,

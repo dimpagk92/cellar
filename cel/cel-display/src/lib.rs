@@ -22,7 +22,7 @@ pub use xcap_capture::XcapCapture;
 pub fn create_capture() -> Box<dyn ScreenCapture> {
     #[cfg(feature = "xcap")]
     {
-        return Box::new(XcapCapture::new());
+        Box::new(XcapCapture::new())
     }
     #[cfg(not(feature = "xcap"))]
     {

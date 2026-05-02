@@ -348,9 +348,9 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                     // (exactly what happened in the crypto scenario
                     // when the agent concluded "arrow keys are
                     // banned" and couldn't move to cell D3).
-                    let mut steps_iter = steps.into_iter();
+                    let steps_iter = steps.into_iter();
                     let mut remaining: Vec<Step> = Vec::new();
-                    while let Some(s) = steps_iter.next() {
+                    for s in steps_iter {
                         if !should_ban_on_repeat(&s.action) {
                             remaining.push(s);
                             continue;

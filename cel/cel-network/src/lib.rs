@@ -161,6 +161,13 @@ pub struct ProcNetMonitor {
 }
 
 #[cfg(target_os = "linux")]
+impl Default for ProcNetMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl ProcNetMonitor {
     pub fn new() -> Self {
         Self {
@@ -353,11 +360,11 @@ fn tcp_state_name(hex: &str) -> &str {
 pub fn create_monitor() -> Box<dyn NetworkMonitor> {
     #[cfg(target_os = "linux")]
     {
-        return Box::new(ProcNetMonitor::new());
+        Box::new(ProcNetMonitor::new())
     }
     #[cfg(target_os = "macos")]
     {
-        return Box::new(macos::LsofNetMonitor::new());
+        Box::new(macos::LsofNetMonitor::new())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

@@ -26,10 +26,8 @@ pub fn resolve_reference<'a>(
 
     for el in &context.elements {
         let score = score_element(el, reference, context);
-        if score >= MATCH_THRESHOLD {
-            if best.is_none() || score > best.unwrap().1 {
-                best = Some((el, score));
-            }
+        if score >= MATCH_THRESHOLD && (best.is_none() || score > best.unwrap().1) {
+            best = Some((el, score));
         }
     }
 

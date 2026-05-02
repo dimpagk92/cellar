@@ -438,7 +438,7 @@ pub fn build_user_prompt(
     let mut out = String::with_capacity(4096);
     out.push_str("## Goal\n");
     out.push_str(goal.trim());
-    out.push_str("\n");
+    out.push('\n');
 
     // Runtime capabilities block — tells the LLM what tools are
     // actually wired up. This prevents the very common failure mode
@@ -593,7 +593,7 @@ pub fn build_user_prompt(
         }
     }
 
-    if shared_memory.as_object().map_or(false, |o| !o.is_empty()) {
+    if shared_memory.as_object().is_some_and(|o| !o.is_empty()) {
         out.push_str("\n## Shared memory (data you've extracted)\n");
         out.push_str(&format!(
             "  {}\n",
@@ -733,7 +733,7 @@ fn parse_next_move_lenient(raw: &str) -> Result<NextMove, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canonical::{Step, StepKind};
+    use crate::canonical::StepKind;
     use crate::types::PlannedAction;
 
     #[test]

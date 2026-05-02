@@ -250,6 +250,7 @@ impl CelStore {
     }
 
     /// Log a step result during a workflow run.
+    #[allow(clippy::too_many_arguments)]
     pub fn log_step(
         &self,
         run_id: i64,

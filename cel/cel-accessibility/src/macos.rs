@@ -653,7 +653,7 @@ impl MacAccessibility {
             return None;
         }
         // Timeout check — only check every 10 elements to reduce clock overhead
-        if current_count % 10 == 0 && std::time::Instant::now() > *deadline {
+        if current_count.is_multiple_of(10) && std::time::Instant::now() > *deadline {
             tracing::debug!(
                 "AX tree traversal hit timeout at depth {}, count {}",
                 depth,
@@ -689,9 +689,9 @@ impl MacAccessibility {
             .or_else(|| get_ax_string(element, "AXDescription"));
 
         // Filter out empty text elements and spacers early
-        if role_str == "AXStaticText" && label.as_deref().map_or(true, |l| l.trim().is_empty()) {
+        if role_str == "AXStaticText" && label.as_deref().is_none_or(|l| l.trim().is_empty()) {
             let value_check = get_ax_string(element, "AXValue");
-            if value_check.as_deref().map_or(true, |v| v.trim().is_empty()) {
+            if value_check.as_deref().is_none_or(|v| v.trim().is_empty()) {
                 return None;
             }
         }
@@ -1960,14 +1960,13 @@ fn find_in_tree(
     label: Option<&str>,
     results: &mut Vec<AccessibilityElement>,
 ) {
-    let role_match = role.map_or(true, |r| {
-        std::mem::discriminant(&element.role) == std::mem::discriminant(r)
-    });
-    let label_match = label.map_or(true, |l| {
+    let role_match =
+        role.is_none_or(|r| std::mem::discriminant(&element.role) == std::mem::discriminant(r));
+    let label_match = label.is_none_or(|l| {
         element
             .label
             .as_deref()
-            .map_or(false, |el| el.to_lowercase().contains(&l.to_lowercase()))
+            .is_some_and(|el| el.to_lowercase().contains(&l.to_lowercase()))
     });
 
     if role_match && label_match {

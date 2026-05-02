@@ -251,7 +251,7 @@ impl InputController for EnigoInput {
         }
 
         let (start_x, start_y) = self.mouse_position()?;
-        let steps = (duration_ms / 10).max(5).min(100) as i32; // 10ms per step, 5-100 steps
+        let steps = (duration_ms / 10).clamp(5, 100) as i32; // 10ms per step, 5-100 steps
         let sleep_per_step = Duration::from_millis((duration_ms as u64) / (steps as u64));
 
         for i in 1..=steps {

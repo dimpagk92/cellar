@@ -202,8 +202,8 @@ pub fn diff_regions(a: &Frame, b: &Frame, cell_size: u32) -> Vec<(u32, u32, u32,
     if a.width != b.width || a.height != b.height || cell_size == 0 {
         return vec![(0, 0, a.width, a.height)]; // Entirely different
     }
-    let cols = (a.width + cell_size - 1) / cell_size;
-    let rows = (a.height + cell_size - 1) / cell_size;
+    let cols = a.width.div_ceil(cell_size);
+    let rows = a.height.div_ceil(cell_size);
     let mut changed_cells = Vec::new();
 
     for row in 0..rows {

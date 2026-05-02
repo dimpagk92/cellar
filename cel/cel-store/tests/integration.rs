@@ -69,7 +69,7 @@ fn test_knowledge_search_is_case_insensitive_substring() {
     // Should match both regardless of case
     let results = store.query_knowledge("ctrl").unwrap();
     assert!(
-        results.len() >= 1,
+        !results.is_empty(),
         "Case-insensitive search should find 'ctrl' in 'Ctrl+C'"
     );
 
@@ -185,7 +185,7 @@ fn test_many_knowledge_entries() {
     );
 
     let results = store.query_knowledge("Knowledge item 42").unwrap();
-    assert!(results.len() >= 1, "Should find specific item");
+    assert!(!results.is_empty(), "Should find specific item");
     assert!(results[0].content.contains("42"));
 }
 

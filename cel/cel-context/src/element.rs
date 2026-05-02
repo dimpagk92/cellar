@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 
 /// Re-export Bounds and ElementState from the accessibility crate — single source of truth.

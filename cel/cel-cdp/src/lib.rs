@@ -102,7 +102,7 @@ pub fn activate_preferred_browser_target() -> bool {
     std::process::Command::new("osascript")
         .args(["-e", &script])
         .status()
-        .map_or(false, |status| status.success())
+        .is_ok_and(|status| status.success())
 }
 
 fn preferred_cel_cdp_port_from(value: Option<&str>) -> u16 {

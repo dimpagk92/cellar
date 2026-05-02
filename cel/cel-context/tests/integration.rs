@@ -117,7 +117,7 @@ fn test_screen_context_serialization() {
 #[test]
 fn test_context_source_variants() {
     // Verify all source variants exist and are distinct
-    let sources = vec![
+    let sources = [
         ContextSource::AccessibilityTree,
         ContextSource::NativeApi,
         ContextSource::Vision,

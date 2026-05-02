@@ -256,9 +256,9 @@ where
     match value {
         serde_json::Value::Array(arr) => Ok(arr
             .into_iter()
-            .filter_map(|v| match v {
-                serde_json::Value::String(s) => Some(s),
-                other => Some(other.to_string()),
+            .map(|v| match v {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
             })
             .collect()),
         serde_json::Value::String(s) => Ok(s
@@ -737,6 +737,7 @@ mod target_ids_tests {
 
 /// Events emitted during the planning loop for observability.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum PlannerEvent {
     /// A step was planned.
     StepPlanned { step_index: u32, step: PlannedStep },

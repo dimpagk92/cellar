@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 /// Which execution backend a goal run should target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RuntimeBackend {
     /// Run in the current process (today's default).
+    #[default]
     Local,
     /// Send goals to a remote `cellar-worker` over HTTP.
     Remote {
@@ -25,12 +27,6 @@ pub enum RuntimeBackend {
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<String>,
     },
-}
-
-impl Default for RuntimeBackend {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl RuntimeBackend {

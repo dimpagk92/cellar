@@ -417,7 +417,7 @@ pub fn build_composable_system_prompt_with_adapters(
     prompt.push_str(CORE_SECTION);
 
     // === [DESKTOP] Section — included on macOS ===
-    let is_macos = device_baseline.map_or(false, |b| {
+    let is_macos = device_baseline.is_some_and(|b| {
         let lower = b.to_lowercase();
         lower.contains("macos") || lower.contains("darwin") || lower.contains("mac os")
     });
@@ -439,12 +439,11 @@ pub fn build_composable_system_prompt_with_adapters(
     // cdp_eval for navigation and dropdown selection.
 
     // Conditional actions based on page state
-    let show_click = page_state.map_or(true, |ps| {
-        ps.has_links || ps.has_buttons || ps.element_count > 0
-    });
-    let show_type = page_state.map_or(true, |ps| ps.has_inputs || ps.element_count > 0);
+    let show_click =
+        page_state.is_none_or(|ps| ps.has_links || ps.has_buttons || ps.element_count > 0);
+    let show_type = page_state.is_none_or(|ps| ps.has_inputs || ps.element_count > 0);
     let show_extract =
-        page_state.map_or(true, |ps| ps.is_data_page) || task_type == TaskType::Extraction;
+        page_state.is_none_or(|ps| ps.is_data_page) || task_type == TaskType::Extraction;
 
     if show_click {
         prompt.push_str("- {\"type\": \"click\", \"target_id\": \"3\"} — Click element [3]\n");
@@ -1049,10 +1048,8 @@ pub fn build_user_prompt(
                                 // Show input subtype so LLM knows to click radio/checkbox vs type in text
                                 attrs.push_str(&format!(" type=\"{}\"", val));
                             }
-                            "settable" => {
-                                if val == "true" {
-                                    attrs.push_str(" settable");
-                                }
+                            "settable" if val == "true" => {
+                                attrs.push_str(" settable");
                             }
                             "placeholder" => {
                                 attrs.push_str(&format!(" placeholder=\"{}\"", truncate(val, 30)))
@@ -1063,10 +1060,8 @@ pub fn build_user_prompt(
                             "url" => attrs.push_str(&format!(" href=\"{}\"", truncate(val, 50))),
                             "required" => attrs.push_str(" required"),
                             "invalid" => attrs.push_str(" invalid"),
-                            "char_count" => {
-                                if val != "0" {
-                                    attrs.push_str(&format!(" chars={}", val))
-                                }
+                            "char_count" if val != "0" => {
+                                attrs.push_str(&format!(" chars={}", val))
                             }
                             "has_popup" => attrs.push_str(" has-popup"),
                             "role_desc" => {
@@ -1372,13 +1367,17 @@ pub fn resolve_action_indices(action: &mut PlannedAction, index_map: &[String]) 
                 *target_id = real_id;
             }
         }
-        PlannedAction::Type { target_id, .. } => {
-            if let Some(tid) = target_id {
-                if let Some(real_id) = resolve_index(index_map, tid) {
-                    *tid = real_id;
-                }
+        PlannedAction::Type {
+            target_id: Some(tid),
+            ..
+        } => {
+            if let Some(real_id) = resolve_index(index_map, tid) {
+                *tid = real_id;
             }
         }
+        PlannedAction::Type {
+            target_id: None, ..
+        } => {}
         PlannedAction::Drag {
             from_target_id,
             to_target_id,

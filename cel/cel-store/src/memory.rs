@@ -399,13 +399,11 @@ impl crate::CelStore {
 
     /// Run all eviction policies. Returns total rows deleted.
     pub fn run_eviction(&self, config: &EvictionConfig) -> Result<EvictionResult, StoreError> {
-        let mut result = EvictionResult::default();
-
-        result.superseded_observations = self.evict_superseded_observations()?;
-        result.old_runs = self.evict_old_runs(config.run_retention_days)?;
-        result.old_knowledge = self.evict_old_knowledge(config.knowledge_retention_days)?;
-
-        Ok(result)
+        Ok(EvictionResult {
+            superseded_observations: self.evict_superseded_observations()?,
+            old_runs: self.evict_old_runs(config.run_retention_days)?,
+            old_knowledge: self.evict_old_knowledge(config.knowledge_retention_days)?,
+        })
     }
 
     /// Search knowledge using FTS5 full-text search.
@@ -610,7 +608,7 @@ mod tests {
         let results = store
             .search_knowledge("SAP OR stale", Some("daily-po"), 10)
             .unwrap();
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
     }
 
     #[test]

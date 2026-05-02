@@ -20,6 +20,12 @@ pub struct ContextWatchdog {
     initialized: bool,
 }
 
+impl Default for ContextWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContextWatchdog {
     pub fn new() -> Self {
         Self {

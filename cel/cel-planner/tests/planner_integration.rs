@@ -3,6 +3,7 @@
 //! These tests verify the full parse→plan→step pipeline without network calls.
 //! The mock LLM returns canned JSON responses, exercising the real prompt
 //! builder, JSON parser, and step validator.
+#![allow(deprecated)]
 
 use async_trait::async_trait;
 use cel_context::ScreenContext;

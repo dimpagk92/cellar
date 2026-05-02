@@ -97,6 +97,13 @@ impl LinuxAccessibility {
                 ))
             })?;
 
+        // tokio::net::UnixStream::from_std panics if called outside a Tokio
+        // runtime (e.g. plain `cargo test` without #[tokio::test]). Treat that
+        // as Unavailable so the caller falls back to StubAccessibility.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(AccessibilityError::Unavailable);
+        }
+
         let std_stream = UnixStream::connect(socket_path).map_err(|e| {
             AccessibilityError::QueryFailed(format!("Connect AT-SPI2 socket: {}", e))
         })?;
@@ -389,6 +396,7 @@ impl LinuxAccessibility {
     }
 
     /// Recursively build an AccessibilityElement tree from a D-Bus accessible.
+    #[allow(clippy::too_many_arguments)]
     fn build_element(
         &self,
         dest: &str,
@@ -732,12 +740,10 @@ fn collect_matching(
     label: Option<&str>,
     out: &mut Vec<AccessibilityElement>,
 ) {
-    let role_matches = role.map_or(true, |r| {
-        std::mem::discriminant(&node.role) == std::mem::discriminant(r)
-    });
-    let label_matches = label.map_or(true, |l| {
-        node.label.as_deref().map_or(false, |nl| nl.contains(l))
-    });
+    let role_matches =
+        role.is_none_or(|r| std::mem::discriminant(&node.role) == std::mem::discriminant(r));
+    let label_matches =
+        label.is_none_or(|l| node.label.as_deref().is_some_and(|nl| nl.contains(l)));
 
     if role_matches && label_matches {
         out.push(node.clone());

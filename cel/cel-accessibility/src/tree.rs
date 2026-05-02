@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -66,8 +65,10 @@ impl NormalizedBounds {
 /// [`crate::budget::AppWalkBudget`] for adaptive throttling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TruncationReason {
     /// Walk completed naturally — visited all reachable nodes.
+    #[default]
     None,
     /// Hit the wall-clock timeout.
     Timeout,
@@ -75,12 +76,6 @@ pub enum TruncationReason {
     MaxNodes,
     /// Hit the maximum recursion depth.
     MaxDepth,
-}
-
-impl Default for TruncationReason {
-    fn default() -> Self {
-        TruncationReason::None
-    }
 }
 
 /// Why a window was skipped during a tree walk.

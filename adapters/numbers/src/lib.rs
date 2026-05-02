@@ -19,6 +19,9 @@
 //! packaging convention as `adapters/browser`, per the adapter-sdk
 //! pivot in April 2026 (see `docs/adapter-roadmap.md` P0).
 
+// AppleScript-only — entire adapter compiles to a no-op on non-macOS.
+#![cfg(target_os = "macos")]
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;

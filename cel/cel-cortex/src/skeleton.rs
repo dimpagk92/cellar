@@ -26,8 +26,18 @@ const EXTENDED_SKELETON_WAIT_MS: u64 = 4000;
 fn is_interactive_type(t: &str) -> bool {
     matches!(
         t,
-        "button" | "link" | "input" | "textarea" | "select" | "checkbox"
-        | "radio" | "switch" | "slider" | "menu_item" | "tab" | "combobox"
+        "button"
+            | "link"
+            | "input"
+            | "textarea"
+            | "select"
+            | "checkbox"
+            | "radio"
+            | "switch"
+            | "slider"
+            | "menu_item"
+            | "tab"
+            | "combobox"
     )
 }
 
@@ -66,7 +76,9 @@ pub fn is_skeleton_screen(context: &ScreenContext) -> bool {
 
     // Check for explicit loading indicators (aria-busy)
     let has_aria_busy = elements.iter().any(|el| {
-        el.properties.get("aria-busy").map_or(false, |v| v == "true")
+        el.properties
+            .get("aria-busy")
+            .map_or(false, |v| v == "true")
             || el.properties.get("busy").map_or(false, |v| v == "true")
     });
     if has_aria_busy {
@@ -122,7 +134,9 @@ pub fn skeleton_wait_ms(context: &ScreenContext) -> u64 {
     }
 
     let has_aria_busy = elements.iter().any(|el| {
-        el.properties.get("aria-busy").map_or(false, |v| v == "true")
+        el.properties
+            .get("aria-busy")
+            .map_or(false, |v| v == "true")
             || el.properties.get("busy").map_or(false, |v| v == "true")
     });
     if has_aria_busy {
@@ -193,7 +207,12 @@ mod tests {
             description: None,
             element_type: el_type.to_string(),
             value: None,
-            bounds: Some(Bounds { x: 0, y: 0, width: 100, height: 30 }),
+            bounds: Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            }),
             state: ElementState {
                 focused: false,
                 enabled: true,

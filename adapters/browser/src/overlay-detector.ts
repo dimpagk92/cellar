@@ -262,27 +262,41 @@ const DETECTION_SCRIPT = `(() => {
   }
 
   // 1b. ARIA modal dialogs.
-  document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]').forEach(el => {
-    if (isVisible(el)) candidates.add(el);
-  });
+  const ariaModals = document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"]');
+  ariaModals.forEach(el => { if (isVisible(el)) candidates.add(el); });
+
+  // ─── FAST PATH ──────────────────────────────────────────────────────
+  // If no CMP fingerprint matched and no ARIA modal exists, scan the DOM for
+  // *cheap* overlay markers (id/class containing cookie/consent/modal/overlay)
+  // before doing the expensive computed-style sweep. Most pages without
+  // overlays exit here in <5ms instead of forcing layout on 4k elements.
+  const cheapOverlayHints = document.querySelectorAll(
+    '[id*="cookie" i], [id*="consent" i], [id*="gdpr" i], [class*="cookie" i], [class*="consent" i], [class*="gdpr" i], [id*="modal" i], [class*="modal" i], [class*="overlay" i], [class*="banner" i], [data-testid*="cookie" i], [data-testid*="consent" i]'
+  );
+  const hasCheapHints = cheapOverlayHints.length > 0;
+  const skipExpensiveScan = !cmpHit && ariaModals.length === 0 && !hasCheapHints;
+  if (skipExpensiveScan && candidates.size === 0) return null;
 
   // 1c. Fixed/sticky elements with high z-index covering significant area.
-  // Limit scan to avoid quadratic scans on huge pages.
-  const allEls = document.querySelectorAll("body *");
-  const cap = Math.min(allEls.length, 4000);
-  for (let i = 0; i < cap; i++) {
-    const el = allEls[i];
-    const cs = getComputedStyle(el);
-    if (cs.position !== "fixed" && cs.position !== "sticky") continue;
-    const z = parseInt(cs.zIndex, 10);
-    if (!Number.isFinite(z) || z < 100) continue;
-    const area = elementArea(el);
-    const ratio = area / viewportArea();
-    // Either covers >=20% of viewport OR is a banner-shaped strip across the page
-    const r = el.getBoundingClientRect();
-    const isBanner = r.width >= window.innerWidth * 0.7 && r.height >= 60 && r.height <= window.innerHeight * 0.9;
-    if (ratio >= 0.2 || isBanner) {
-      if (isVisible(el)) candidates.add(el);
+  // Skip if we already have a CMP hit AND no ARIA modal — the CMP container is
+  // already in candidates and the heavy scan would just duplicate.
+  if (!skipExpensiveScan && !(cmpHit && ariaModals.length === 0)) {
+    const allEls = document.querySelectorAll("body *");
+    const cap = Math.min(allEls.length, 4000);
+    for (let i = 0; i < cap; i++) {
+      const el = allEls[i];
+      const cs = getComputedStyle(el);
+      if (cs.position !== "fixed" && cs.position !== "sticky") continue;
+      const z = parseInt(cs.zIndex, 10);
+      if (!Number.isFinite(z) || z < 100) continue;
+      const area = elementArea(el);
+      const ratio = area / viewportArea();
+      // Either covers >=20% of viewport OR is a banner-shaped strip across the page
+      const r = el.getBoundingClientRect();
+      const isBanner = r.width >= window.innerWidth * 0.7 && r.height >= 60 && r.height <= window.innerHeight * 0.9;
+      if (ratio >= 0.2 || isBanner) {
+        if (isVisible(el)) candidates.add(el);
+      }
     }
   }
 
@@ -386,6 +400,10 @@ const DETECTION_SCRIPT = `(() => {
   // typically outline/ghost (transparent background, visible border). When we
   // find exactly one of each in the overlay's button row, the outline one is
   // the reject. Pure visual cues — no language dependency.
+  //
+  // CRITICAL: filter out "Settings/Preferences/Manage/Customize/More options"
+  // — these are usually styled identically to reject (outline) but clicking
+  // them opens the prefs panel instead of dismissing. Multilingual.
   function bgAlpha(cs) {
     const m = (cs.backgroundColor || "").match(/rgba?\\(([^)]+)\\)/);
     if (!m) return 1;
@@ -396,14 +414,45 @@ const DETECTION_SCRIPT = `(() => {
     const w = parseFloat(cs.borderTopWidth || "0");
     return w >= 1 && cs.borderTopStyle !== "none";
   }
+  // Words that indicate "open preferences / manage cookies", NOT reject.
+  const SETTINGS_WORDS = [
+    "settings", "preferences", "manage", "customize", "customise", "options",
+    "more options", "more info", "details", "show purposes", "purposes",
+    "show vendors", "vendors", "configure", "choices", "manage choices",
+    // de
+    "einstellungen", "verwalten", "anpassen", "auswahl", "details",
+    // fr
+    "paramètres", "parametres", "préférences", "preferences", "gérer", "gerer", "personnaliser", "plus d'options",
+    // es
+    "configuración", "configuracion", "preferencias", "gestionar", "personalizar", "más opciones",
+    // it
+    "impostazioni", "preferenze", "gestire", "personalizza", "altre opzioni",
+    // pt
+    "configurações", "configuracoes", "preferências", "preferencias", "gerir", "personalizar",
+    // nl
+    "instellingen", "voorkeuren", "beheren", "aanpassen",
+    // sv/da/no
+    "inställningar", "indstillinger", "innstillinger", "anpassa", "tilpas",
+    // el
+    "ρυθμίσεις", "προτιμήσεις", "διαχείριση",
+    // ja/zh/ko
+    "設定", "設置", "设置", "환경설정", "설정",
+    // ru
+    "настройки", "управление",
+  ];
+  function isSettingsButton(btn) {
+    const text = (btn.textContent || "").trim().toLowerCase();
+    if (text.length === 0 || text.length > 60) return false;
+    return SETTINGS_WORDS.some(w => text === w || text.includes(w));
+  }
   const styleClassed = buttonEls.filter(b => isVisible(b)).map(b => {
     const cs = getComputedStyle(b);
     const filled = bgAlpha(cs) > 0.4;
     const outline = !filled && hasVisibleBorder(cs);
-    return { btn: b, filled, outline };
+    return { btn: b, filled, outline, settings: isSettingsButton(b) };
   });
-  const filledOnes = styleClassed.filter(x => x.filled);
-  const outlineOnes = styleClassed.filter(x => x.outline);
+  const filledOnes = styleClassed.filter(x => x.filled && !x.settings);
+  const outlineOnes = styleClassed.filter(x => x.outline && !x.settings);
   if (filledOnes.length === 1 && outlineOnes.length === 1) {
     const ds = uniqueSelectorFor(outlineOnes[0].btn);
     if (ds && !targets.some(t => t.selector === ds)) {
@@ -418,6 +467,7 @@ const DETECTION_SCRIPT = `(() => {
   }
 
   // 3e. Text-match fallback — last resort, multilingual word list.
+  // Single-word triggers (match if button text === word OR starts with word).
   const REJECT_WORDS = [
     "reject", "decline", "refuse", "deny", "disagree", "no thanks", "not now",
     "ablehnen", "verweigern", "nein", // de
@@ -432,6 +482,28 @@ const DETECTION_SCRIPT = `(() => {
     "拒绝", // zh
     "거부", // ko
     "отклонить", // ru
+  ];
+  // Phrase triggers (match anywhere in button text). Cover the long tail of
+  // GDPR phrasings that don't start with "reject/decline".
+  const REJECT_PHRASES = [
+    "continue without accepting", "without accepting", "do not accept",
+    "do not consent", "do not agree", "i do not agree",
+    "only necessary", "only essential", "essential only", "necessary only",
+    "use necessary only", "use only necessary",
+    // de
+    "ohne zustimmung", "nur erforderliche", "nur notwendige", "nur essenzielle", "nicht zustimmen",
+    // fr
+    "continuer sans accepter", "sans accepter", "uniquement nécessaires", "ne pas accepter", "refuser tout",
+    // es
+    "continuar sin aceptar", "sin aceptar", "solo necesarias", "solo esenciales", "no aceptar",
+    // it
+    "continua senza accettare", "senza accettare", "solo necessari", "solo essenziali", "non accettare",
+    // pt
+    "continuar sem aceitar", "sem aceitar", "apenas necessários", "apenas essenciais", "não aceitar",
+    // nl
+    "doorgaan zonder accepteren", "zonder accepteren", "alleen noodzakelijke", "niet accepteren",
+    // ru
+    "продолжить без принятия", "только необходимые",
   ];
   const CLOSE_WORDS = [
     "close", "dismiss", "skip", "later", "maybe later", "not now",
@@ -452,14 +524,24 @@ const DETECTION_SCRIPT = `(() => {
   for (const btn of allBtns) {
     if (!isVisible(btn)) continue;
     const text = (btn.textContent || "").trim();
-    if (!text || text.length > 50) continue;
+    if (!text || text.length > 80) continue;
     const lower = text.toLowerCase();
+    // Skip settings/preferences buttons even if they contain a reject word.
+    if (isSettingsButton(btn)) continue;
+    let matched = false;
     if (REJECT_WORDS.some(w => lower === w || lower.startsWith(w))) {
+      matched = true;
+    } else if (REJECT_PHRASES.some(p => lower.includes(p))) {
+      matched = true;
+    }
+    if (matched) {
       const ds = uniqueSelectorFor(btn);
       if (ds && !targets.some(t => t.selector === ds)) {
         targets.push({ selector: ds, label: text, intent: "reject", method: "text_match", confidence: 0.55 });
       }
-    } else if (CLOSE_WORDS.some(w => lower === w || lower.startsWith(w))) {
+      continue;
+    }
+    if (CLOSE_WORDS.some(w => lower === w || lower.startsWith(w))) {
       const ds = uniqueSelectorFor(btn);
       if (ds && !targets.some(t => t.selector === ds)) {
         targets.push({ selector: ds, label: text, intent: "close", method: "text_match", confidence: 0.5 });
@@ -573,6 +655,41 @@ const TCF_REJECT_SCRIPT = `(() => new Promise((resolve) => {
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
+/** Runtime shape check for results returned by the in-page detection script. */
+function isValidOverlay(raw: unknown): raw is BlockingOverlay {
+  if (!raw || typeof raw !== "object") return false;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.containerSelector !== "string" || o.containerSelector.length === 0) return false;
+  if (!o.bounds || typeof o.bounds !== "object") return false;
+  if (typeof o.type !== "string") return false;
+  if (typeof o.confidence !== "number") return false;
+  if (!Array.isArray(o.dismissTargets)) return false;
+  for (const t of o.dismissTargets as unknown[]) {
+    if (!t || typeof t !== "object") return false;
+    const tt = t as Record<string, unknown>;
+    if (typeof tt.selector !== "string" || tt.selector.length === 0) return false;
+    if (typeof tt.intent !== "string" || typeof tt.method !== "string") return false;
+  }
+  return true;
+}
+
+/** Options accepted by `dismissOverlay`. */
+export interface DismissOverlayOptions {
+  /**
+   * Last-resort: if every other strategy fails, hide the overlay container via
+   * `display:none` to unblock content. Defaults to true. Set to false in
+   * environments where DOM mutation is forbidden (e.g., recording).
+   */
+  allowNuclearHide?: boolean;
+  /**
+   * Time to wait for the page to react after a dismiss click before re-checking.
+   * Default 800ms (covers CMP close animations).
+   */
+  verifyWaitMs?: number;
+}
+
+const DEFAULT_VERIFY_WAIT_MS = 800;
+
 /**
  * Detect a blocking overlay on the current page. Returns null if none found.
  * Pure observation — does not click anything.
@@ -580,20 +697,29 @@ const TCF_REJECT_SCRIPT = `(() => new Promise((resolve) => {
 export async function detectOverlay(page: Page): Promise<BlockingOverlay | null> {
   try {
     const raw = await page.evaluate(DETECTION_SCRIPT);
-    if (!raw || typeof raw !== "object") return null;
-    return raw as BlockingOverlay;
+    if (!isValidOverlay(raw)) return null;
+    return raw;
   } catch {
     return null;
   }
 }
 
 /**
- * Detect and dismiss in one call. Tries TCF API first if available, then
- * walks dismissTargets in priority order. Stops at the first successful click
- * that visibly removes the overlay.
+ * Detect and dismiss in one call. Strategy order:
+ *   1. TCF / CMP-specific reject API (no UI click)
+ *   2. Walk dismissTargets in priority order, with one re-detect retry if the
+ *      first target's selector is stale (page mutated between detect and click)
+ *   3. Cross-origin iframe consent frames (Sourcepoint et al.)
+ *   4. Nuclear: hide overlay container via display:none (gated by opts)
  */
-export async function dismissOverlay(page: Page): Promise<DismissResult> {
-  const overlay = await detectOverlay(page);
+export async function dismissOverlay(
+  page: Page,
+  opts: DismissOverlayOptions = {},
+): Promise<DismissResult> {
+  const verifyWait = opts.verifyWaitMs ?? DEFAULT_VERIFY_WAIT_MS;
+  const allowNuclear = opts.allowNuclearHide ?? true;
+
+  let overlay = await detectOverlay(page);
   if (!overlay) {
     return { success: false, detail: "no overlay detected" };
   }
@@ -603,7 +729,7 @@ export async function dismissOverlay(page: Page): Promise<DismissResult> {
     try {
       const tcf = await page.evaluate(TCF_REJECT_SCRIPT) as { ok: boolean; reason: string };
       if (tcf?.ok) {
-        await page.waitForTimeout(400);
+        await page.waitForTimeout(verifyWait);
         const stillThere = await detectOverlay(page);
         if (!stillThere || stillThere.confidence < 0.5) {
           return { success: true, method: "tcf_api", detail: tcf.reason };
@@ -613,13 +739,30 @@ export async function dismissOverlay(page: Page): Promise<DismissResult> {
   }
 
   // Stage 2: walk dismissTargets in priority order.
-  for (const target of overlay.dismissTargets) {
+  // If the first target's selector is stale (page mutated), re-detect once and
+  // retry against the fresh target list before giving up on click-based dismissal.
+  let usedRetry = false;
+  let targets = [...overlay.dismissTargets];
+  for (let i = 0; i < targets.length; i++) {
+    const target = targets[i];
     try {
       const loc = page.locator(target.selector).first();
-      if (!(await loc.isVisible({ timeout: 200 }).catch(() => false))) continue;
+      const visible = await loc.isVisible({ timeout: 200 }).catch(() => false);
+      if (!visible) {
+        // Stale selector — try one re-detect on the very first miss only.
+        if (i === 0 && !usedRetry) {
+          usedRetry = true;
+          const fresh = await detectOverlay(page);
+          if (fresh && fresh.dismissTargets.length > 0) {
+            overlay = fresh;
+            targets = [...fresh.dismissTargets];
+            i = -1; // restart loop with fresh targets
+          }
+        }
+        continue;
+      }
       await loc.click({ timeout: 1500 });
-      await page.waitForTimeout(400);
-      // Verify the overlay is gone (or much smaller-confidence).
+      await page.waitForTimeout(verifyWait);
       const stillThere = await detectOverlay(page);
       const dismissed = !stillThere ||
         stillThere.containerSelector !== overlay.containerSelector ||
@@ -630,9 +773,7 @@ export async function dismissOverlay(page: Page): Promise<DismissResult> {
     } catch { /* try next target */ }
   }
 
-  // Stage 3: fallback — try cross-origin iframe consent frames (Sourcepoint, etc.)
-  // The detection script can't see into cross-origin iframes; Playwright's
-  // frameLocator can. Try common iframe selectors with their typical buttons.
+  // Stage 3: cross-origin iframe consent frames (Sourcepoint, OneTrust hosted).
   const iframeSelectors = [
     '[id^="sp_message_iframe"]',
     'iframe[title*="consent" i]',
@@ -655,11 +796,49 @@ export async function dismissOverlay(page: Page): Promise<DismissResult> {
         try {
           const btn = frame.locator(btnSel).first();
           await btn.click({ timeout: 1200 });
-          await page.waitForTimeout(400);
+          await page.waitForTimeout(verifyWait);
           return { success: true, method: "cmp_selector", detail: `iframe ${frameSel} ${btnSel}` };
         } catch { /* try next */ }
       }
     } catch { /* frame missing */ }
+  }
+
+  // Stage 4: nuclear hide — last resort. Hide the overlay container so the
+  // page is at least usable. Does NOT grant or reject consent; the CMP state
+  // is unchanged. Only runs if allowed.
+  if (allowNuclear) {
+    try {
+      const hidden = await page.evaluate(`((containerSelector) => {
+        function hide(el) {
+          if (!el || !(el instanceof HTMLElement)) return false;
+          el.style.setProperty("display", "none", "important");
+          return true;
+        }
+        let count = 0;
+        try {
+          const target = document.querySelector(containerSelector);
+          if (hide(target)) count++;
+        } catch {}
+        // Also hide common backdrop/overlay siblings that block scrolling.
+        const backdrops = document.querySelectorAll(
+          '[class*="backdrop" i], [class*="overlay" i][class*="modal" i], [aria-modal="true"]',
+        );
+        backdrops.forEach(el => { if (hide(el)) count++; });
+        // Restore scrolling on body/html in case the CMP locked it.
+        if (count > 0) {
+          document.body.style.removeProperty("overflow");
+          document.documentElement.style.removeProperty("overflow");
+        }
+        return count;
+      })(${JSON.stringify(overlay.containerSelector)})`);
+      if (typeof hidden === "number" && hidden > 0) {
+        return {
+          success: true,
+          method: "cmp_selector",
+          detail: `nuclear-hide:${hidden} elements (consent state unchanged)`,
+        };
+      }
+    } catch { /* best effort */ }
   }
 
   return { success: false, stillPresent: true, detail: "all dismiss strategies failed" };

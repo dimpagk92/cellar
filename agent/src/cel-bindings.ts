@@ -107,6 +107,8 @@ function sanitizeContextForRust(context: ScreenContext): ScreenContext {
 /** CEL native module interface — matches the napi exports from cel-napi. */
 export interface CelNative {
   celVersion(): string;
+  axPermissionGranted(): boolean;
+  axRequestPermission(): boolean;
   getContext(): string;
   captureScreen(): Buffer;
   listMonitors(): string;
@@ -455,6 +457,36 @@ export class Cel implements
   /** Whether the native module is available. */
   get isNativeAvailable(): boolean {
     return this.native !== null;
+  }
+
+  /**
+   * Whether the host process has macOS Accessibility permission granted.
+   * Returns true on non-macOS platforms (no-op — Accessibility is macOS-only).
+   * Returns false when the native module isn't loaded (can't check).
+   *
+   * Cheap (microseconds), no UI prompt — safe to call as a pre-flight guard
+   * before any AX-touching tool invocation.
+   */
+  get isAxPermissionGranted(): boolean {
+    return this.native?.axPermissionGranted() ?? false;
+  }
+
+  /**
+   * Trigger the macOS Accessibility permission prompt for the host process.
+   *
+   * Returns the current trust state. Side effect: shows a system notification
+   * for processes not yet in the Privacy & Security list — clicking it opens
+   * System Settings with the host process pre-selected so the user only has
+   * to flip the toggle.
+   *
+   * macOS does not pick up permission changes mid-process; the host (Cursor,
+   * Claude Code, Terminal.app, etc.) must restart after the user grants for
+   * it to take effect.
+   *
+   * No-op on non-macOS platforms (returns true).
+   */
+  requestAxPermission(): boolean {
+    return this.native?.axRequestPermission() ?? false;
   }
 
   /** Get CEL version. */

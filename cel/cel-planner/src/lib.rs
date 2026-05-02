@@ -68,15 +68,17 @@ pub use canonical::{
     StepKind, StepResult, SubGoal,
 };
 pub use canonical_plan_producer::{DoneVerdict, PlanProducer};
-pub use llm_plan_producer::{build_user_prompt as build_next_move_user_prompt, LlmPlanProducer, NEXT_MOVE_SYSTEM_PROMPT};
 pub use error::PlannerError;
 pub use history::StepHistory;
+pub use llm_plan_producer::{
+    build_user_prompt as build_next_move_user_prompt, LlmPlanProducer, NEXT_MOVE_SYSTEM_PROMPT,
+};
 pub use planner::{find_blocking_error, validate_grounding, Planner, PlannerBackend};
 pub use prompt::{build_user_prompt, PromptOptions, PromptResult};
 pub use signals::{CortexSignals, LoadingSignal};
 pub use types::{
-    CellWrite, ContextDetail, ContextTier, GoalConfig, NotebookWrite, PlannedAction,
-    PlannedPlan, PlannedStep, PlannerEvent, ProgressAssessment, StepRecord,
+    CellWrite, ContextDetail, ContextTier, GoalConfig, NotebookWrite, PlannedAction, PlannedPlan,
+    PlannedStep, PlannerEvent, ProgressAssessment, StepRecord,
 };
 
 /// Create a planner from environment-configured LLM.

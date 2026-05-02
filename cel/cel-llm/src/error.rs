@@ -36,6 +36,12 @@ impl LlmError {
     /// consecutive 429s instead of chewing through `max_consecutive_failures`
     /// × built-in-retry-latency. See `GoalRunner::max_consecutive_rate_limits`.
     pub fn is_rate_limited(&self) -> bool {
-        matches!(self, LlmError::HttpError { status: 429 | 529, .. })
+        matches!(
+            self,
+            LlmError::HttpError {
+                status: 429 | 529,
+                ..
+            }
+        )
     }
 }

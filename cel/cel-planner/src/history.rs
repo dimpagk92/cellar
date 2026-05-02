@@ -4,7 +4,6 @@
 /// older steps are summarized into a compact digest instead of being
 /// dropped entirely. This prevents context overflow while preserving
 /// key information (browser-use learned this matters Feb 2026).
-
 use crate::types::{PlannedAction, StepRecord};
 
 /// When total steps exceed this, compact older ones into a summary.
@@ -132,20 +131,33 @@ impl StepHistory {
                 let label = s.element_label.as_deref().unwrap_or("");
                 let action_type = match &s.action {
                     PlannedAction::Click { target_id } => {
-                        if label.is_empty() { format!("clicked {}", target_id) }
-                        else { format!("clicked '{}'", label) }
+                        if label.is_empty() {
+                            format!("clicked {}", target_id)
+                        } else {
+                            format!("clicked '{}'", label)
+                        }
                     }
                     PlannedAction::Type { text, .. } => {
-                        if label.is_empty() { format!("typed \"{}\"", &text[..text.len().min(15)]) }
-                        else { format!("typed '{}' = \"{}\"", label, &text[..text.len().min(15)]) }
+                        if label.is_empty() {
+                            format!("typed \"{}\"", &text[..text.len().min(15)])
+                        } else {
+                            format!("typed '{}' = \"{}\"", label, &text[..text.len().min(15)])
+                        }
                     }
                     PlannedAction::SetValue { value, .. } => {
-                        if label.is_empty() { format!("set \"{}\"", &value[..value.len().min(15)]) }
-                        else { format!("set '{}' = \"{}\"", label, &value[..value.len().min(15)]) }
+                        if label.is_empty() {
+                            format!("set \"{}\"", &value[..value.len().min(15)])
+                        } else {
+                            format!("set '{}' = \"{}\"", label, &value[..value.len().min(15)])
+                        }
                     }
                     _ => format!("{:?}", s.action).chars().take(20).collect(),
                 };
-                if s.success { action_type } else { format!("FAILED: {}", action_type) }
+                if s.success {
+                    action_type
+                } else {
+                    format!("FAILED: {}", action_type)
+                }
             })
             .collect();
 
@@ -199,13 +211,18 @@ mod tests {
         let mut history = StepHistory::new();
         history.record(
             0,
-            PlannedAction::Click { target_id: "btn1".into() },
+            PlannedAction::Click {
+                target_id: "btn1".into(),
+            },
             true,
             None,
         );
         history.record(
             1,
-            PlannedAction::Type { target_id: Some("inp".into()), text: "hello".into() },
+            PlannedAction::Type {
+                target_id: Some("inp".into()),
+                text: "hello".into(),
+            },
             true,
             None,
         );
@@ -220,7 +237,9 @@ mod tests {
         for i in 0..8 {
             history.record(
                 i,
-                PlannedAction::Click { target_id: format!("btn{}", i) },
+                PlannedAction::Click {
+                    target_id: format!("btn{}", i),
+                },
                 true,
                 None,
             );
@@ -236,7 +255,9 @@ mod tests {
         let mut history = StepHistory::new();
         history.record(
             0,
-            PlannedAction::Click { target_id: "btn".into() },
+            PlannedAction::Click {
+                target_id: "btn".into(),
+            },
             true,
             None,
         );
@@ -249,7 +270,9 @@ mod tests {
         let records = vec![
             StepRecord {
                 step_index: 0,
-                action: PlannedAction::Click { target_id: "a".into() },
+                action: PlannedAction::Click {
+                    target_id: "a".into(),
+                },
                 success: true,
                 error: None,
                 element_label: Some("Submit".into()),
@@ -257,7 +280,9 @@ mod tests {
             },
             StepRecord {
                 step_index: 1,
-                action: PlannedAction::Fail { reason: "not found".into() },
+                action: PlannedAction::Fail {
+                    reason: "not found".into(),
+                },
                 success: false,
                 error: Some("Element missing".into()),
                 element_label: None,
@@ -276,9 +301,15 @@ mod tests {
         for i in 0..11 {
             history.record(
                 i,
-                PlannedAction::Click { target_id: format!("btn{}", i) },
+                PlannedAction::Click {
+                    target_id: format!("btn{}", i),
+                },
                 i % 3 != 0, // Every 3rd step fails
-                if i % 3 == 0 { Some(format!("Error at step {}", i)) } else { None },
+                if i % 3 == 0 {
+                    Some(format!("Error at step {}", i))
+                } else {
+                    None
+                },
             );
         }
 
@@ -297,7 +328,9 @@ mod tests {
         for i in 0..15 {
             history.record(
                 i,
-                PlannedAction::Click { target_id: format!("btn{}", i) },
+                PlannedAction::Click {
+                    target_id: format!("btn{}", i),
+                },
                 true,
                 None,
             );
@@ -314,7 +347,9 @@ mod tests {
         for i in 0..11 {
             history.record(
                 i,
-                PlannedAction::Click { target_id: "btn".into() },
+                PlannedAction::Click {
+                    target_id: "btn".into(),
+                },
                 false,
                 Some(format!("Failed: {}", i)),
             );

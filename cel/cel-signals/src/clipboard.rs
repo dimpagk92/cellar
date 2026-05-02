@@ -62,7 +62,10 @@ fn read_clipboard_macos() -> Option<ClipboardState> {
 
     // Check for image/file types via osascript (lightweight check)
     let type_check = std::process::Command::new("osascript")
-        .args(["-e", "tell application \"System Events\" to return (the clipboard info)"])
+        .args([
+            "-e",
+            "tell application \"System Events\" to return (the clipboard info)",
+        ])
         .output()
         .ok();
 
@@ -77,7 +80,8 @@ fn read_clipboard_macos() -> Option<ClipboardState> {
         })
         .unwrap_or_default();
 
-    let has_image = info_str.contains("tiff") || info_str.contains("png") || info_str.contains("jpeg");
+    let has_image =
+        info_str.contains("tiff") || info_str.contains("png") || info_str.contains("jpeg");
     let has_files = info_str.contains("file url");
 
     Some(ClipboardState {
@@ -90,32 +94,34 @@ fn read_clipboard_macos() -> Option<ClipboardState> {
 #[cfg(target_os = "linux")]
 fn read_clipboard_linux() -> Option<ClipboardState> {
     // Try xclip first, then xsel, then wl-paste (Wayland)
-    let text = ["xclip", "xsel", "wl-paste"]
-        .iter()
-        .find_map(|cmd| {
-            let mut command = std::process::Command::new(cmd);
-            if *cmd == "xclip" {
-                command.args(["-selection", "clipboard", "-o"]);
-            } else if *cmd == "xsel" {
-                command.args(["--clipboard", "--output"]);
-            }
-            command.output().ok().and_then(|out| {
-                if out.status.success() {
-                    let s = String::from_utf8_lossy(&out.stdout).to_string();
-                    if s.is_empty() { None } else {
-                        Some(if s.len() > 500 {
-                            let mut end = 500;
-                            while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-                            format!("{}...", &s[..end])
-                        } else {
-                            s
-                        })
-                    }
-                } else {
+    let text = ["xclip", "xsel", "wl-paste"].iter().find_map(|cmd| {
+        let mut command = std::process::Command::new(cmd);
+        if *cmd == "xclip" {
+            command.args(["-selection", "clipboard", "-o"]);
+        } else if *cmd == "xsel" {
+            command.args(["--clipboard", "--output"]);
+        }
+        command.output().ok().and_then(|out| {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).to_string();
+                if s.is_empty() {
                     None
+                } else {
+                    Some(if s.len() > 500 {
+                        let mut end = 500;
+                        while end > 0 && !s.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!("{}...", &s[..end])
+                    } else {
+                        s
+                    })
                 }
-            })
-        });
+            } else {
+                None
+            }
+        })
+    });
 
     Some(ClipboardState {
         text,

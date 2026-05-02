@@ -76,10 +76,8 @@ pub fn is_skeleton_screen(context: &ScreenContext) -> bool {
 
     // Check for explicit loading indicators (aria-busy)
     let has_aria_busy = elements.iter().any(|el| {
-        el.properties
-            .get("aria-busy")
-            .map_or(false, |v| v == "true")
-            || el.properties.get("busy").map_or(false, |v| v == "true")
+        el.properties.get("aria-busy").is_some_and(|v| v == "true")
+            || el.properties.get("busy").is_some_and(|v| v == "true")
     });
     if has_aria_busy {
         return true;
@@ -89,8 +87,8 @@ pub fn is_skeleton_screen(context: &ScreenContext) -> bool {
     let text_bearing_count = elements
         .iter()
         .filter(|el| {
-            el.label.as_ref().map_or(false, |l| !l.trim().is_empty())
-                || el.value.as_ref().map_or(false, |v| !v.trim().is_empty())
+            el.label.as_ref().is_some_and(|l| !l.trim().is_empty())
+                || el.value.as_ref().is_some_and(|v| !v.trim().is_empty())
         })
         .count();
     let text_ratio = text_bearing_count as f64 / elements.len() as f64;
@@ -108,7 +106,7 @@ pub fn is_skeleton_screen(context: &ScreenContext) -> bool {
 
     // Check for aria-live regions with loading text
     let has_aria_live_loading = elements.iter().any(|el| {
-        if el.properties.get("aria-live").is_none() {
+        if !el.properties.contains_key("aria-live") {
             return false;
         }
         let text = format!(
@@ -134,10 +132,8 @@ pub fn skeleton_wait_ms(context: &ScreenContext) -> u64 {
     }
 
     let has_aria_busy = elements.iter().any(|el| {
-        el.properties
-            .get("aria-busy")
-            .map_or(false, |v| v == "true")
-            || el.properties.get("busy").map_or(false, |v| v == "true")
+        el.properties.get("aria-busy").is_some_and(|v| v == "true")
+            || el.properties.get("busy").is_some_and(|v| v == "true")
     });
     if has_aria_busy {
         return EXTENDED_SKELETON_WAIT_MS;
@@ -146,8 +142,8 @@ pub fn skeleton_wait_ms(context: &ScreenContext) -> u64 {
     let text_bearing_count = elements
         .iter()
         .filter(|el| {
-            el.label.as_ref().map_or(false, |l| !l.trim().is_empty())
-                || el.value.as_ref().map_or(false, |v| !v.trim().is_empty())
+            el.label.as_ref().is_some_and(|l| !l.trim().is_empty())
+                || el.value.as_ref().is_some_and(|v| !v.trim().is_empty())
         })
         .count();
     let text_ratio = text_bearing_count as f64 / elements.len() as f64;
@@ -163,7 +159,7 @@ pub fn skeleton_wait_ms(context: &ScreenContext) -> u64 {
     }
 
     let has_aria_live_loading = elements.iter().any(|el| {
-        if el.properties.get("aria-live").is_none() {
+        if !el.properties.contains_key("aria-live") {
             return false;
         }
         let text = format!(

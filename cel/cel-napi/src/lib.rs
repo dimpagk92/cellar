@@ -8,6 +8,9 @@
 // The ctor crate (used by napi-rs for module registration) triggers cfg warnings
 // on newer Rust compilers. Safe to suppress until napi-rs updates ctor.
 #![allow(unexpected_cfgs)]
+// FFI signatures often have many arguments by necessity (passing primitive values
+// across the napi boundary instead of structs).
+#![allow(clippy::too_many_arguments)]
 
 use napi_derive::napi;
 

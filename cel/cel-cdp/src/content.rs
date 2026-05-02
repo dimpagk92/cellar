@@ -29,7 +29,7 @@ pub struct ElementBounds {
 /// A console log message captured from the page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsoleMessage {
-    pub level: String,  // "log", "warn", "error", "info", "debug"
+    pub level: String, // "log", "warn", "error", "info", "debug"
     pub text: String,
 }
 
@@ -422,8 +422,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "[]".to_string());
-    let console_logs: Vec<ConsoleMessage> =
-        serde_json::from_str(&console_json).unwrap_or_default();
+    let console_logs: Vec<ConsoleMessage> = serde_json::from_str(&console_json).unwrap_or_default();
 
     // Capture recent fetch/XHR network requests via the Performance API.
     // This avoids needing a WebSocket event listener loop for Network.responseReceived.
@@ -498,7 +497,12 @@ mod tests {
                 input_type: None,
                 value: None,
                 placeholder: None,
-                bounds: Some(ElementBounds { x: 10, y: 20, width: 100, height: 40 }),
+                bounds: Some(ElementBounds {
+                    x: 10,
+                    y: 20,
+                    width: 100,
+                    height: 40,
+                }),
                 backend_node_id: Some(1),
                 aria_role: Some("button".into()),
                 aria_label: Some("Submit form".into()),
@@ -538,7 +542,10 @@ mod tests {
         assert_eq!(back.interactive_elements.len(), 1);
         assert!(back.interactive_elements[0].bounds.is_some());
         assert_eq!(back.interactive_elements[0].backend_node_id, Some(1));
-        assert_eq!(back.interactive_elements[0].aria_role.as_deref(), Some("button"));
+        assert_eq!(
+            back.interactive_elements[0].aria_role.as_deref(),
+            Some("button")
+        );
         assert!(back.interactive_elements[0].is_visible);
         assert_eq!(back.interactive_elements[0].shadow_depth, 0);
         assert_eq!(back.interactive_elements[0].viewport_relation, "visible");

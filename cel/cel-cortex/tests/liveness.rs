@@ -134,7 +134,7 @@ async fn refresh_now_does_not_break_natural_cadence() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     let later = cortex.tick_count();
     assert!(
-        later >= after_refresh + 1,
+        later > after_refresh,
         "natural ticks must keep firing after refresh_now: was {after_refresh}, now {later}"
     );
     cortex.shutdown();

@@ -8,6 +8,7 @@
  */
 
 import type { Page } from "playwright";
+import { dismissOverlay } from "./overlay-detector.js";
 
 export interface ActionResult {
   success: boolean;
@@ -779,178 +780,18 @@ export class ActionHandler {
   }
 
   /**
-   * Dismiss cookie consent banners using common patterns.
-   * Tries multiple selectors in priority order. No-ops if no banner found.
+   * Dismiss cookie consent banners.
+   *
+   * Delegates to the canonical overlay-detector (structural detection +
+   * multilingual fallback + TCF API). The legacy hardcoded English selector
+   * bank was removed in favor of the consolidated implementation.
    */
   async dismissCookieConsent(): Promise<ActionResult> {
-    // Quick check: look for VISIBLE consent-related elements only (~10ms).
-    // Checking raw HTML catches false positives (scripts, comments mentioning "cookie").
-    try {
-      const hasVisibleConsent = await this.page.evaluate(`(() => {
-        // Check for known CMP containers that are visible
-        const cmpSelectors = [
-          '#onetrust-banner-sdk', '#onetrust-consent-sdk',
-          '#CybotCookiebotDialog', '.cky-consent-container',
-          '[id^="sp_message"]', '.fc-consent-root',
-          '#didomi-host', '.qc-cmp2-container',
-          '[class*="cookie-banner"]', '[class*="cookie-consent"]',
-          '[id*="cookie-banner"]', '[id*="cookie-consent"]',
-          '[class*="gdpr"]', '[id*="gdpr"]',
-        ];
-        for (const sel of cmpSelectors) {
-          const el = document.querySelector(sel);
-          if (el && el.offsetParent !== null) return true;
-        }
-        // Check for consent iframes (OneTrust, Sourcepoint use iframes)
-        const iframeSelectors = ['iframe[id^="sp_message"]', 'iframe[title*="consent" i]', 'iframe[title*="privacy" i]', 'iframe[id*="consent"]'];
-        for (const sel of iframeSelectors) {
-          if (document.querySelector(sel)) return true;
-        }
-        // Check for visible buttons with consent-related text
-        const buttons = document.querySelectorAll('button, a[role="button"]');
-        for (const btn of buttons) {
-          const text = (btn.textContent || '').toLowerCase().trim();
-          if (text.length < 30 && btn.offsetParent !== null &&
-              (text.includes('accept') || text.includes('agree') || text.includes('consent'))) {
-            return true;
-          }
-        }
-        return false;
-      })()`);
-      if (!hasVisibleConsent) {
-        return { success: false, data: { method: "skip", reason: "no visible consent elements" } };
-      }
-    } catch { /* continue with full detection if quick check fails */ }
-
-    // Phase 1: Try CSS selectors on main page (fast — ~500ms total)
-    const selectors = [
-      // Named CMP platforms (most reliable)
-      '#onetrust-accept-btn-handler',                    // OneTrust
-      '#didomi-notice-agree-button',                     // Didomi
-      '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll', // CookieBot
-      '.sp_choice_type_11',                              // Sourcepoint
-      '.fc-cta-consent',                                 // FundingChoices
-      '[data-cookiefirst-action="accept"]',              // CookieFirst
-      '.qc-cmp2-summary-buttons button[mode="primary"]', // Quantcast
-      // Booking.com consent + sign-in overlays
-      '#onetrust-accept-btn-handler',                      // Booking uses OneTrust sometimes
-      'button[id*="accept"]',                              // Booking cookie accept
-      '[data-testid="web-shell-header-mfe-close-btn"]',    // Booking sign-in popup close
-      '[aria-label="Dismiss sign-in info."]',              // Booking sign-in dismiss
-      'button[aria-label*="Dismiss" i]',                   // Booking generic dismiss
-      '[class*="bui-modal"] button[class*="close"]',       // Booking modal close
-      // Generic cookie/consent selectors
-      '[id*="cookie"] button[id*="accept"]',
-      '[class*="cookie"] button[class*="accept"]',
-      '[id*="consent"] button[id*="accept"]',
-      '[class*="consent"] button[class*="accept"]',
-      '[data-testid*="cookie-accept"]',
-      '[data-testid*="accept-cookies"]',
-      'button[aria-label*="accept" i]',
-      'button[aria-label*="agree" i]',
-      '.cc-accept', '.cc-btn.cc-dismiss',
-    ];
-
-    for (const selector of selectors) {
-      try {
-        const el = this.page.locator(selector).first();
-        if (await el.isVisible({ timeout: 300 })) {
-          await el.click({ timeout: 1500 });
-          await this.page.waitForTimeout(500);
-          return { success: true, data: { method: "css", selector } };
-        }
-      } catch { /* try next */ }
+    const result = await dismissOverlay(this.page);
+    if (result.success) {
+      return { success: true, data: { method: result.method, detail: result.detail } };
     }
-
-    // Phase 2: Sourcepoint / IAB CMP iframes (TechCrunch, many news sites)
-    // These use cross-origin iframes that CSS selectors can't reach.
-    // Playwright's frameLocator can pierce them.
-    const iframeSelectors = [
-      '[id^="sp_message_iframe"]',     // Sourcepoint
-      'iframe[title*="consent" i]',    // Generic consent iframe
-      'iframe[title*="privacy" i]',    // Privacy iframe
-      'iframe[id*="consent"]',         // ID-based
-    ];
-    for (const frameSel of iframeSelectors) {
-      try {
-        const frame = this.page.frameLocator(frameSel).first();
-        // Try accept buttons inside the iframe
-        const acceptBtns = [
-          'button[title="Accept All"]', 'button[title="Accept all"]',
-          'button[title="ACCEPT ALL"]', 'button[title="OK"]',
-          'button.sp_choice_type_11', 'button.sp_choice_type_ACCEPT_ALL',
-          'button[aria-label="Accept"]', 'button[aria-label="Accept all"]',
-        ];
-        for (const btnSel of acceptBtns) {
-          try {
-            const btn = frame.locator(btnSel).first();
-            await btn.click({ timeout: 2000 });
-            await this.page.waitForTimeout(500);
-            return { success: true, data: { method: "iframe", frameSel, btnSel } };
-          } catch { /* try next button */ }
-        }
-        // Try close button as fallback
-        try {
-          const closeBtn = frame.locator('button[title="Close"], button[aria-label="Close"]').first();
-          await closeBtn.click({ timeout: 1500 });
-          await this.page.waitForTimeout(500);
-          return { success: true, data: { method: "iframe-close", frameSel } };
-        } catch { /* no close button */ }
-      } catch { /* frame not found */ }
-    }
-
-    // Phase 3: JS text-based fallback — find buttons by visible text
-    try {
-      const dismissed = await this.page.evaluate(`(() => {
-        const buttons = document.querySelectorAll('button, a[role="button"], [role="button"]');
-        const acceptWords = ['accept all', 'accept', 'agree', 'i agree', 'got it', 'allow all', 'ok', 'dismiss', 'no thanks', 'not now', 'close', 'skip'];
-        for (const btn of buttons) {
-          const text = (btn.textContent || '').toLowerCase().trim();
-          if (text.length < 30 && acceptWords.some(w => text === w || text.startsWith(w)) && btn.offsetParent !== null) {
-            btn.click();
-            return text;
-          }
-        }
-        return null;
-      })()`);
-      if (dismissed) {
-        await this.page.waitForTimeout(500);
-        return { success: true, data: { method: "text", text: dismissed } };
-      }
-    } catch { /* best effort */ }
-
-    // Phase 4: Nuclear — hide overlay elements blocking the page
-    try {
-      const removed = await this.page.evaluate(`(() => {
-        const overlaySelectors = [
-          '[class*="consent"]', '[class*="cookie-banner"]', '[id*="consent"]',
-          '[id*="cookie"]', '.qc-cmp2-container', '[id^="sp_message"]',
-          '.fc-consent-root', '[class*="gdpr"]',
-          // Booking.com overlays
-          '[class*="bui-modal"]', '[class*="signup-modal"]',
-          '[data-testid*="dismissible-overlay"]',
-          '[role="dialog"][aria-modal="true"]',
-        ];
-        let count = 0;
-        for (const sel of overlaySelectors) {
-          for (const el of document.querySelectorAll(sel)) {
-            if (el.offsetParent !== null) {
-              el.style.display = 'none';
-              count++;
-            }
-          }
-        }
-        if (count > 0) {
-          document.body.style.overflow = '';
-          document.documentElement.style.overflow = '';
-        }
-        return count;
-      })()`);
-      if (removed) {
-        return { success: true, data: { method: "remove-overlay", removed } };
-      }
-    } catch { /* best effort */ }
-
-    return { success: true, data: { noBannerFound: true } };
+    return { success: true, data: { noBannerFound: true, detail: result.detail } };
   }
+
 }

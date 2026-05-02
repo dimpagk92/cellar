@@ -200,91 +200,104 @@ Return ONLY the JavaScript expression, no explanation, no markdown, no backticks
 }
 
 /**
- * Dismiss common cookie/consent banners via CDP JS evaluation.
- * Runs best-effort — doesn't throw on failure.
+ * Dismiss a blocking overlay (cookie consent, paywall, modal) via CDP.
+ *
+ * CDP-only equivalent of the browser adapter's overlay-detector — used when
+ * goal-runner has only a Cel/CDP handle (no Playwright Page). Same structural
+ * detection: CMP fingerprint → ARIA → positional X → multilingual text.
+ *
+ * Runs best-effort; never throws.
  */
 export async function dismissCookieBanner(cel: CdpExtractorDeps): Promise<boolean> {
-  try {
-    const js = `(() => {
-      // Strategy 1: Common consent button selectors
-      const selectors = [
-        'button[aria-label*="Accept"]', 'button[aria-label*="Reject"]',
-        'button[aria-label*="Decline"]', 'button[aria-label*="Dismiss"]',
-        '#onetrust-reject-all-handler', '#onetrust-accept-btn-handler',
-        '.cookie-consent-accept', '.cookie-consent-reject',
-        '[data-testid="cookie-reject"]', '[data-testid="cookie-accept"]',
-        '#L2AGLb', // Google consent "I agree" button
-        'button[id="L2AGLb"]', // Google consent alt
-        'form[action*="consent"] button', // Google consent form buttons
-      ];
-      for (const sel of selectors) {
-        const btn = document.querySelector(sel);
-        if (btn) { btn.click(); return 'clicked: ' + sel; }
+  const js = `(() => {
+    // CMP-specific reject selectors (high reliability)
+    const cmpReject = [
+      "#onetrust-reject-all-handler",
+      "#CybotCookiebotDialogBodyButtonDecline",
+      "#CybotCookiebotDialogBodyLevelButtonLevelOptinDeclineAll",
+      "#didomi-notice-disagree-button",
+      ".didomi-continue-without-agreeing",
+      ".sp_choice_type_REJECT_ALL",
+      ".fc-cta-do-not-consent",
+      '[data-cookiefirst-action="reject"]',
+      ".cky-btn-reject",
+      ".cm-btn-decline",
+      ".cc-deny",
+      "#W0wltc",
+    ];
+    const cmpAccept = [
+      "#onetrust-accept-btn-handler",
+      "#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll",
+      "#didomi-notice-agree-button",
+      ".sp_choice_type_11",
+      ".fc-cta-consent",
+      '[data-cookiefirst-action="accept"]',
+      ".cky-btn-accept",
+      ".cc-allow",
+      "#L2AGLb",
+    ];
+    function isVisible(el) {
+      if (!el || el.offsetParent === null) {
+        const cs = el && getComputedStyle(el);
+        if (!cs || (cs.position !== "fixed" && cs.position !== "sticky")) return false;
       }
-      // Strategy 2: Find buttons by text content (including common translations)
-      const buttons = document.querySelectorAll('button, [role="button"]');
-      const dismissWords = ['reject', 'decline', 'deny', 'disagree', 'dismiss',
-        'accept', 'agree', 'i agree', 'got it', 'continue', 'ok',
-        'reject all', 'accept all', 'reject additional', 'accept cookies',
-        'no thanks', 'not now', 'close',
-        // Greek
-        'απόρριψη', 'αποδοχή', 'συμφωνώ', 'διαφωνώ',
-        // Common cookie consent patterns
-        'accept cookies & continue', 'reject cookies'
-      ];
-      for (const btn of buttons) {
-        const text = (btn.textContent || '').toLowerCase().trim();
-        if (dismissWords.some(w => text === w || text.includes(w))) {
-          btn.click();
-          return 'clicked by text: ' + text;
-        }
-      }
-      // Strategy 3: Google consent iframe — click "Reject all" or "Accept all"
-      const iframes = document.querySelectorAll('iframe[src*="consent"]');
-      for (const iframe of iframes) {
-        try {
-          const doc = iframe.contentDocument;
-          if (doc) {
-            const btns = doc.querySelectorAll('button');
-            for (const btn of btns) {
-              const text = (btn.textContent || '').toLowerCase().trim();
-              if (text.includes('reject') || text.includes('accept')) {
-                btn.click();
-                return 'clicked iframe: ' + text;
-              }
-            }
-          }
-        } catch {}
-      }
-      return 'no cookie banner found';
-    })()`;
-    const result = await cel.cdpEvaluate(js);
-    if (typeof result === "string" && result.startsWith("clicked")) return true;
-
-    // Strategy 4: If main page dismiss failed, try navigating through Google consent
-    // Google redirects to consent.google.com — check if we're on that page
-    const urlCheck = await cel.cdpEvaluate("window.location.hostname");
-    if (typeof urlCheck === "string" && urlCheck.includes("consent.google")) {
-      // Click the "Reject all" or first button on the consent page
-      const consentJs = `(() => {
-        const btns = document.querySelectorAll('button');
-        for (const btn of btns) {
-          const text = (btn.textContent || '').toLowerCase().trim();
-          if (text.includes('reject') || text.includes('accept') || text.includes('agree')) {
-            btn.click();
-            return 'consent clicked: ' + text;
-          }
-        }
-        // Fallback: click any form submit
-        const form = document.querySelector('form');
-        if (form) { form.submit(); return 'form submitted'; }
-        return 'no consent button';
-      })()`;
-      const consentResult = await cel.cdpEvaluate(consentJs);
-      return typeof consentResult === "string" && consentResult.startsWith("consent clicked");
+      const r = el.getBoundingClientRect();
+      return r.width >= 1 && r.height >= 1;
     }
-
-    return false;
+    // Stage 1: CMP reject (privacy-preserving)
+    for (const sel of cmpReject) {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) { el.click(); return "cmp_reject:" + sel; }
+    }
+    // Stage 2: ARIA dismiss
+    const ariaSel = [
+      'button[aria-label*="reject" i]',
+      'button[aria-label*="decline" i]',
+      'button[aria-label*="refuse" i]',
+      'button[aria-label*="dismiss" i]',
+      'button[aria-label*="close" i]',
+    ];
+    for (const sel of ariaSel) {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) { el.click(); return "aria:" + sel; }
+    }
+    // Stage 3: Multilingual text match
+    const REJECT = ["reject","decline","refuse","deny","disagree","no thanks","not now",
+      "ablehnen","verweigern","refuser","rechazar","rifiuta","rejeitar","afwijzen",
+      "απόρριψη","διαφωνώ","拒否","拒绝","거부","отклонить"];
+    const buttons = document.querySelectorAll('button, [role="button"], a[role="button"]');
+    for (const btn of buttons) {
+      if (!isVisible(btn)) continue;
+      const text = (btn.textContent || "").trim();
+      if (!text || text.length > 50) continue;
+      const lower = text.toLowerCase();
+      if (REJECT.some(w => lower === w || lower.startsWith(w))) {
+        btn.click();
+        return "text_reject:" + text;
+      }
+    }
+    // Stage 4: CMP accept (last resort — at least unblocks the page)
+    for (const sel of cmpAccept) {
+      const el = document.querySelector(sel);
+      if (el && isVisible(el)) { el.click(); return "cmp_accept:" + sel; }
+    }
+    // Stage 5: Same-origin consent iframes
+    const iframes = document.querySelectorAll('iframe[src*="consent"], iframe[title*="consent" i]');
+    for (const iframe of iframes) {
+      try {
+        const doc = iframe.contentDocument;
+        if (!doc) continue;
+        for (const sel of cmpReject) {
+          const el = doc.querySelector(sel);
+          if (el) { el.click(); return "iframe_reject:" + sel; }
+        }
+      } catch {}
+    }
+    return null;
+  })()`;
+  try {
+    const result = await cel.cdpEvaluate(js);
+    return typeof result === "string" && result.length > 0;
   } catch {
     return false;
   }

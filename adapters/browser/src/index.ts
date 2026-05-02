@@ -28,6 +28,7 @@ import { mapElements } from "./element-mapper.js";
 import { sanitizeElements } from "./sanitizer.js";
 import { MutationTracker } from "./mutation-tracker.js";
 import { ActionHandler } from "./action-handler.js";
+import { detectOverlay, dismissOverlay, type BlockingOverlay, type DismissResult } from "./overlay-detector.js";
 import { NetworkTap } from "./network-tap.js";
 import { createHybridSnapshot, type HybridSnapshot } from "./hybrid-snapshot.js";
 import { UrlMap } from "./url-map.js";
@@ -1025,11 +1026,32 @@ export class BrowserAdapter {
                     }
                   }
                   if (!el) return 'not_found';
+                  const commitValue = (node, next) => {
+                    const tag = (node.tagName || '').toUpperCase();
+                    const proto = tag === 'TEXTAREA'
+                      ? HTMLTextAreaElement.prototype
+                      : tag === 'SELECT'
+                        ? HTMLSelectElement.prototype
+                        : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value')?.set;
+                    if (setter) setter.call(node, next);
+                    else node.value = next;
+                    try {
+                      node.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        composed: true,
+                        inputType: 'insertReplacementText',
+                        data: next,
+                      }));
+                    } catch (_) {
+                      node.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+                    }
+                    node.dispatchEvent(new Event('change', {bubbles: true, composed: true}));
+                  };
                   el.focus();
                   ${clearFirst ? "el.value = '';" : ""}
-                  el.value = ${escapedText};
-                  el.dispatchEvent(new Event('input', {bubbles: true}));
-                  el.dispatchEvent(new Event('change', {bubbles: true}));
+                  commitValue(el, ${escapedText});
                   return 'ok:' + el.value.slice(0, 30);
                 })()`
               : null;
@@ -1050,11 +1072,32 @@ export class BrowserAdapter {
                 await cdp.send("Runtime.callFunctionOn", {
                   objectId: resolved.object.objectId,
                   functionDeclaration: `function() {
+                    const commitValue = (node, next) => {
+                      const tag = (node.tagName || '').toUpperCase();
+                      const proto = tag === 'TEXTAREA'
+                        ? HTMLTextAreaElement.prototype
+                        : tag === 'SELECT'
+                          ? HTMLSelectElement.prototype
+                          : HTMLInputElement.prototype;
+                      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                        || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value')?.set;
+                      if (setter) setter.call(node, next);
+                      else node.value = next;
+                      try {
+                        node.dispatchEvent(new InputEvent('input', {
+                          bubbles: true,
+                          composed: true,
+                          inputType: 'insertReplacementText',
+                          data: next,
+                        }));
+                      } catch (_) {
+                        node.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                      }
+                      node.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                    };
                     this.focus();
                     ${clearFirst ? "this.value = '';" : ""}
-                    this.value = ${escapedText};
-                    this.dispatchEvent(new Event('input', {bubbles: true}));
-                    this.dispatchEvent(new Event('change', {bubbles: true}));
+                    commitValue(this, ${escapedText});
                   }`,
                 } as any);
                 await new Promise(r => setTimeout(r, 300));
@@ -1368,12 +1411,33 @@ export class BrowserAdapter {
   }
 
   /**
-   * Dismiss cookie consent banners.
-   * Requires Playwright mode (uses Locator API for complex selector matching).
+   * Detect a blocking overlay (cookie consent, paywall, modal, etc.) on the
+   * current page. Returns null if none. Pure observation — does not click.
+   * Requires Playwright mode.
+   */
+  async detectOverlay(): Promise<BlockingOverlay | null> {
+    if (!this.client.hasPage) return null;
+    return detectOverlay(this.client.page);
+  }
+
+  /**
+   * Detect and dismiss a blocking overlay. Tries TCF API → CMP selectors →
+   * ARIA → positional X → text-match, in priority order. Privacy-preserving:
+   * prefers reject over accept.
+   */
+  async dismissOverlay(): Promise<DismissResult> {
+    if (!this.client.hasPage) return { success: false, detail: "no page (CDP-only mode)" };
+    return dismissOverlay(this.client.page);
+  }
+
+  /**
+   * Backwards-compatible alias — same shape (returns boolean) but now backed
+   * by the overlay detector instead of action-handler's hardcoded selectors.
+   * Existing callers (callback-builder, process-driver, cel-run) keep working.
    */
   async dismissCookieConsent(): Promise<boolean> {
-    if (!this.actionHandler) return false;
-    const result = await this.actionHandler.dismissCookieConsent();
+    if (!this.client.hasPage) return false;
+    const result = await dismissOverlay(this.client.page);
     return result.success;
   }
 

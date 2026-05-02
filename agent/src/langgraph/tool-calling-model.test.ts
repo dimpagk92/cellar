@@ -191,4 +191,46 @@ describe("CelToolCallingChatModel", () => {
       "BTC is 93,100. ETH is 1,780. SOL is 151. Headline: Crypto rallies.",
     );
   });
+
+  it("accepts tool responses that use the tool name as kind", async () => {
+    const model = new CelToolCallingChatModel({
+      llmCompleteWithRole: vi.fn(async () => JSON.stringify({
+        kind: "done_check",
+        args: {
+          draft_answer: "Ruby Martinez — ruby.martinez@company.com",
+        },
+        thought: "Validate before answering",
+      })),
+    });
+
+    const doneCheck = tool(async () => "{}", {
+      name: "done_check",
+      description: "Validate the draft answer against the goal contract.",
+      schema: z.object({
+        draft_answer: z.string(),
+      }),
+    });
+
+    const message = await model.bindTools([doneCheck]).invoke([
+      {
+        role: "user",
+        content: "Find employee EMP-0742 and return the name and email.",
+      },
+      new ToolMessage({
+        name: "see",
+        tool_call_id: "call-0",
+        content: "{\"context\":\"fresh observation\"}",
+      }),
+    ]);
+
+    expect(message).toBeInstanceOf(AIMessage);
+    const aiMessage = message as AIMessage;
+    expect(aiMessage.tool_calls).toHaveLength(1);
+    expect(aiMessage.tool_calls?.[0]).toMatchObject({
+      name: "done_check",
+      args: {
+        draft_answer: "Ruby Martinez — ruby.martinez@company.com",
+      },
+    });
+  });
 });

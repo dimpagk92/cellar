@@ -309,6 +309,29 @@ export class CdpChannel {
   /** Type text via CDP Input domain. */
   async insertText(text: string): Promise<void> {
     await this.send("Input.insertText", { text });
+    await this.evaluate(`
+      (() => {
+        const el = document.activeElement;
+        if (!el || el === document.body || el === document.documentElement) return false;
+        const dispatchInput = () => {
+          try {
+            if (typeof InputEvent === "function") {
+              el.dispatchEvent(new InputEvent("input", {
+                bubbles: true,
+                composed: true,
+                inputType: "insertText",
+                data: ${JSON.stringify(text)},
+              }));
+              return;
+            }
+          } catch (_) {}
+          el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        };
+        dispatchInput();
+        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        return true;
+      })()
+    `).catch(() => undefined);
   }
 
   /** Press a key via CDP. */

@@ -130,3 +130,67 @@ export function errorResult(message: string) {
     isError: true as const,
   };
 }
+
+// Whether we've already triggered the macOS permission prompt in this process.
+// macOS shows a system notification on AXIsProcessTrustedWithOptions(prompt=true)
+// for processes not yet in the Privacy list. Once shown, the user is in control
+// — re-prompting on every tool call would be noise. Reset only on process restart.
+let permissionPromptShown = false;
+
+/**
+ * Pre-flight: ensure the host process has macOS Accessibility permission.
+ * Returns null when granted (or on non-macOS where AX permission isn't a thing).
+ * Returns a structured error response when denied — caller should `return` it
+ * directly from the tool handler so the user sees a clear remediation path
+ * instead of an empty context or a deep AX traversal error.
+ *
+ * On the first denied call this also triggers the macOS system permission
+ * prompt via AXIsProcessTrustedWithOptions, so the user gets an OS-native
+ * notification (with one-click jump to System Settings) instead of just
+ * reading the deeplink in the error message.
+ */
+export function axPermissionGuard(cel: Cel) {
+  if (cel.isAxPermissionGranted) return null;
+
+  // Trigger the system prompt once per process — macOS itself rate-limits the
+  // notification UI, but we also avoid calling on every retry to keep the
+  // user-visible behavior predictable (one clear notification, not a blizzard).
+  if (!permissionPromptShown) {
+    try {
+      cel.requestAxPermission();
+    } catch {
+      // requestAxPermission is best-effort — if the native binding isn't
+      // available the deeplink in the error message is the fallback.
+    }
+    permissionPromptShown = true;
+  }
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: [
+          "macOS Accessibility permission required.",
+          "",
+          "A system notification has been requested — click it to jump straight",
+          "to Privacy & Security with the host process pre-selected.",
+          "",
+          "Cellar reads the screen via the macOS Accessibility API, which requires",
+          "explicit user grant for the host process running this MCP server",
+          "(typically Terminal.app, iTerm.app, or your IDE — Cursor, Claude Code, etc.).",
+          "",
+          "Steps:",
+          "  1. Click the system notification (or open System Settings →",
+          "     Privacy & Security → Accessibility)",
+          "  2. Toggle the host process ON",
+          "  3. Restart the host process — macOS does not pick up permission",
+          "     changes mid-process",
+          "",
+          "Manual deeplink fallback:",
+          '  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"',
+        ].join("\n"),
+      },
+    ],
+    isError: true as const,
+  };
+}

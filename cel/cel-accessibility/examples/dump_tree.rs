@@ -5,9 +5,6 @@
 //! Requires Accessibility permission in System Settings.
 //! If denied, prints instructions.
 
-
-#![cfg(target_os = "macos")]
-
 fn main() {
     let tree = cel_accessibility::create_tree();
 

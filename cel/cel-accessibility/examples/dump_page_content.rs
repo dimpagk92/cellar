@@ -1,8 +1,5 @@
 //! Dump the web page content area — skip Chrome UI, focus on AXWebArea children.
 
-
-#![cfg(target_os = "macos")]
-
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::string::{CFString, CFStringRef};

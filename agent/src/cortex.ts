@@ -33,7 +33,6 @@ import type {
 } from "./types.js";
 import { diffContexts, isDiffSignificant, type ContextDiff } from "./context-differ.js";
 import { isSkeletonScreen, skeletonWaitMs, hasActiveSpinner } from "./skeleton-detector.js";
-import { findDismissableDialog, type DismissableDialog } from "./dialog-dismisser.js";
 import { contextFingerprint } from "./goal-runner/helpers.js";
 import { enrichMentalModel } from "./cortex-insight.js";
 
@@ -259,9 +258,6 @@ export class Cortex {
   // Consecutive action failures (set externally via reportActionFailure)
   private consecutiveActionFailures = 0;
 
-  /** Flagged dismissable dialog — consumed by perception session on read. */
-  private _pendingDismissal: DismissableDialog | null = null;
-
   /** Whether an active spinner/loading indicator was detected last tick. */
   private _spinnerDetected = false;
 
@@ -389,13 +385,6 @@ export class Cortex {
   /** Report a successful action (resets failure counter). */
   reportActionSuccess(): void {
     this.consecutiveActionFailures = 0;
-  }
-
-  /** Get and clear the pending dismissable dialog, if any. */
-  consumePendingDismissal(): DismissableDialog | null {
-    const d = this._pendingDismissal;
-    this._pendingDismissal = null;
-    return d;
   }
 
   /** Whether an active spinner is currently detected. */
@@ -622,13 +611,10 @@ export class Cortex {
     // 8b. Spinner detection
     this._spinnerDetected = hasActiveSpinner(this.model.currentContext);
 
-    // 8c. Dismissable dialog detection (observe only — agent decides to act)
-    if (newContext) {
-      const dismissable = findDismissableDialog(newContext);
-      if (dismissable && !this._pendingDismissal) {
-        this._pendingDismissal = dismissable;
-      }
-    }
+    // Note: dismissable-dialog detection was removed — overlay/cookie banner
+    // handling lives in the browser adapter (overlay-detector.ts) where the
+    // DOM/CSS/CMP signals actually exist. The cortex still reports generic
+    // "dialog" anomalies via anomaly.rs / detectAnomaliesFromContext.
 
     // 9. Confidence: the tick completed successfully — the model is valid.
     // The tick ran, we checked events, we got context if needed.

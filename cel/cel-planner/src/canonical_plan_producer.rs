@@ -82,7 +82,10 @@ pub trait PlanProducer: Send + Sync {
         _perception: &ScreenContext,
         _screenshot_png: Option<&[u8]>,
     ) -> Result<DoneVerdict, String> {
-        Ok(DoneVerdict { verified: true, reason: String::new() })
+        Ok(DoneVerdict {
+            verified: true,
+            reason: String::new(),
+        })
     }
 }
 

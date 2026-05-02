@@ -20,6 +20,12 @@ pub struct ContextWatchdog {
     initialized: bool,
 }
 
+impl Default for ContextWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContextWatchdog {
     pub fn new() -> Self {
         Self {
@@ -37,8 +43,7 @@ impl ContextWatchdog {
     ///
     /// Returns a list of events that occurred since the last tick.
     pub fn tick(&mut self, context: &ScreenContext, network_idle: bool) -> Vec<CelEvent> {
-        let current_ids: HashSet<String> =
-            context.elements.iter().map(|e| e.id.clone()).collect();
+        let current_ids: HashSet<String> = context.elements.iter().map(|e| e.id.clone()).collect();
 
         let current_focused = context
             .elements
@@ -96,7 +101,10 @@ impl ContextWatchdog {
 
     /// Convert AXObserver push events into CelEvents and append them.
     /// Call this after `tick()` to merge push-based notifications with polling-based detections.
-    pub fn merge_ax_events(&self, ax_events: Vec<cel_accessibility::AccessibilityEvent>) -> Vec<CelEvent> {
+    pub fn merge_ax_events(
+        &self,
+        ax_events: Vec<cel_accessibility::AccessibilityEvent>,
+    ) -> Vec<CelEvent> {
         ax_events
             .into_iter()
             .filter_map(|e| match e {
@@ -106,10 +114,16 @@ impl ContextWatchdog {
                         new: element_id,
                     })
                 }
-                cel_accessibility::AccessibilityEvent::ValueChanged { element_id, new_value } => {
-                    Some(CelEvent::ValueChanged { element_id, new_value })
+                cel_accessibility::AccessibilityEvent::ValueChanged {
+                    element_id,
+                    new_value,
+                } => Some(CelEvent::ValueChanged {
+                    element_id,
+                    new_value,
+                }),
+                cel_accessibility::AccessibilityEvent::LayoutChanged => {
+                    Some(CelEvent::LayoutChanged)
                 }
-                cel_accessibility::AccessibilityEvent::LayoutChanged => Some(CelEvent::LayoutChanged),
                 cel_accessibility::AccessibilityEvent::WindowCreated { title } => {
                     Some(CelEvent::WindowCreated { title })
                 }
@@ -126,13 +140,27 @@ impl ContextWatchdog {
                     Some(CelEvent::AppDeactivated { app_name })
                 }
                 cel_accessibility::AccessibilityEvent::WindowMoved => Some(CelEvent::WindowMoved),
-                cel_accessibility::AccessibilityEvent::WindowResized => Some(CelEvent::WindowResized),
-                cel_accessibility::AccessibilityEvent::WindowMinimized => Some(CelEvent::WindowMinimized),
-                cel_accessibility::AccessibilityEvent::WindowRestored => Some(CelEvent::WindowRestored),
-                cel_accessibility::AccessibilityEvent::SelectionChanged => Some(CelEvent::SelectionChanged),
-                cel_accessibility::AccessibilityEvent::RowCountChanged => Some(CelEvent::RowCountChanged),
-                cel_accessibility::AccessibilityEvent::ElementDestroyed => Some(CelEvent::LayoutChanged),
-                cel_accessibility::AccessibilityEvent::MainWindowChanged => Some(CelEvent::LayoutChanged),
+                cel_accessibility::AccessibilityEvent::WindowResized => {
+                    Some(CelEvent::WindowResized)
+                }
+                cel_accessibility::AccessibilityEvent::WindowMinimized => {
+                    Some(CelEvent::WindowMinimized)
+                }
+                cel_accessibility::AccessibilityEvent::WindowRestored => {
+                    Some(CelEvent::WindowRestored)
+                }
+                cel_accessibility::AccessibilityEvent::SelectionChanged => {
+                    Some(CelEvent::SelectionChanged)
+                }
+                cel_accessibility::AccessibilityEvent::RowCountChanged => {
+                    Some(CelEvent::RowCountChanged)
+                }
+                cel_accessibility::AccessibilityEvent::ElementDestroyed => {
+                    Some(CelEvent::LayoutChanged)
+                }
+                cel_accessibility::AccessibilityEvent::MainWindowChanged => {
+                    Some(CelEvent::LayoutChanged)
+                }
                 cel_accessibility::AccessibilityEvent::AppHidden { app_name } => {
                     Some(CelEvent::AppDeactivated { app_name })
                 }
@@ -271,7 +299,9 @@ mod tests {
 
         let ctx2 = make_context(vec![make_element("a", false), make_element("b", true)]);
         let events = wd.tick(&ctx2, true);
-        assert!(events.iter().any(|e| matches!(e, CelEvent::FocusChanged { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CelEvent::FocusChanged { .. })));
     }
 
     #[test]

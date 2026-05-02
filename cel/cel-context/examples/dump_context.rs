@@ -48,7 +48,10 @@ fn main() {
     println!("=== Context References Test ===");
     if let Some(first) = ctx.elements.first() {
         let reference = first.to_reference(1920, 1080);
-        println!("Created reference for element '{}': {:?}", first.id, reference);
+        println!(
+            "Created reference for element '{}': {:?}",
+            first.id, reference
+        );
 
         let resolved = cel_context::resolve_reference(&ctx, &reference);
         match resolved {

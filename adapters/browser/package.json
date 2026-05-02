@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --exclude '**/integration.test.ts' --exclude '**/node_modules/**'",
+    "test:integration": "vitest run src/__tests__/integration.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

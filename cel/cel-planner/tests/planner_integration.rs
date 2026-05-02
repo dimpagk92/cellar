@@ -3,11 +3,12 @@
 //! These tests verify the full parse→plan→step pipeline without network calls.
 //! The mock LLM returns canned JSON responses, exercising the real prompt
 //! builder, JSON parser, and step validator.
+#![allow(deprecated)]
 
-use cel_llm::LlmClient;
-use cel_planner::{GoalConfig, Planner, PlannerBackend, PlannerError, PlannerEvent, PlannedAction};
-use cel_context::ScreenContext;
 use async_trait::async_trait;
+use cel_context::ScreenContext;
+use cel_llm::LlmClient;
+use cel_planner::{GoalConfig, PlannedAction, Planner, PlannerBackend, PlannerError, PlannerEvent};
 
 // ─── Minimal PlannerBackend for tests ────────────────────────────────────────
 
@@ -81,7 +82,8 @@ async fn test_planner_mock_done_immediately() {
     let result = planner.run(&backend).await.unwrap();
     assert!(
         matches!(result, PlannerEvent::GoalAchieved { .. }),
-        "expected GoalAchieved, got {:?}", result
+        "expected GoalAchieved, got {:?}",
+        result
     );
 }
 

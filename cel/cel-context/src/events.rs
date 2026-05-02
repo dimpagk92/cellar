@@ -25,9 +25,7 @@ pub enum CelEvent {
         new_value: Option<String>,
     },
     /// A new window was created (from AXObserver).
-    WindowCreated {
-        title: Option<String>,
-    },
+    WindowCreated { title: Option<String> },
     /// A menu was opened (from AXObserver).
     MenuOpened,
     /// A menu was closed (from AXObserver).
@@ -37,17 +35,11 @@ pub enum CelEvent {
     /// UI layout changed (from AXObserver).
     LayoutChanged,
     /// An element's title changed (from AXObserver).
-    TitleChanged {
-        new_title: Option<String>,
-    },
+    TitleChanged { new_title: Option<String> },
     /// An application was activated (brought to foreground).
-    AppActivated {
-        app_name: Option<String>,
-    },
+    AppActivated { app_name: Option<String> },
     /// An application was deactivated (sent to background).
-    AppDeactivated {
-        app_name: Option<String>,
-    },
+    AppDeactivated { app_name: Option<String> },
     /// A window was moved.
     WindowMoved,
     /// A window was resized.

@@ -21,7 +21,11 @@ pub enum CdpError {
 
 /// Minimal CDP client — connects via WebSocket and sends commands.
 pub struct CdpClient {
-    ws: Mutex<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+    ws: Mutex<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
     next_id: AtomicU64,
 }
 
@@ -72,7 +76,10 @@ impl CdpClient {
                             if let Some(error) = response.get("error") {
                                 return Err(CdpError::CommandFailed(error.to_string()));
                             }
-                            return Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                            return Ok(response
+                                .get("result")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null));
                         }
                         // Not our response — it's an event, skip it
                     }
@@ -94,10 +101,7 @@ impl CdpClient {
     /// Get the outer HTML of a node.
     pub async fn get_outer_html(&self, node_id: i64) -> Result<String, CdpError> {
         let result = self
-            .send_command(
-                "DOM.getOuterHTML",
-                serde_json::json!({ "nodeId": node_id }),
-            )
+            .send_command("DOM.getOuterHTML", serde_json::json!({ "nodeId": node_id }))
             .await?;
         result
             .get("outerHTML")
@@ -133,17 +137,13 @@ impl CdpClient {
 
     /// Get the page title.
     pub async fn get_title(&self) -> Result<String, CdpError> {
-        let result = self
-            .evaluate("document.title")
-            .await?;
+        let result = self.evaluate("document.title").await?;
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
     /// Get the page URL.
     pub async fn get_url(&self) -> Result<String, CdpError> {
-        let result = self
-            .evaluate("window.location.href")
-            .await?;
+        let result = self.evaluate("window.location.href").await?;
         Ok(result.as_str().unwrap_or("").to_string())
     }
 
@@ -173,11 +173,7 @@ impl CdpClient {
     }
 
     /// Dispatch a key event via CDP Input domain.
-    pub async fn dispatch_key_event(
-        &self,
-        event_type: &str,
-        key: &str,
-    ) -> Result<(), CdpError> {
+    pub async fn dispatch_key_event(&self, event_type: &str, key: &str) -> Result<(), CdpError> {
         self.send_command(
             "Input.dispatchKeyEvent",
             serde_json::json!({
@@ -250,7 +246,10 @@ impl CdpClient {
         let result = self
             .send_command("Network.getCookies", serde_json::json!({}))
             .await?;
-        Ok(result.get("cookies").cloned().unwrap_or(serde_json::Value::Array(vec![])))
+        Ok(result
+            .get("cookies")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])))
     }
 
     /// Get a specific cookie by name. Returns the cookie value or None.
@@ -259,7 +258,10 @@ impl CdpClient {
         if let Some(arr) = cookies.as_array() {
             for cookie in arr {
                 if cookie.get("name").and_then(|n| n.as_str()) == Some(name) {
-                    return Ok(cookie.get("value").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                    return Ok(cookie
+                        .get("value")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()));
                 }
             }
         }
@@ -268,7 +270,10 @@ impl CdpClient {
 
     /// Read localStorage for a given key. Returns the value or null.
     pub async fn get_local_storage(&self, key: &str) -> Result<Option<String>, CdpError> {
-        let expr = format!("localStorage.getItem({})", serde_json::to_string(key).unwrap_or_else(|_| format!("\"{}\"", key)));
+        let expr = format!(
+            "localStorage.getItem({})",
+            serde_json::to_string(key).unwrap_or_else(|_| format!("\"{}\"", key))
+        );
         let result = self.evaluate(&expr).await?;
         match result {
             serde_json::Value::String(s) => Ok(Some(s)),
@@ -279,7 +284,10 @@ impl CdpClient {
 
     /// Read sessionStorage for a given key.
     pub async fn get_session_storage(&self, key: &str) -> Result<Option<String>, CdpError> {
-        let expr = format!("sessionStorage.getItem({})", serde_json::to_string(key).unwrap_or_else(|_| format!("\"{}\"", key)));
+        let expr = format!(
+            "sessionStorage.getItem({})",
+            serde_json::to_string(key).unwrap_or_else(|_| format!("\"{}\"", key))
+        );
         let result = self.evaluate(&expr).await?;
         match result {
             serde_json::Value::String(s) => Ok(Some(s)),
@@ -292,8 +300,12 @@ impl CdpClient {
     /// Returns structured HttpEvents with real HTTP data (method, URL, status, timing).
     /// This is more reliable than Network.enable events since it works without
     /// maintaining a persistent event listener.
-    pub async fn get_network_requests(&self, limit: usize) -> Result<Vec<cel_network::HttpEvent>, CdpError> {
-        let js = format!(r#"
+    pub async fn get_network_requests(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<cel_network::HttpEvent>, CdpError> {
+        let js = format!(
+            r#"
             (() => {{
                 const entries = performance.getEntriesByType('resource')
                     .filter(e => e.initiatorType === 'fetch' || e.initiatorType === 'xmlhttprequest')
@@ -310,18 +322,22 @@ impl CdpClient {
                     }}));
                 return entries;
             }})()
-        "#, limit);
+        "#,
+            limit
+        );
 
         let result = self.evaluate(&js).await?;
-        let events: Vec<cel_network::HttpEvent> = serde_json::from_value(result)
-            .unwrap_or_default();
+        let events: Vec<cel_network::HttpEvent> =
+            serde_json::from_value(result).unwrap_or_default();
         Ok(events)
     }
 
     /// Navigate to a URL.
     pub async fn navigate(&self, url: &str) -> Result<(), CdpError> {
-        self.send_command("Page.enable", serde_json::json!({})).await?;
-        self.send_command("Page.navigate", serde_json::json!({ "url": url })).await?;
+        self.send_command("Page.enable", serde_json::json!({}))
+            .await?;
+        self.send_command("Page.navigate", serde_json::json!({ "url": url }))
+            .await?;
         Ok(())
     }
 

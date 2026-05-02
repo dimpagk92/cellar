@@ -108,6 +108,7 @@ function sanitizeContextForRust(context: ScreenContext): ScreenContext {
 export interface CelNative {
   celVersion(): string;
   axPermissionGranted(): boolean;
+  axRequestPermission(): boolean;
   getContext(): string;
   captureScreen(): Buffer;
   listMonitors(): string;
@@ -468,6 +469,24 @@ export class Cel implements
    */
   get isAxPermissionGranted(): boolean {
     return this.native?.axPermissionGranted() ?? false;
+  }
+
+  /**
+   * Trigger the macOS Accessibility permission prompt for the host process.
+   *
+   * Returns the current trust state. Side effect: shows a system notification
+   * for processes not yet in the Privacy & Security list — clicking it opens
+   * System Settings with the host process pre-selected so the user only has
+   * to flip the toggle.
+   *
+   * macOS does not pick up permission changes mid-process; the host (Cursor,
+   * Claude Code, Terminal.app, etc.) must restart after the user grants for
+   * it to take effect.
+   *
+   * No-op on non-macOS platforms (returns true).
+   */
+  requestAxPermission(): boolean {
+    return this.native?.axRequestPermission() ?? false;
   }
 
   /** Get CEL version. */

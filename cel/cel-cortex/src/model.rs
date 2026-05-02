@@ -308,26 +308,6 @@ pub struct Anomaly {
     pub element_ids: Vec<String>,
 }
 
-// ─── Dialog types ───────────────────────────────────────────────────────────
-
-/// Type of dismissable dialog.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DialogType {
-    CookieConsent,
-    NotificationPrompt,
-    GenericDismiss,
-}
-
-/// A detected dismissable dialog (observe-only — cortex never auto-clicks).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DismissableDialog {
-    pub element_id: String,
-    pub label: String,
-    pub dialog_type: DialogType,
-    pub action: String,
-}
-
 impl MentalModel {
     pub fn refresh_derived(
         &mut self,

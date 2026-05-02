@@ -17,7 +17,6 @@
 //! │  ├─ ContextWatchdog → CelEvent[]            │
 //! │  ├─ Differ → PerceptionDiff                 │
 //! │  ├─ Skeleton/Spinner detection              │
-//! │  ├─ Dialog detection (observe-only)         │
 //! │  ├─ Anomaly detection (dedup + TTL)         │
 //! │  └─ Element stability classification        │
 //! │                                             │
@@ -38,7 +37,6 @@
 pub mod adapter;
 pub mod anomaly;
 pub mod cortex;
-pub mod dialog;
 pub mod differ;
 pub mod manager;
 pub mod memory;
@@ -55,7 +53,7 @@ pub use cortex::{Cortex, CortexError, TargetValidation};
 pub use manager::CortexManager;
 pub use memory::{Memory, MemoryEntry, MemoryError, MemoryLenses};
 pub use model::{
-    Anomaly, AnomalyType, DialogType, DiffSummary, DismissableDialog, ElementStability, ErrorState,
+    Anomaly, AnomalyType, DiffSummary, ElementStability, ErrorState,
     FocusedElement, FreshnessAssessment, FreshnessState, LoadingState, MentalModel, PerceptionDiff,
     SemanticInsight, SourceSummary, StalenessCause, TaskPhase, TemporalFlags,
 };

@@ -77,3 +77,28 @@ pub fn ax_permission_granted() -> bool {
         true
     }
 }
+
+/// Trigger the macOS Accessibility permission prompt for the host process.
+///
+/// Returns the trust state. Side effect: shows the system notification for
+/// processes not yet in the Privacy & Security list. Clicking the notification
+/// opens System Settings with the host process pre-selected, so the user only
+/// has to flip the toggle.
+///
+/// macOS does not pick up permission changes mid-process — the host process
+/// (Cursor, Claude Code, Terminal.app, etc.) must be restarted after the user
+/// grants permission for it to take effect.
+///
+/// Safe to call on every denied tool invocation; macOS itself rate-limits the
+/// notification UI so we don't spam the user.
+#[napi]
+pub fn ax_request_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        cel_accessibility::ax_request_process_trust()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}

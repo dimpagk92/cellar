@@ -139,6 +139,7 @@ extern "C" {
         names: *mut CFTypeRef,
     ) -> AXError;
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
     fn CFRelease(cf: *const c_void);
     #[allow(dead_code)]
     fn CFRetain(cf: *const c_void) -> *const c_void;
@@ -315,6 +316,37 @@ unsafe impl Sync for ObserverHandle {}
 /// guard before doing real AX work.
 pub fn is_process_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Check trust state AND request the system prompt if denied.
+///
+/// Calls `AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt: true`,
+/// which:
+///  - Returns the current trust state (same as `is_process_trusted`)
+///  - As a side effect, shows the macOS Privacy & Security notification for
+///    processes not yet in the Accessibility list — the user can click it to
+///    jump straight into Settings with the host process pre-selected
+///
+/// Notes:
+///  - Once a process is in the Accessibility list (toggle on or off), macOS
+///    will NOT re-prompt on subsequent calls — toggling is the user's job
+///  - macOS does not pick up permission changes mid-process; the host needs
+///    to restart after the user grants permission
+///  - Safe to call on every denied tool invocation; macOS rate-limits the
+///    notification UI itself
+pub fn request_process_trust() -> bool {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+
+    let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let pairs: Vec<(CFString, CFType)> =
+        vec![(key, value.as_CFType())];
+    let options = CFDictionary::from_CFType_pairs(&pairs);
+
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as *const c_void) }
 }
 
 impl MacAccessibility {

@@ -93,9 +93,15 @@ pub struct ContextDeclaration {
     pub truth_surface: String,
 }
 
-fn default_refresh_ms() -> u64 { 200 }
-fn default_confidence() -> f64 { 0.95 }
-fn default_truth_surface() -> String { "native_api".into() }
+fn default_refresh_ms() -> u64 {
+    200
+}
+fn default_confidence() -> f64 {
+    0.95
+}
+fn default_truth_surface() -> String {
+    "native_api".into()
+}
 
 /// Declares activation/bootstrap expectations for an adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +117,9 @@ pub struct LifecycleDeclaration {
     pub background_refresh: bool,
 }
 
-fn default_requires_frontmost() -> bool { true }
+fn default_requires_frontmost() -> bool {
+    true
+}
 
 impl Default for LifecycleDeclaration {
     fn default() -> Self {
@@ -147,7 +155,9 @@ impl Default for VerificationDeclaration {
     }
 }
 
-fn default_verification_surface() -> String { "ui".into() }
+fn default_verification_surface() -> String {
+    "ui".into()
+}
 
 /// Declares an action the adapter can execute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,11 +193,19 @@ pub struct ActionResult {
 
 impl ActionResult {
     pub fn ok() -> Self {
-        Self { success: true, error: None, data: None }
+        Self {
+            success: true,
+            error: None,
+            data: None,
+        }
     }
 
     pub fn fail(reason: impl Into<String>) -> Self {
-        Self { success: false, error: Some(reason.into()), data: None }
+        Self {
+            success: false,
+            error: Some(reason.into()),
+            data: None,
+        }
     }
 }
 
@@ -292,7 +310,9 @@ impl RegisteredAdapter {
 
     /// Check if this adapter's app patterns match the given app name.
     pub fn matches_app(&self, app_name: &str) -> bool {
-        self.compiled_patterns.iter().any(|re| re.is_match(app_name))
+        self.compiled_patterns
+            .iter()
+            .any(|re| re.is_match(app_name))
     }
 
     /// Check if enough ticks have passed to read context again.
@@ -319,7 +339,9 @@ pub fn load_manifest(path: &std::path::Path) -> Result<AdapterManifest, AdapterE
 /// Scans `base_dir/*/adapter.json`.
 pub fn discover_adapters(base_dir: &std::path::Path) -> Vec<(std::path::PathBuf, AdapterManifest)> {
     let mut found = Vec::new();
-    let Ok(entries) = std::fs::read_dir(base_dir) else { return found };
+    let Ok(entries) = std::fs::read_dir(base_dir) else {
+        return found;
+    };
 
     for entry in entries.flatten() {
         let manifest_path = entry.path().join("adapter.json");
@@ -386,23 +408,40 @@ mod tests {
 
         #[async_trait]
         impl AdapterDriver for MockDriver {
-            fn manifest(&self) -> &AdapterManifest { &self.manifest }
-            async fn activate(&mut self) -> Result<(), AdapterError> { Ok(()) }
-            async fn deactivate(&mut self) -> Result<(), AdapterError> { Ok(()) }
-            async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError> { Ok(vec![]) }
-            async fn execute(&self, _: &str, _: serde_json::Value) -> Result<ActionResult, AdapterError> {
+            fn manifest(&self) -> &AdapterManifest {
+                &self.manifest
+            }
+            async fn activate(&mut self) -> Result<(), AdapterError> {
+                Ok(())
+            }
+            async fn deactivate(&mut self) -> Result<(), AdapterError> {
+                Ok(())
+            }
+            async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError> {
+                Ok(vec![])
+            }
+            async fn execute(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<ActionResult, AdapterError> {
                 Ok(ActionResult::ok())
             }
-            async fn probe(&self) -> bool { true }
+            async fn probe(&self) -> bool {
+                true
+            }
         }
 
-        let manifest: AdapterManifest = serde_json::from_str(r#"{
+        let manifest: AdapterManifest = serde_json::from_str(
+            r#"{
             "name": "excel",
             "display_name": "Excel",
             "app_patterns": ["(?i)microsoft excel", "(?i)libreoffice calc"],
             "platform": ["macos"],
             "context": { "element_types": ["cell"] }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let registered = RegisteredAdapter::new(Box::new(MockDriver { manifest }));
         assert!(registered.matches_app("Microsoft Excel"));

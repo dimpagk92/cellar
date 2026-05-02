@@ -16,6 +16,7 @@ import {
   elementMatches,
   textResult,
   errorResult,
+  axPermissionGuard,
 } from "./shared.js";
 import { persistObservation, readObservation } from "./observations.js";
 import { compressContext, hasActiveSpinner } from "@cellar/agent";
@@ -178,6 +179,8 @@ function toRustEventType(e: string): string {
 }
 
 export async function handleCelSee(cel: Cel, args: Input) {
+  const denied = axPermissionGuard(cel);
+  if (denied) return denied;
   try {
     switch (args.mode) {
       case "context": {

@@ -4,7 +4,10 @@
 //! and cel_audio::StubAudioCapture to verify the engine lifecycle without hardware.
 
 use cel_accessibility::StubAccessibility;
-use cel_audio::{AudioCapture, AudioChunk, AudioConfig, AudioError, AudioSource, StubAudioCapture, TranscriptChunk};
+use cel_audio::{
+    AudioCapture, AudioChunk, AudioConfig, AudioError, AudioSource, StubAudioCapture,
+    TranscriptChunk,
+};
 use cel_cortex::Cortex;
 
 // ─── MockAudioCapture ────────────────────────────────────────────────────────
@@ -18,7 +21,10 @@ struct MockAudioCapture {
 
 impl MockAudioCapture {
     fn new() -> Self {
-        Self { started: false, pending_transcripts: Vec::new() }
+        Self {
+            started: false,
+            pending_transcripts: Vec::new(),
+        }
     }
 
     fn push_transcript(&mut self, text: &str, start_ms: u64, end_ms: u64) {
@@ -84,7 +90,10 @@ fn test_cortex_with_tick_ms_builder() {
 #[tokio::test]
 async fn test_cortex_boot_sets_running() {
     let (mut cortex, merger) = Cortex::isolated("boot-test");
-    cortex.boot(merger, Box::new(StubAccessibility)).await.unwrap();
+    cortex
+        .boot(merger, Box::new(StubAccessibility))
+        .await
+        .unwrap();
     assert!(cortex.is_running());
     cortex.shutdown();
 }
@@ -92,7 +101,10 @@ async fn test_cortex_boot_sets_running() {
 #[tokio::test]
 async fn test_cortex_shutdown_stops_running() {
     let (mut cortex, merger) = Cortex::isolated("shutdown-test");
-    cortex.boot(merger, Box::new(StubAccessibility)).await.unwrap();
+    cortex
+        .boot(merger, Box::new(StubAccessibility))
+        .await
+        .unwrap();
     assert!(cortex.is_running());
     cortex.shutdown();
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -103,7 +115,10 @@ async fn test_cortex_shutdown_stops_running() {
 async fn test_cortex_boot_twice_fails() {
     let (mut cortex, merger) = Cortex::isolated("double-boot");
     let (_, merger2) = Cortex::isolated("dummy");
-    cortex.boot(merger, Box::new(StubAccessibility)).await.unwrap();
+    cortex
+        .boot(merger, Box::new(StubAccessibility))
+        .await
+        .unwrap();
     let result = cortex.boot(merger2, Box::new(StubAccessibility)).await;
     assert!(result.is_err(), "second boot should return AlreadyRunning");
     cortex.shutdown();
@@ -112,7 +127,10 @@ async fn test_cortex_boot_twice_fails() {
 #[tokio::test]
 async fn test_cortex_mental_model_populated_after_boot() {
     let (mut cortex, merger) = Cortex::isolated("model-test");
-    cortex.boot(merger, Box::new(StubAccessibility)).await.unwrap();
+    cortex
+        .boot(merger, Box::new(StubAccessibility))
+        .await
+        .unwrap();
 
     let model_arc = cortex.model();
     let snapshot = model_arc.read().await.current_context.clone();
@@ -127,11 +145,17 @@ async fn test_cortex_mental_model_populated_after_boot() {
 #[tokio::test]
 async fn test_cortex_boots_with_stub_audio() {
     let capture = Box::new(StubAudioCapture::new());
-    let config = AudioConfig { transcribe: false, ..Default::default() };
+    let config = AudioConfig {
+        transcribe: false,
+        ..Default::default()
+    };
 
     let (cortex, merger) = Cortex::isolated("stub-audio");
     let mut cortex = cortex.with_audio(capture, config);
-    cortex.boot(merger, Box::new(StubAccessibility)).await.unwrap();
+    cortex
+        .boot(merger, Box::new(StubAccessibility))
+        .await
+        .unwrap();
     assert!(cortex.is_running());
     cortex.shutdown();
 }
@@ -140,11 +164,17 @@ async fn test_cortex_boots_with_stub_audio() {
 async fn test_cortex_model_has_transcript_field_after_boot() {
     // Boot with stub audio; transcripts field should be empty but present
     let capture = Box::new(StubAudioCapture::new());
-    let config = AudioConfig { transcribe: false, ..Default::default() };
+    let config = AudioConfig {
+        transcribe: false,
+        ..Default::default()
+    };
 
     let (cortex, merger) = Cortex::isolated("transcript-field");
     let mut cortex = cortex.with_audio(capture, config);
-    cortex.boot(merger, Box::new(StubAccessibility)).await.unwrap();
+    cortex
+        .boot(merger, Box::new(StubAccessibility))
+        .await
+        .unwrap();
 
     let model_arc = cortex.model();
     let snapshot = model_arc.read().await.current_context.clone();

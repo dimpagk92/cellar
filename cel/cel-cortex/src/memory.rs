@@ -117,10 +117,7 @@ impl Memory {
     /// Same as `open` but with an explicit base directory. Used in tests
     /// so each test can have its own isolated memory dir without racing
     /// on the process-wide `HOME` env var.
-    pub fn open_in(
-        dir: PathBuf,
-        cortex_id: impl Into<String>,
-    ) -> Result<Self, MemoryError> {
+    pub fn open_in(dir: PathBuf, cortex_id: impl Into<String>) -> Result<Self, MemoryError> {
         let machine_id = stable_machine_id();
         if !dir.exists() {
             fs::create_dir_all(&dir)?;
@@ -232,11 +229,7 @@ impl Memory {
     /// is sorted newest-first and capped at `per_lens`. The same entry
     /// may appear in multiple lenses — that's intentional; the prompt
     /// renderer deduplicates by line-id if it wants to.
-    pub fn lens(
-        &self,
-        goal_type: &str,
-        per_lens: usize,
-    ) -> Result<MemoryLenses, MemoryError> {
+    pub fn lens(&self, goal_type: &str, per_lens: usize) -> Result<MemoryLenses, MemoryError> {
         let mut all = self.all()?;
         all.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms));
 
@@ -256,7 +249,9 @@ impl Memory {
 
         let similar_goal: Vec<_> = all
             .iter()
-            .filter(|e| e.goal_type.eq_ignore_ascii_case(goal_type) && e.cortex_id != self.cortex_id)
+            .filter(|e| {
+                e.goal_type.eq_ignore_ascii_case(goal_type) && e.cortex_id != self.cortex_id
+            })
             .take(per_lens)
             .cloned()
             .collect();
@@ -347,8 +342,8 @@ mod tests {
 
     fn tmp_dir(name: &str) -> PathBuf {
         let seq = TMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("cel-memory-test-{}-{}-{}", name, now_ms(), seq));
+        let dir =
+            std::env::temp_dir().join(format!("cel-memory-test-{}-{}-{}", name, now_ms(), seq));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -466,7 +461,10 @@ mod tests {
         entry.winning_cdp_eval = Some("x".repeat(2000));
         mem.append(entry).unwrap();
         let all = mem.all().unwrap();
-        assert_eq!(all[0].winning_cdp_eval.as_ref().unwrap().chars().count(), 512);
+        assert_eq!(
+            all[0].winning_cdp_eval.as_ref().unwrap().chars().count(),
+            512
+        );
         cleanup(&dir);
     }
 
@@ -492,7 +490,8 @@ mod tests {
         let dir = tmp_dir("trim");
         let mem = Memory::open_in(dir.clone(), "c1").unwrap();
         for i in 0..(MAX_RETAINED_ENTRIES + 10) {
-            mem.append(sample("c1", &format!("g{i}"), "navigation")).unwrap();
+            mem.append(sample("c1", &format!("g{i}"), "navigation"))
+                .unwrap();
         }
         let all = mem.all().unwrap();
         assert!(

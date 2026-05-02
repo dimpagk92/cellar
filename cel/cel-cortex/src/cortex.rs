@@ -82,7 +82,12 @@ fn to_perception_diff(diff: &ContextDiff) -> PerceptionDiff {
             .changed
             .iter()
             .take(10)
-            .map(|c| c.element.label.clone().unwrap_or_else(|| c.element.id.clone()))
+            .map(|c| {
+                c.element
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| c.element.id.clone())
+            })
             .collect(),
     }
 }
@@ -200,7 +205,6 @@ pub struct Cortex {
     // These atomics mirror the tick loop's progress so callers can poll
     // liveness without taking the tokio RwLock. Writers = tick loop; readers
     // = anyone (napi, tests, monitoring).
-
     /// Total successful ticks since boot. Mirrors `MentalModel.cycle_count`
     /// but is sync-readable.
     tick_count: Arc<AtomicU64>,
@@ -351,7 +355,10 @@ impl Cortex {
     /// Register an adapter driver. Must be called BEFORE boot().
     pub fn register_adapter(&mut self, driver: Box<dyn crate::adapter::AdapterDriver>) {
         // Safe: register_adapter is called before boot(), so no contention on the lock.
-        let mut guard = self.adapters.try_write().expect("adapters lock not contested before boot");
+        let mut guard = self
+            .adapters
+            .try_write()
+            .expect("adapters lock not contested before boot");
         guard.push(crate::adapter::RegisteredAdapter::new(driver));
     }
 
@@ -425,7 +432,11 @@ impl Cortex {
         // Start audio capture if configured
         if let Some(ref audio) = self.audio_capture {
             let config = self.audio_config.clone().unwrap_or_default();
-            if let Err(e) = audio.lock().unwrap_or_else(|p| p.into_inner()).start(config) {
+            if let Err(e) = audio
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .start(config)
+            {
                 warn!(cortex_id = %self.id, "Audio capture start failed: {}", e);
             }
         }
@@ -480,10 +491,10 @@ impl Cortex {
             let mut consecutive_action_failures: u32 = 0;
             let mut last_event_ms: Option<u64> = None;
             let mut last_significant_event_ms: Option<u64> = None;
-            let mut element_adapter_index: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let mut element_adapter_index: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
 
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
 
             loop {
                 // Wait for either the next scheduled tick or an out-of-band
@@ -509,7 +520,10 @@ impl Cortex {
 
                 // 1a. Drain audio transcripts into context
                 if let Some(ref audio) = audio_capture {
-                    let transcripts = audio.lock().unwrap_or_else(|p| p.into_inner()).drain_transcripts();
+                    let transcripts = audio
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .drain_transcripts();
                     if !transcripts.is_empty() {
                         new_context.transcripts = transcripts
                             .into_iter()
@@ -521,7 +535,8 @@ impl Cortex {
                                     cel_audio::AudioSource::Microphone => "microphone",
                                     cel_audio::AudioSource::SystemOutput => "system_output",
                                     cel_audio::AudioSource::Both => "both",
-                                }.to_string(),
+                                }
+                                .to_string(),
                                 speaker: t.speaker,
                                 confidence: t.confidence,
                             })
@@ -548,7 +563,8 @@ impl Cortex {
 
                     match (adapter.state, should_be_active) {
                         (
-                            crate::adapter::AdapterState::Inactive | crate::adapter::AdapterState::Error,
+                            crate::adapter::AdapterState::Inactive
+                            | crate::adapter::AdapterState::Error,
                             true,
                         ) => {
                             // Activate (or retry after a transient activation error).
@@ -580,7 +596,9 @@ impl Cortex {
                     }
 
                     // Read context from active adapters
-                    if adapter.state == crate::adapter::AdapterState::Active && adapter.should_read(tick_ms) {
+                    if adapter.state == crate::adapter::AdapterState::Active
+                        && adapter.should_read(tick_ms)
+                    {
                         match adapter.driver.snapshot().await {
                             Ok(elements) => {
                                 let adapter_name = adapter.driver.manifest().name.clone();
@@ -589,7 +607,8 @@ impl Cortex {
                                     // Tag element with adapter source
                                     el.source = cel_context::ContextSource::NativeApi;
                                     el.confidence = confidence;
-                                    element_adapter_index.insert(el.id.clone(), adapter_name.clone());
+                                    element_adapter_index
+                                        .insert(el.id.clone(), adapter_name.clone());
                                     new_context.elements.push(el);
                                 }
                                 active_adapter_names.push(adapter_name);
@@ -699,8 +718,8 @@ impl Cortex {
                     .iter()
                     .filter(|el| el.state.enabled && el.state.visible && !el.actions.is_empty())
                     .count();
-                let vision_needed = actionable_count < SPARSE_CONTEXT_THRESHOLD
-                    || consecutive_action_failures >= 2;
+                let vision_needed =
+                    actionable_count < SPARSE_CONTEXT_THRESHOLD || consecutive_action_failures >= 2;
 
                 // 11. Focused element
                 let focused = new_context
@@ -1033,10 +1052,7 @@ impl Cortex {
     ///
     /// Returns `Ok(())` when it's safe to dispatch native input;
     /// `Err(CortexError::ExecutionFailed)` otherwise.
-    pub fn ensure_browser_focus(
-        &self,
-        action_kind: &str,
-    ) -> Result<(), CortexError> {
+    pub fn ensure_browser_focus(&self, action_kind: &str) -> Result<(), CortexError> {
         // No CDP client = this cortex isn't driving a browser. Native
         // input is the intended primary path; don't gate.
         if self.cdp_client.is_none() {
@@ -1100,11 +1116,7 @@ impl Cortex {
     /// target prefix + browser focus, not on element type, and
     /// legitimate browser-chrome AX ids don't come up in web-content
     /// goals in practice.
-    fn refuse_ax_on_browser_page(
-        &self,
-        target_id: &str,
-        action: &str,
-    ) -> Option<String> {
+    fn refuse_ax_on_browser_page(&self, target_id: &str, action: &str) -> Option<String> {
         if self.cdp_client.is_none() {
             return None;
         }
@@ -1201,6 +1213,12 @@ impl Cortex {
             if let Some(result) = try_cdp_dispatch(client.as_ref(), action).await? {
                 return Ok(result);
             }
+        } else if action_dom_target(action).is_some() {
+            if let Some(client) = cel_cdp::connect_to_focused_app().await {
+                if let Some(result) = try_cdp_dispatch(&client, action).await? {
+                    return Ok(result);
+                }
+            }
         }
 
         // SAFETY GATE: refuse to fall through to native macOS input drivers
@@ -1236,7 +1254,9 @@ impl Cortex {
                             .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                         ActionResult::ok()
                     } else {
-                        ActionResult::fail(format!("Element \"{target_id}\" has no actionable bounds"))
+                        ActionResult::fail(format!(
+                            "Element \"{target_id}\" has no actionable bounds"
+                        ))
                     }
                 } else {
                     ActionResult::fail(format!("Element \"{target_id}\" not found"))
@@ -1250,8 +1270,8 @@ impl Cortex {
                     return Ok(ActionResult::fail(e.to_string()));
                 }
                 self.ensure_target_app_focus();
-                let mut controller = create_controller()
-                    .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
+                let mut controller =
+                    create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 if let Some(target_id) = target_id {
                     if let Some(element) = find_element(context, target_id) {
                         if let Some((x, y)) = bounds_center(element) {
@@ -1264,7 +1284,9 @@ impl Cortex {
                             )));
                         }
                     } else {
-                        return Ok(ActionResult::fail(format!("Element \"{target_id}\" not found")));
+                        return Ok(ActionResult::fail(format!(
+                            "Element \"{target_id}\" not found"
+                        )));
                     }
                 }
                 controller
@@ -1277,8 +1299,8 @@ impl Cortex {
                     return Ok(ActionResult::fail(e.to_string()));
                 }
                 self.ensure_target_app_focus();
-                let mut controller = create_controller()
-                    .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
+                let mut controller =
+                    create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 controller
                     .key_press(key)
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
@@ -1289,8 +1311,8 @@ impl Cortex {
                     return Ok(ActionResult::fail(e.to_string()));
                 }
                 self.ensure_target_app_focus();
-                let mut controller = create_controller()
-                    .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
+                let mut controller =
+                    create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
                 controller
                     .key_combo(&key_refs)
@@ -1305,8 +1327,8 @@ impl Cortex {
                 }
             }
             PlannedAction::Scroll { dx, dy } => {
-                let mut controller = create_controller()
-                    .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
+                let mut controller =
+                    create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 controller
                     .scroll(*dx, *dy)
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
@@ -1317,10 +1339,14 @@ impl Cortex {
                 to_target_id,
             } => {
                 let Some(from_element) = find_element(context, from_target_id) else {
-                    return Ok(ActionResult::fail(format!("Element \"{from_target_id}\" not found")));
+                    return Ok(ActionResult::fail(format!(
+                        "Element \"{from_target_id}\" not found"
+                    )));
                 };
                 let Some(to_element) = find_element(context, to_target_id) else {
-                    return Ok(ActionResult::fail(format!("Element \"{to_target_id}\" not found")));
+                    return Ok(ActionResult::fail(format!(
+                        "Element \"{to_target_id}\" not found"
+                    )));
                 };
                 let Some((from_x, from_y)) = bounds_center(from_element) else {
                     return Ok(ActionResult::fail(format!(
@@ -1332,8 +1358,8 @@ impl Cortex {
                         "Element \"{to_target_id}\" has no actionable bounds"
                     )));
                 };
-                let mut controller = create_controller()
-                    .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
+                let mut controller =
+                    create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 controller
                     .drag(from_x, from_y, to_x, to_y)
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
@@ -1343,7 +1369,12 @@ impl Cortex {
                 tokio::time::sleep(std::time::Duration::from_millis(*ms as u64)).await;
                 ActionResult::ok()
             }
-            PlannedAction::AxAction { target_id, action, label, role_hint } => {
+            PlannedAction::AxAction {
+                target_id,
+                action,
+                label,
+                role_hint,
+            } => {
                 if let Some(reason) = self.refuse_ax_on_browser_page(target_id, action) {
                     return Ok(ActionResult::fail(reason));
                 }
@@ -1359,9 +1390,7 @@ impl Cortex {
                         // stale-hash failure mode without the planner
                         // needing to re-plan.
                         if let Some(lbl) = label.as_deref() {
-                            if let Some(resolved) =
-                                resolve_ax_by_label(lbl, role_hint.as_deref())
-                            {
+                            if let Some(resolved) = resolve_ax_by_label(lbl, role_hint.as_deref()) {
                                 if try_ax_action(&resolved, action).unwrap_or(false) {
                                     tracing::info!(
                                         target_id = %target_id,
@@ -1375,7 +1404,10 @@ impl Cortex {
                         }
                         ActionResult::fail(format!(
                             "AX action \"{action}\" failed on \"{target_id}\"{}",
-                            label.as_ref().map(|l| format!(" (label=\"{l}\" also not found)")).unwrap_or_default()
+                            label
+                                .as_ref()
+                                .map(|l| format!(" (label=\"{l}\" also not found)"))
+                                .unwrap_or_default()
                         ))
                     }
                 }
@@ -1398,17 +1430,24 @@ impl Cortex {
                 to_x,
                 to_y,
             } => {
-                let mut controller = create_controller()
-                    .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
+                let mut controller =
+                    create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 controller
                     .drag(*from_x, *from_y, *to_x, *to_y)
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 ActionResult::ok()
             }
-            PlannedAction::Custom { adapter, action, params } => {
+            PlannedAction::Custom {
+                adapter,
+                action,
+                params,
+            } => {
                 // Route to registered adapter if available
                 let adapters = self.adapters.read().await;
-                if let Some(registered) = adapters.iter().find(|a| a.driver.manifest().name == *adapter) {
+                if let Some(registered) = adapters
+                    .iter()
+                    .find(|a| a.driver.manifest().name == *adapter)
+                {
                     if registered.state == crate::adapter::AdapterState::Active {
                         let action_decl = registered.driver.manifest().actions.get(action).cloned();
                         match registered.driver.execute(action, params.clone()).await {
@@ -1419,7 +1458,11 @@ impl Cortex {
                                         .map(|decl| decl.requires_verification)
                                         .unwrap_or(false)
                                 {
-                                    match registered.driver.verify_action(action, params, &result).await {
+                                    match registered
+                                        .driver
+                                        .verify_action(action, params, &result)
+                                        .await
+                                    {
                                         Ok(Some(verified)) => verified,
                                         Ok(None) => result,
                                         Err(e) => ActionResult::fail(format!(
@@ -1430,10 +1473,15 @@ impl Cortex {
                                     result
                                 }
                             }
-                            Err(e) => ActionResult::fail(format!("Adapter \"{adapter}\" error: {e}")),
+                            Err(e) => {
+                                ActionResult::fail(format!("Adapter \"{adapter}\" error: {e}"))
+                            }
                         }
                     } else {
-                        ActionResult::fail(format!("Adapter \"{adapter}\" is not active (state: {:?})", registered.state))
+                        ActionResult::fail(format!(
+                            "Adapter \"{adapter}\" is not active (state: {:?})",
+                            registered.state
+                        ))
                     }
                 } else {
                     ActionResult::fail(format!(
@@ -1448,7 +1496,8 @@ impl Cortex {
                     if !sub_result.success {
                         return Ok(ActionResult::fail(format!(
                             "Batch action {}/{} failed: {}",
-                            i + 1, actions.len(),
+                            i + 1,
+                            actions.len(),
                             sub_result.error.unwrap_or_default()
                         )));
                     }
@@ -1460,10 +1509,16 @@ impl Cortex {
                 // Simple heuristic — match instruction keywords against element labels
                 let lower = instruction.to_lowercase();
                 if let Some(el) = context.elements.iter().find(|el| {
-                    el.state.visible && !el.actions.is_empty()
-                        && el.label.as_ref().map_or(false, |l| lower.contains(&l.to_lowercase()))
+                    el.state.visible
+                        && !el.actions.is_empty()
+                        && el
+                            .label
+                            .as_ref()
+                            .map_or(false, |l| lower.contains(&l.to_lowercase()))
                 }) {
-                    let click = PlannedAction::Click { target_id: el.id.clone() };
+                    let click = PlannedAction::Click {
+                        target_id: el.id.clone(),
+                    };
                     return Box::pin(self.execute(&click, context)).await;
                 }
                 ActionResult::fail(format!("Could not resolve: {instruction}"))
@@ -1494,14 +1549,20 @@ impl Cortex {
                         let client = cel_cdp::connect_to_focused_app().await;
                         match client {
                             Some(c) => match c.evaluate(&full_expression).await {
-                                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                                Ok(result) => {
+                                    Ok(serde_json::to_string(&result).unwrap_or_default())
+                                }
                                 Err(e) => Err(format!("CDP eval failed: {e}")),
                             },
                             None => Err("No CDP target available".into()),
                         }
                     })
                 }) {
-                    Ok(result) => ActionResult { success: true, error: None, data: Some(serde_json::Value::String(result)) },
+                    Ok(result) => ActionResult {
+                        success: true,
+                        error: None,
+                        data: Some(serde_json::Value::String(result)),
+                    },
                     Err(e) => ActionResult::fail(e),
                 }
             }
@@ -1520,14 +1581,20 @@ impl Cortex {
                         let client = cel_cdp::connect_to_focused_app().await;
                         match client {
                             Some(c) => match c.evaluate(&full_expression).await {
-                                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                                Ok(result) => {
+                                    Ok(serde_json::to_string(&result).unwrap_or_default())
+                                }
                                 Err(e) => Err(format!("CDP eval failed: {e}")),
                             },
                             None => Err("No CDP target available".into()),
                         }
                     })
                 }) {
-                    Ok(result) => ActionResult { success: true, error: None, data: Some(serde_json::Value::String(result)) },
+                    Ok(result) => ActionResult {
+                        success: true,
+                        error: None,
+                        data: Some(serde_json::Value::String(result)),
+                    },
                     Err(e) => ActionResult::fail(e),
                 }
             }
@@ -1537,17 +1604,19 @@ impl Cortex {
                 table,
                 writes,
                 verify,
-            } => self
-                .dispatch_write_cells(app, sheet.as_deref(), table.as_deref(), writes, *verify)
-                .await,
+            } => {
+                self.dispatch_write_cells(app, sheet.as_deref(), table.as_deref(), writes, *verify)
+                    .await
+            }
             PlannedAction::ReadCells {
                 app,
                 sheet,
                 table,
                 cell_refs,
-            } => self
-                .dispatch_read_cells(app, sheet.as_deref(), table.as_deref(), cell_refs)
-                .await,
+            } => {
+                self.dispatch_read_cells(app, sheet.as_deref(), table.as_deref(), cell_refs)
+                    .await
+            }
             PlannedAction::ExtractWithFallback {
                 name,
                 selectors,
@@ -1725,7 +1794,11 @@ impl Cortex {
                         .map(|decl| decl.requires_verification)
                         .unwrap_or(false)
                 {
-                    match registered.driver.verify_action(action, &params, &result).await {
+                    match registered
+                        .driver
+                        .verify_action(action, &params, &result)
+                        .await
+                    {
                         Ok(Some(verified)) => Some(verified),
                         Ok(None) => Some(result),
                         Err(err) => Some(crate::adapter::ActionResult::fail(format!(
@@ -1837,9 +1910,7 @@ impl Cortex {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (sheet, table, writes, verify);
-            ActionResult::fail(
-                "write_cells requires macOS (AppleScript backend)".to_string(),
-            )
+            ActionResult::fail("write_cells requires macOS (AppleScript backend)".to_string())
         }
     }
 
@@ -1904,9 +1975,7 @@ impl Cortex {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (sheet, table, cell_refs);
-            ActionResult::fail(
-                "read_cells requires macOS (AppleScript backend)".to_string(),
-            )
+            ActionResult::fail("read_cells requires macOS (AppleScript backend)".to_string())
         }
     }
 }
@@ -1927,6 +1996,71 @@ fn build_extract_expression(sel: &str) -> String {
         || trimmed.contains("=>");
     if looks_like_js {
         trimmed.to_string()
+    } else if trimmed.contains(":contains(") || trimmed.contains(":has(") {
+        let escaped = trimmed.replace('\\', "\\\\").replace('\'', "\\'");
+        format!(
+            "(function() {{
+                const selector = '{escaped}';
+                const textOf = (el) => (el && el.textContent != null ? el.textContent.trim() : '');
+                const includesText = (el, needle) => textOf(el).includes(needle);
+
+                const rowMatch = selector.match(/^([a-zA-Z0-9_-]+):has\\(([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\3\\)\\)\\s+([a-zA-Z0-9_-]+):nth-child\\((\\d+)\\)$/);
+                if (rowMatch) {{
+                    const [, rowTag, innerTag, , needle, cellTag, nth] = rowMatch;
+                    const rows = Array.from(document.querySelectorAll(rowTag));
+                    for (const row of rows) {{
+                        const match = Array.from(row.querySelectorAll(innerTag)).find((child) => includesText(child, needle));
+                        if (!match) continue;
+                        const idx = Math.max(parseInt(nth, 10) - 1, 0);
+                        const cells = Array.from(row.querySelectorAll(cellTag));
+                        const target = cells[idx];
+                        return target ? textOf(target) || null : null;
+                    }}
+                    return null;
+                }}
+
+                const adjacentMatch = selector.match(/^([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\2\\)\\s*\\+\\s*([a-zA-Z0-9_-]+)$/);
+                if (adjacentMatch) {{
+                    const [, baseTag, , needle, siblingTag] = adjacentMatch;
+                    const bases = Array.from(document.querySelectorAll(baseTag));
+                    for (const base of bases) {{
+                        if (!includesText(base, needle)) continue;
+                        let sibling = base.nextElementSibling;
+                        while (sibling) {{
+                            if (sibling.matches(siblingTag)) {{
+                                return textOf(sibling) || null;
+                            }}
+                            sibling = sibling.nextElementSibling;
+                        }}
+                    }}
+                    return null;
+                }}
+
+                const siblingNthMatch = selector.match(/^([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\2\\)\\s*~\\s*([a-zA-Z0-9_-]+):nth-of-type\\((\\d+)\\)$/);
+                if (siblingNthMatch) {{
+                    const [, baseTag, , needle, siblingTag, nth] = siblingNthMatch;
+                    const bases = Array.from(document.querySelectorAll(baseTag));
+                    for (const base of bases) {{
+                        if (!includesText(base, needle) || !base.parentElement) continue;
+                        const idx = Math.max(parseInt(nth, 10) - 1, 0);
+                        const matches = Array.from(base.parentElement.children).filter((child) => child.matches(siblingTag));
+                        const target = matches[idx];
+                        return target ? textOf(target) || null : null;
+                    }}
+                    return null;
+                }}
+
+                const containsOnlyMatch = selector.match(/^([a-zA-Z0-9_-]+):contains\\((['\\\"])(.*?)\\2\\)$/);
+                if (containsOnlyMatch) {{
+                    const [, tag, , needle] = containsOnlyMatch;
+                    const match = Array.from(document.querySelectorAll(tag)).find((el) => includesText(el, needle));
+                    return match ? textOf(match) || null : null;
+                }}
+
+                const fallback = document.querySelector(selector);
+                return fallback ? (fallback.textContent == null ? null : fallback.textContent.trim()) : null;
+            }})()"
+        )
     } else {
         // Bare CSS selector. Escape single quotes for JS-string embedding.
         let escaped = trimmed.replace('\\', "\\\\").replace('\'', "\\'");
@@ -2030,7 +2164,10 @@ fn cells_match(requested: &str, got: &str) -> bool {
     }
 }
 
-fn find_element<'a>(context: &'a ScreenContext, target_id: &str) -> Option<&'a cel_context::ContextElement> {
+fn find_element<'a>(
+    context: &'a ScreenContext,
+    target_id: &str,
+) -> Option<&'a cel_context::ContextElement> {
     context.elements.iter().find(|el| el.id == target_id)
 }
 
@@ -2153,16 +2290,10 @@ async fn try_cdp_dispatch(
     client: &cel_cdp::CdpClient,
     action: &PlannedAction,
 ) -> Result<Option<crate::adapter::ActionResult>, CortexError> {
-
-    let target = match action {
-        PlannedAction::Click { target_id }
-        | PlannedAction::SetValue { target_id, .. }
-        | PlannedAction::AxAction { target_id, .. }
-        | PlannedAction::Drag { from_target_id: target_id, .. } => Some(target_id.as_str()),
-        PlannedAction::Type { target_id: Some(t), .. } => Some(t.as_str()),
-        _ => None,
+    let target = action_dom_target(action);
+    let Some(target) = target else {
+        return Ok(None);
     };
-    let Some(target) = target else { return Ok(None) };
     if !target.starts_with("dom:") {
         return Ok(None);
     }
@@ -2183,8 +2314,7 @@ async fn try_cdp_dispatch(
     };
 
     match action {
-        PlannedAction::Click { .. }
-        | PlannedAction::AxAction { .. } => {
+        PlannedAction::Click { .. } | PlannedAction::AxAction { .. } => {
             let js = build_click_js(role, id_part);
             let res = client
                 .evaluate(&js)
@@ -2213,9 +2343,30 @@ async fn try_cdp_dispatch(
     }
 }
 
+fn action_dom_target(action: &PlannedAction) -> Option<&str> {
+    match action {
+        PlannedAction::Click { target_id }
+        | PlannedAction::SetValue { target_id, .. }
+        | PlannedAction::AxAction { target_id, .. }
+        | PlannedAction::Drag {
+            from_target_id: target_id,
+            ..
+        } => target_id.starts_with("dom:").then_some(target_id.as_str()),
+        PlannedAction::Type {
+            target_id: Some(target_id),
+            ..
+        } => target_id.starts_with("dom:").then_some(target_id.as_str()),
+        _ => None,
+    }
+}
+
 fn check_cdp_ok(res: serde_json::Value, op: &'static str) -> crate::adapter::ActionResult {
     use crate::adapter::ActionResult;
-    let v = res.get("result").and_then(|r| r.get("value")).cloned().unwrap_or(res);
+    let v = res
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(res);
     match v {
         serde_json::Value::String(s) if s.starts_with("ok:") => ActionResult::ok(),
         serde_json::Value::String(s) => ActionResult::fail(format!("cdp {op}: {s}")),
@@ -2306,6 +2457,54 @@ fn build_set_value_js(role: &str, id_part: &str, value: &str) -> String {
             if (!target) return 'no-match:' + role + ':' + idPart;
             target.focus();
 
+            const dispatchValueEvent = (el, type) => {{
+                const init = {{
+                    bubbles: true,
+                    cancelable: type === 'beforeinput',
+                    composed: true,
+                    inputType: 'insertReplacementText',
+                    data: String(value),
+                }};
+                try {{
+                    if (typeof InputEvent === 'function' && (type === 'beforeinput' || type === 'input')) {{
+                        return el.dispatchEvent(new InputEvent(type, init));
+                    }}
+                }} catch (_) {{}}
+                return el.dispatchEvent(new Event(type, {{
+                    bubbles: true,
+                    cancelable: type === 'beforeinput',
+                    composed: true,
+                }}));
+            }};
+
+            const setNativeValue = (el, next) => {{
+                if (el.isContentEditable || !('value' in el)) {{
+                    el.textContent = String(next);
+                    return;
+                }}
+                const tag = (el.tagName || '').toUpperCase();
+                const proto = tag === 'TEXTAREA'
+                    ? HTMLTextAreaElement.prototype
+                    : tag === 'SELECT'
+                        ? HTMLSelectElement.prototype
+                        : HTMLInputElement.prototype;
+                const ownSetter = Object.getOwnPropertyDescriptor(el, 'value')?.set;
+                const protoSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                    || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+                if (protoSetter && ownSetter !== protoSetter) protoSetter.call(el, next);
+                else if (ownSetter) ownSetter.call(el, next);
+                else el.value = next;
+            }};
+
+            const commitValue = (el, next) => {{
+                const proceed = dispatchValueEvent(el, 'beforeinput');
+                if (!proceed) return false;
+                setNativeValue(el, next);
+                dispatchValueEvent(el, 'input');
+                el.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
+                return true;
+            }};
+
             // <select> elements: HTML spec says `el.value = X` silently fails
             // unless X matches an option's `value` attribute exactly. The
             // planner is often handed the display text ("Technical Support")
@@ -2322,22 +2521,17 @@ fn build_set_value_js(role: &str, id_part: &str, value: &str) -> String {
                 if (!picked) picked = opts.find((o) => (o.textContent || '').trim().toLowerCase() === needle);
                 if (!picked) picked = opts.find((o) => (o.textContent || '').trim().toLowerCase().includes(needle));
                 if (!picked) return 'no-option:' + role + ':' + idPart + ':' + String(value).slice(0, 40);
-                target.value = picked.value;
-                target.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                setNativeValue(target, picked.value);
+                dispatchValueEvent(target, 'input');
+                target.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
                 return 'ok:select:' + (picked.value || '').slice(0, 60);
             }}
 
             // React/Vue/Svelte sometimes track value in their own state;
-            // setting via the native setter and dispatching input is the
-            // canonical safe pattern for <input>/<textarea>.
-            const proto = Object.getPrototypeOf(target);
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (setter && setter.set) setter.set.call(target, value);
-            else target.value = value;
-            target.dispatchEvent(new Event('input', {{ bubbles: true }}));
-            target.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return 'ok:set:' + (target.value || '').slice(0, 60);
+            // firing beforeinput + input + change is the browser-like commit
+            // path that keeps filtered lists and framework state in sync.
+            if (!commitValue(target, value)) return 'canceled:beforeinput';
+            return 'ok:set:' + ((target.value || target.textContent || '')).slice(0, 60);
         }})()"#
     )
 }
@@ -2442,7 +2636,9 @@ pub enum CortexError {
 }
 
 /// Browser app names recognized for CDP-aware activation.
-const CDP_BROWSERS: &[&str] = &["chrome", "chromium", "brave", "edge", "opera", "vivaldi", "arc"];
+const CDP_BROWSERS: &[&str] = &[
+    "chrome", "chromium", "brave", "edge", "opera", "vivaldi", "arc",
+];
 
 /// Injected as a prelude to every PlannedAction::CdpEval. Patches two
 /// gotchas that LLMs routinely hit when driving browser forms through JS:
@@ -2549,7 +2745,10 @@ fn activate_app_with_verification(
         //      session process is fighting for focus.
         let safe_name = app_name.replace('"', "\\\"");
         let mut activate_command = std::process::Command::new("osascript");
-        activate_command.args(["-e", &format!("tell application \"{safe_name}\" to activate")]);
+        activate_command.args([
+            "-e",
+            &format!("tell application \"{safe_name}\" to activate"),
+        ]);
         let _ = command_status_with_timeout(activate_command, std::time::Duration::from_secs(2));
         let mut open_command = std::process::Command::new("open");
         open_command.arg("-a").arg(app_name);
@@ -2622,12 +2821,12 @@ fn app_is_running_with_visible_window(name_lower: &str) -> bool {
         command.args(["-e", &script]);
         command_output_with_timeout(command, std::time::Duration::from_secs(1))
     }
-        .and_then(|out| {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            s.parse::<u32>().ok()
-        })
-        .map(|n| n > 0)
-        .unwrap_or(false)
+    .and_then(|out| {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        s.parse::<u32>().ok()
+    })
+    .map(|n| n > 0)
+    .unwrap_or(false)
 }
 
 /// Get the name of the current frontmost application via System Events.
@@ -2838,9 +3037,7 @@ fn click_numbers_dialog_button_via_ax(candidates: &[&str]) -> Option<String> {
                 continue;
             }
             if tree.perform_action(&element.id, "click").ok()? {
-                let label = element
-                    .label
-                    .unwrap_or_else(|| (*candidate).to_string());
+                let label = element.label.unwrap_or_else(|| (*candidate).to_string());
                 return Some(label);
             }
         }
@@ -2899,9 +3096,7 @@ return ""#
 fn send_system_keystroke(key: &str, command_down: bool) -> bool {
     let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
     let script = if command_down {
-        format!(
-            r#"tell application "System Events" to keystroke "{escaped}" using command down"#
-        )
+        format!(r#"tell application "System Events" to keystroke "{escaped}" using command down"#)
     } else {
         format!(r#"tell application "System Events" to keystroke "{escaped}""#)
     };
@@ -2945,6 +3140,16 @@ mod tests {
         assert_eq!(build_extract_expression(js), js);
         let arrow = "(() => document.title)()";
         assert_eq!(build_extract_expression(arrow), arrow);
+    }
+
+    #[test]
+    fn build_extract_expression_supports_contains_and_has_selectors() {
+        let expr = build_extract_expression("tr:has(td:contains('EMP-0742')) td:nth-child(2)");
+        assert!(expr.contains("rowMatch"));
+        assert!(expr.contains("adjacentMatch"));
+        assert!(expr.contains("siblingNthMatch"));
+        assert!(expr.contains("containsOnlyMatch"));
+        assert!(expr.contains("EMP-0742"));
     }
 
     #[test]
@@ -3104,9 +3309,11 @@ mod tests {
         // path. The original `input`-role code (native setter + input +
         // change events) must still be present for textarea / input use.
         let js = build_set_value_js("input", "0", "hello");
-        assert!(js.contains("Object.getPrototypeOf(target)"));
-        assert!(js.contains("setter.set.call(target, value)"));
-        assert!(js.contains("new Event('input'"));
+        assert!(js.contains("setNativeValue"));
+        assert!(js.contains("HTMLTextAreaElement.prototype"));
+        assert!(js.contains("new InputEvent(type, init)"));
+        assert!(js.contains("dispatchValueEvent(el, 'beforeinput')"));
+        assert!(js.contains("dispatchValueEvent(el, 'input')"));
         assert!(js.contains("new Event('change'"));
     }
 }

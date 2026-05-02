@@ -135,16 +135,15 @@ pub fn is_diff_significant(diff: &ContextDiff) -> bool {
     }
 
     // At least one added element must be interactive (visible, enabled, has actions)
-    let has_interactive_add = diff.added.iter().any(|el| {
-        el.state.visible && el.state.enabled && !el.actions.is_empty()
-    });
+    let has_interactive_add = diff
+        .added
+        .iter()
+        .any(|el| el.state.visible && el.state.enabled && !el.actions.is_empty());
 
     // Or meaningful state changes (expanded, selected, visible)
     let has_meaningful_change = diff.changed.iter().any(|c| {
         c.changes.iter().any(|ch| {
-            ch.starts_with("expanded:")
-                || ch.starts_with("selected:")
-                || ch.starts_with("visible:")
+            ch.starts_with("expanded:") || ch.starts_with("selected:") || ch.starts_with("visible:")
         })
     });
 
@@ -164,7 +163,12 @@ mod tests {
             description: None,
             element_type: "button".to_string(),
             value: value.map(String::from),
-            bounds: Some(Bounds { x: 0, y: 0, width: 100, height: 30 }),
+            bounds: Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            }),
             state: ElementState {
                 focused: false,
                 enabled: true,
@@ -305,8 +309,16 @@ mod tests {
         let diff = ContextDiff {
             added: vec![
                 non_interactive.clone(),
-                { let mut e = non_interactive.clone(); e.id = "y".into(); e },
-                { let mut e = non_interactive; e.id = "z".into(); e },
+                {
+                    let mut e = non_interactive.clone();
+                    e.id = "y".into();
+                    e
+                },
+                {
+                    let mut e = non_interactive;
+                    e.id = "z".into();
+                    e
+                },
             ],
             removed: vec![],
             changed: vec![],

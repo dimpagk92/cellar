@@ -12,7 +12,6 @@
 import type { Cortex } from "../cortex.js";
 import type { InputController } from "../interfaces/input-controller.js";
 import type { Anomaly, ElementStability, FreshnessAssessment, DiffSummary, ActionOutcome } from "../types.js";
-import { findDismissableDialog, type DismissableDialog } from "../dialog-dismisser.js";
 import { normalizeCortexAnomalies, normalizeCortexModel } from "../cortex-normalize.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -99,11 +98,11 @@ export class CortexBridge {
   /**
    * Create a CortexBridge.
    * @param cortexOrCel — either a TS Cortex instance or a Cel instance with Rust Cortex NAPI bindings
-   * @param cel — InputController for auto-dismiss actions
+   * @param _cel — InputController (retained for API compatibility; no longer used since overlay dismissal moved to the browser adapter)
    */
   constructor(
     cortexOrCel: Cortex | { isCortexRunning(): boolean },
-    private cel: InputController,
+    _cel: InputController,
   ) {
     // Detect which type of cortex we have
     if ("isCortexRunning" in cortexOrCel && typeof (cortexOrCel as any).readCortexModel === "function") {
@@ -181,7 +180,12 @@ export class CortexBridge {
   }
 
   /**
-   * Handle interrupts before planning. Auto-dismisses dialogs and waits for loading.
+   * Handle interrupts before planning. Waits for loading to settle.
+   *
+   * Note: web overlay dismissal (cookie banners, paywalls, etc.) is handled
+   * structurally by the browser adapter's overlay-detector via eager
+   * post-navigation cleanup. The cortex bridge no longer does label-based
+   * detection — it was language-dependent and wrong-layer.
    */
   async handleInterrupts(): Promise<string[]> {
     if (!this.reader.isRunning()) return [];
@@ -190,27 +194,6 @@ export class CortexBridge {
     const model = this.reader.readModel();
     if (!model) return [];
 
-    // 1. Auto-dismiss dialogs
-    const ctx = model.currentContext;
-    if (ctx) {
-      const dialog = findDismissableDialog(ctx);
-      if (dialog) {
-        try {
-          const el = ctx.elements?.find((e: any) => e.id === dialog.elementId);
-          if (el?.bounds) {
-            const cx = el.bounds.x + Math.floor(el.bounds.width / 2);
-            const cy = el.bounds.y + Math.floor(el.bounds.height / 2);
-            this.cel.click(cx, cy);
-            handled.push(`Dismissed ${dialog.dialogType}: "${dialog.label}"`);
-            await this.sleep(500);
-          }
-        } catch {
-          handled.push(`Failed to dismiss dialog`);
-        }
-      }
-    }
-
-    // 2. Wait for loading
     const temporal = model.temporal ?? {};
     const loading = temporal.loading;
     if (loading?.detected) {

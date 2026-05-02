@@ -76,9 +76,9 @@ impl LinuxAccessibility {
         )
         .map_err(|e| AccessibilityError::QueryFailed(format!("a11y bus proxy: {}", e)))?;
 
-        let address: String = proxy.call("GetAddress", &()).map_err(|e| {
-            AccessibilityError::QueryFailed(format!("GetAddress: {}", e))
-        })?;
+        let address: String = proxy
+            .call("GetAddress", &())
+            .map_err(|e| AccessibilityError::QueryFailed(format!("GetAddress: {}", e)))?;
 
         if address.is_empty() {
             return Err(AccessibilityError::Unavailable);
@@ -97,29 +97,32 @@ impl LinuxAccessibility {
                 ))
             })?;
 
+        // tokio::net::UnixStream::from_std panics if called outside a Tokio
+        // runtime (e.g. plain `cargo test` without #[tokio::test]). Treat that
+        // as Unavailable so the caller falls back to StubAccessibility.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(AccessibilityError::Unavailable);
+        }
+
         let std_stream = UnixStream::connect(socket_path).map_err(|e| {
             AccessibilityError::QueryFailed(format!("Connect AT-SPI2 socket: {}", e))
         })?;
-        std_stream.set_nonblocking(true).map_err(|e| {
-            AccessibilityError::QueryFailed(format!("Set non-blocking: {}", e))
-        })?;
-        let stream = tokio::net::UnixStream::from_std(std_stream).map_err(|e| {
-            AccessibilityError::QueryFailed(format!("Tokio UnixStream: {}", e))
-        })?;
+        std_stream
+            .set_nonblocking(true)
+            .map_err(|e| AccessibilityError::QueryFailed(format!("Set non-blocking: {}", e)))?;
+        let stream = tokio::net::UnixStream::from_std(std_stream)
+            .map_err(|e| AccessibilityError::QueryFailed(format!("Tokio UnixStream: {}", e)))?;
 
         zbus::blocking::connection::Builder::unix_stream(stream)
             .method_timeout(DBUS_TIMEOUT)
             .build()
-            .map_err(|e| {
-                AccessibilityError::QueryFailed(format!("AT-SPI2 bus auth: {}", e))
-            })
+            .map_err(|e| AccessibilityError::QueryFailed(format!("AT-SPI2 bus auth: {}", e)))
     }
 
     /// Query the Name property of an accessible object.
     fn get_name(&self, dest: &str, path: &str) -> Option<String> {
-        let proxy = zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Accessible",
-        ).ok()?;
+        let proxy =
+            zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Accessible").ok()?;
         let value: OwnedValue = proxy.get_property("Name").ok()?;
         let name: &str = value.downcast_ref().ok()?;
         if name.is_empty() {
@@ -131,11 +134,11 @@ impl LinuxAccessibility {
 
     /// Query the Role of an accessible object via GetRoleName.
     fn get_role(&self, dest: &str, path: &str) -> ElementRole {
-        let proxy = match zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Accessible") {
-            Ok(p) => p,
-            Err(_) => return ElementRole::Custom("unknown".into()),
-        };
+        let proxy =
+            match zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Accessible") {
+                Ok(p) => p,
+                Err(_) => return ElementRole::Custom("unknown".into()),
+            };
 
         let result: Result<String, _> = proxy.call("GetRoleName", &());
         match result {
@@ -146,8 +149,8 @@ impl LinuxAccessibility {
 
     /// Query the bounding box via the Component interface's GetExtents method.
     fn get_bounds(&self, dest: &str, path: &str) -> Option<Bounds> {
-        let proxy = zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Component").ok()?;
+        let proxy =
+            zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Component").ok()?;
 
         // GetExtents(coord_type: u32) -> (x, y, width, height)
         // coord_type 0 = screen coordinates
@@ -165,8 +168,8 @@ impl LinuxAccessibility {
 
     /// Get the Value property (for inputs, sliders, etc.).
     fn get_value(&self, dest: &str, path: &str) -> Option<String> {
-        let proxy = zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Value").ok()?;
+        let proxy =
+            zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Value").ok()?;
         let value: OwnedValue = proxy.get_property("CurrentValue").ok()?;
         if let Ok(v) = value.downcast_ref::<f64>() {
             return Some(v.to_string());
@@ -176,8 +179,8 @@ impl LinuxAccessibility {
 
     /// Get the Description property (secondary label / tooltip).
     fn get_description(&self, dest: &str, path: &str) -> Option<String> {
-        let proxy = zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Accessible").ok()?;
+        let proxy =
+            zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Accessible").ok()?;
         let value: OwnedValue = proxy.get_property("Description").ok()?;
         let desc: &str = value.downcast_ref().ok()?;
         if desc.is_empty() {
@@ -200,11 +203,11 @@ impl LinuxAccessibility {
     ///   30 = visible,     31 = manages_descendants
     ///   41 = checkable    (in second u32, bit 9)
     fn get_state(&self, dest: &str, path: &str) -> ElementState {
-        let proxy = match zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Accessible") {
-            Ok(p) => p,
-            Err(_) => return ElementState::default_visible(),
-        };
+        let proxy =
+            match zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Accessible") {
+                Ok(p) => p,
+                Err(_) => return ElementState::default_visible(),
+            };
 
         // GetState returns (u32, u32) — two halves of a 64-bit bitfield
         let result: Result<Vec<u32>, _> = proxy.call("GetState", &());
@@ -212,17 +215,19 @@ impl LinuxAccessibility {
             Ok(state_vec) if state_vec.len() >= 2 => {
                 let bits: u64 = (state_vec[0] as u64) | ((state_vec[1] as u64) << 32);
                 ElementState {
-                    focused:  bits & (1 << 12) != 0,  // ATSPI_STATE_FOCUSED = 12
-                    enabled:  bits & (1 << 8) != 0,    // ATSPI_STATE_ENABLED = 8
-                    visible:  bits & (1 << 30) != 0,   // ATSPI_STATE_VISIBLE = 30
-                    selected: bits & (1 << 23) != 0,   // ATSPI_STATE_SELECTED = 23
-                    expanded: if bits & (1 << 9) != 0 { // ATSPI_STATE_EXPANDABLE = 9
-                        Some(bits & (1 << 10) != 0)     // ATSPI_STATE_EXPANDED = 10
+                    focused: bits & (1 << 12) != 0,  // ATSPI_STATE_FOCUSED = 12
+                    enabled: bits & (1 << 8) != 0,   // ATSPI_STATE_ENABLED = 8
+                    visible: bits & (1 << 30) != 0,  // ATSPI_STATE_VISIBLE = 30
+                    selected: bits & (1 << 23) != 0, // ATSPI_STATE_SELECTED = 23
+                    expanded: if bits & (1 << 9) != 0 {
+                        // ATSPI_STATE_EXPANDABLE = 9
+                        Some(bits & (1 << 10) != 0) // ATSPI_STATE_EXPANDED = 10
                     } else {
                         None
                     },
-                    checked: if bits & (1u64 << 41) != 0 { // ATSPI_STATE_CHECKABLE = 41
-                        Some(bits & (1 << 4) != 0)          // ATSPI_STATE_CHECKED = 4
+                    checked: if bits & (1u64 << 41) != 0 {
+                        // ATSPI_STATE_CHECKABLE = 41
+                        Some(bits & (1 << 4) != 0) // ATSPI_STATE_CHECKED = 4
                     } else {
                         None
                     },
@@ -231,9 +236,9 @@ impl LinuxAccessibility {
             Ok(state_vec) if state_vec.len() == 1 => {
                 let bits: u64 = state_vec[0] as u64;
                 ElementState {
-                    focused:  bits & (1 << 12) != 0,
-                    enabled:  bits & (1 << 8) != 0,
-                    visible:  bits & (1 << 30) != 0,
+                    focused: bits & (1 << 12) != 0,
+                    enabled: bits & (1 << 8) != 0,
+                    visible: bits & (1 << 30) != 0,
                     selected: bits & (1 << 23) != 0,
                     expanded: None,
                     checked: None,
@@ -248,8 +253,8 @@ impl LinuxAccessibility {
 
     /// Get text content from the Text interface.
     fn get_text(&self, dest: &str, path: &str) -> Option<String> {
-        let proxy = zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Text").ok()?;
+        let proxy =
+            zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Text").ok()?;
 
         // GetText(start_offset, end_offset) — use 0, -1 for full text
         let result: Result<String, _> = proxy.call("GetText", &(0i32, -1i32));
@@ -262,11 +267,11 @@ impl LinuxAccessibility {
     /// Get the count of selected children via the Selection interface.
     /// Returns the number of selected children, or 0 if not a selection container.
     fn get_selected_count(&self, dest: &str, path: &str) -> usize {
-        let proxy = match zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Selection") {
-            Ok(p) => p,
-            Err(_) => return 0,
-        };
+        let proxy =
+            match zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Selection") {
+                Ok(p) => p,
+                Err(_) => return 0,
+            };
 
         let result: Result<i32, _> = proxy.get_property("NSelectedChildren");
         match result {
@@ -278,11 +283,11 @@ impl LinuxAccessibility {
     /// Get available actions from the Action interface.
     /// Returns action names like "click", "press", "activate", "expand or contract".
     fn get_actions(&self, dest: &str, path: &str) -> Vec<String> {
-        let proxy = match zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Action") {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
+        let proxy =
+            match zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Action") {
+                Ok(p) => p,
+                Err(_) => return vec![],
+            };
 
         // Get the number of actions
         let n_actions: Result<i32, _> = proxy.get_property("NActions");
@@ -322,13 +327,17 @@ impl LinuxAccessibility {
         let state = self.get_state(dest, path);
         let mut found_here = if state.focused {
             let role = self.get_role(dest, path);
-            let label = self.get_name(dest, path).or_else(|| self.get_description(dest, path));
+            let label = self
+                .get_name(dest, path)
+                .or_else(|| self.get_description(dest, path));
             Some(AccessibilityElement {
                 id: format!("focused-{}", depth),
                 role,
                 label,
                 description: self.get_description(dest, path),
-                value: self.get_text(dest, path).or_else(|| self.get_value(dest, path)),
+                value: self
+                    .get_text(dest, path)
+                    .or_else(|| self.get_value(dest, path)),
                 bounds: self.get_bounds(dest, path),
                 state: state.clone(),
                 parent_id: None,
@@ -347,7 +356,11 @@ impl LinuxAccessibility {
             if i >= MAX_FOCUSED_ELEMENTS {
                 break;
             }
-            let child_dest = if child_bus.is_empty() { dest } else { child_bus.as_str() };
+            let child_dest = if child_bus.is_empty() {
+                dest
+            } else {
+                child_bus.as_str()
+            };
             if let Some(deeper) = self.find_focused_in_tree(child_dest, child_path, depth + 1) {
                 // Prefer the deepest focused element (most specific)
                 found_here = Some(deeper);
@@ -359,14 +372,14 @@ impl LinuxAccessibility {
 
     /// Get children of an accessible object as (bus_name, object_path) pairs.
     fn get_children(&self, dest: &str, path: &str) -> Vec<(String, String)> {
-        let proxy = match zbus::blocking::Proxy::new(
-            &self.conn, dest, path, "org.a11y.atspi.Accessible") {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::trace!("get_children proxy failed for {} {}: {}", dest, path, e);
-                return vec![];
-            }
-        };
+        let proxy =
+            match zbus::blocking::Proxy::new(&self.conn, dest, path, "org.a11y.atspi.Accessible") {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::trace!("get_children proxy failed for {} {}: {}", dest, path, e);
+                    return vec![];
+                }
+            };
 
         // GetChildren returns array of (bus_name, object_path) D-Bus structs: a(so)
         let result: Result<Vec<(String, OwnedObjectPath)>, _> = proxy.call("GetChildren", &());
@@ -383,6 +396,7 @@ impl LinuxAccessibility {
     }
 
     /// Recursively build an AccessibilityElement tree from a D-Bus accessible.
+    #[allow(clippy::too_many_arguments)]
     fn build_element(
         &self,
         dest: &str,
@@ -404,7 +418,9 @@ impl LinuxAccessibility {
         let label = name.or_else(|| description.clone());
 
         // Try to get value — first from Text interface, then Value interface
-        let value = self.get_text(dest, path).or_else(|| self.get_value(dest, path));
+        let value = self
+            .get_text(dest, path)
+            .or_else(|| self.get_value(dest, path));
 
         // Get available actions (click, press, activate, etc.)
         let actions = self.get_actions(dest, path);
@@ -418,7 +434,10 @@ impl LinuxAccessibility {
 
         // For list/tree containers, check if this element has selected children
         // (enriches the selected state beyond just the state bitfield)
-        if matches!(role, ElementRole::List | ElementRole::TreeView | ElementRole::Table) {
+        if matches!(
+            role,
+            ElementRole::List | ElementRole::TreeView | ElementRole::Table
+        ) {
             let n_selected = self.get_selected_count(dest, path);
             if n_selected > 0 {
                 state.selected = true;
@@ -435,7 +454,11 @@ impl LinuxAccessibility {
                 if *element_count >= max_elements {
                     break;
                 }
-                let child_dest = if child_bus.is_empty() { dest } else { child_bus.as_str() };
+                let child_dest = if child_bus.is_empty() {
+                    dest
+                } else {
+                    child_bus.as_str()
+                };
                 children.push(self.build_element(
                     child_dest,
                     child_path,
@@ -473,9 +496,17 @@ impl LinuxAccessibility {
 fn collect_element_text(elem: &AccessibilityElement) -> String {
     let mut buf = String::new();
     fn recurse(e: &AccessibilityElement, b: &mut String) {
-        if let Some(ref l) = e.label { b.push_str(l); b.push(' '); }
-        if let Some(ref v) = e.value { b.push_str(v); b.push(' '); }
-        for child in &e.children { recurse(child, b); }
+        if let Some(ref l) = e.label {
+            b.push_str(l);
+            b.push(' ');
+        }
+        if let Some(ref v) = e.value {
+            b.push_str(v);
+            b.push(' ');
+        }
+        for child in &e.children {
+            recurse(child, b);
+        }
     }
     recurse(elem, &mut buf);
     buf
@@ -495,7 +526,8 @@ impl AccessibilityTree for LinuxAccessibility {
 
         for (idx, (bus_name, _obj_path)) in children_refs.iter().enumerate() {
             // Derive app name for budget/cache keying
-            let app_name = self.get_name(bus_name, app_root_path)
+            let app_name = self
+                .get_name(bus_name, app_root_path)
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| bus_name.clone());
 
@@ -508,7 +540,9 @@ impl AccessibilityTree for LinuxAccessibility {
             }
 
             // Per-app budget check
-            let decision = self.budget.lock()
+            let decision = self
+                .budget
+                .lock()
                 .map(|mut b| b.should_walk(&app_name))
                 .unwrap_or(crate::budget::WalkDecision {
                     walk: true,
@@ -706,12 +740,10 @@ fn collect_matching(
     label: Option<&str>,
     out: &mut Vec<AccessibilityElement>,
 ) {
-    let role_matches = role.map_or(true, |r| {
-        std::mem::discriminant(&node.role) == std::mem::discriminant(r)
-    });
-    let label_matches = label.map_or(true, |l| {
-        node.label.as_deref().map_or(false, |nl| nl.contains(l))
-    });
+    let role_matches =
+        role.is_none_or(|r| std::mem::discriminant(&node.role) == std::mem::discriminant(r));
+    let label_matches =
+        label.is_none_or(|l| node.label.as_deref().is_some_and(|nl| nl.contains(l)));
 
     if role_matches && label_matches {
         out.push(node.clone());
@@ -836,20 +868,59 @@ mod tests {
 
     #[test]
     fn test_atspi_role_mapping() {
-        assert!(matches!(atspi_role_to_element_role("push button"), ElementRole::Button));
-        assert!(matches!(atspi_role_to_element_role("entry"), ElementRole::Input));
-        assert!(matches!(atspi_role_to_element_role("check box"), ElementRole::Checkbox));
-        assert!(matches!(atspi_role_to_element_role("combo box"), ElementRole::ComboBox));
-        assert!(matches!(atspi_role_to_element_role("menu bar"), ElementRole::Menu));
-        assert!(matches!(atspi_role_to_element_role("page tab"), ElementRole::TabItem));
-        assert!(matches!(atspi_role_to_element_role("table"), ElementRole::Table));
-        assert!(matches!(atspi_role_to_element_role("tree"), ElementRole::TreeView));
-        assert!(matches!(atspi_role_to_element_role("link"), ElementRole::Link));
-        assert!(matches!(atspi_role_to_element_role("slider"), ElementRole::Slider));
-        assert!(matches!(atspi_role_to_element_role("panel"), ElementRole::Group));
-        assert!(matches!(atspi_role_to_element_role("image"), ElementRole::Image));
+        assert!(matches!(
+            atspi_role_to_element_role("push button"),
+            ElementRole::Button
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("entry"),
+            ElementRole::Input
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("check box"),
+            ElementRole::Checkbox
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("combo box"),
+            ElementRole::ComboBox
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("menu bar"),
+            ElementRole::Menu
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("page tab"),
+            ElementRole::TabItem
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("table"),
+            ElementRole::Table
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("tree"),
+            ElementRole::TreeView
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("link"),
+            ElementRole::Link
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("slider"),
+            ElementRole::Slider
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("panel"),
+            ElementRole::Group
+        ));
+        assert!(matches!(
+            atspi_role_to_element_role("image"),
+            ElementRole::Image
+        ));
         // Unknown roles become Custom
-        assert!(matches!(atspi_role_to_element_role("weird-widget"), ElementRole::Custom(_)));
+        assert!(matches!(
+            atspi_role_to_element_role("weird-widget"),
+            ElementRole::Custom(_)
+        ));
     }
 
     #[test]

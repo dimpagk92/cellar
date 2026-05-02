@@ -3,15 +3,15 @@
 //! Input injection and interception for mouse and keyboard events.
 //! Uses enigo for cross-platform input simulation (Windows, macOS, Linux).
 
-mod inject;
-mod enigo_input;
 #[cfg(target_os = "macos")]
 pub mod applescript;
+mod enigo_input;
+mod inject;
 
-pub use inject::{GestureEvent, InputController, InputError, InputEvent, MouseButton};
-pub use enigo_input::EnigoInput;
 #[cfg(target_os = "macos")]
 pub use applescript::{read_numbers_cells, write_numbers_cells, CellWrite};
+pub use enigo_input::EnigoInput;
+pub use inject::{GestureEvent, InputController, InputError, InputEvent, MouseButton};
 
 /// Create a platform-appropriate input controller.
 pub fn create_controller() -> Result<Box<dyn InputController>, InputError> {
@@ -47,7 +47,11 @@ mod tests {
 
     #[test]
     fn test_input_event_click() {
-        let event = InputEvent::MouseClick { x: 50, y: 75, button: MouseButton::Right };
+        let event = InputEvent::MouseClick {
+            x: 50,
+            y: 75,
+            button: MouseButton::Right,
+        };
         let json = serde_json::to_string(&event).unwrap();
         let back: InputEvent = serde_json::from_str(&json).unwrap();
         match back {
@@ -62,14 +66,18 @@ mod tests {
 
     #[test]
     fn test_input_event_key_press() {
-        let event = InputEvent::KeyPress { key: "Enter".into() };
+        let event = InputEvent::KeyPress {
+            key: "Enter".into(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Enter"));
     }
 
     #[test]
     fn test_input_event_type_text() {
-        let event = InputEvent::TypeText { text: "Hello, World!".into() };
+        let event = InputEvent::TypeText {
+            text: "Hello, World!".into(),
+        };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello, World!"));
     }
@@ -92,13 +100,31 @@ mod tests {
     fn test_all_input_event_variants_serializable() {
         let events = vec![
             InputEvent::MouseMove { x: 0, y: 0 },
-            InputEvent::MouseClick { x: 0, y: 0, button: MouseButton::Left },
-            InputEvent::MouseDown { x: 0, y: 0, button: MouseButton::Left },
-            InputEvent::MouseUp { x: 0, y: 0, button: MouseButton::Left },
+            InputEvent::MouseClick {
+                x: 0,
+                y: 0,
+                button: MouseButton::Left,
+            },
+            InputEvent::MouseDown {
+                x: 0,
+                y: 0,
+                button: MouseButton::Left,
+            },
+            InputEvent::MouseUp {
+                x: 0,
+                y: 0,
+                button: MouseButton::Left,
+            },
             InputEvent::KeyPress { key: "a".into() },
-            InputEvent::KeyDown { key: "Shift".into() },
-            InputEvent::KeyUp { key: "Shift".into() },
-            InputEvent::TypeText { text: "test".into() },
+            InputEvent::KeyDown {
+                key: "Shift".into(),
+            },
+            InputEvent::KeyUp {
+                key: "Shift".into(),
+            },
+            InputEvent::TypeText {
+                text: "test".into(),
+            },
             InputEvent::Scroll { dx: 0, dy: 1 },
         ];
         for event in events {

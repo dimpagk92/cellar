@@ -74,7 +74,8 @@ impl GestureObserver {
     pub fn stop(&self) {
         #[cfg(target_os = "macos")]
         {
-            self.running.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.running
+                .store(false, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -118,9 +119,9 @@ mod macos_ffi {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         pub fn CGEventTapCreate(
-            tap: u32,          // CGEventTapLocation
-            place: u32,        // CGEventTapPlacement
-            options: u32,      // CGEventTapOptions
+            tap: u32,     // CGEventTapLocation
+            place: u32,   // CGEventTapPlacement
+            options: u32, // CGEventTapOptions
             events_of_interest: CGEventMask,
             callback: CGEventTapCallBack,
             user_info: *mut c_void,
@@ -178,7 +179,9 @@ unsafe extern "C" fn gesture_callback(
         }
         K_CG_EVENT_ROTATE => {
             let angle = CGEventGetDoubleValueField(event, K_CG_GESTURE_ROTATION);
-            Some(GestureEvent::Rotate { angle_degrees: angle })
+            Some(GestureEvent::Rotate {
+                angle_degrees: angle,
+            })
         }
         K_CG_EVENT_SMART_MAGNIFY => Some(GestureEvent::SmartZoom),
         _ => None,
@@ -197,10 +200,7 @@ unsafe extern "C" fn gesture_callback(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_gesture_tap(
-    buffer: GestureBuffer,
-    running: Arc<std::sync::atomic::AtomicBool>,
-) {
+fn macos_gesture_tap(buffer: GestureBuffer, running: Arc<std::sync::atomic::AtomicBool>) {
     use macos_ffi::*;
     use std::ffi::c_void;
 
@@ -216,9 +216,9 @@ fn macos_gesture_tap(
 
     let tap = unsafe {
         CGEventTapCreate(
-            0,  // kCGSessionEventTap
-            0,  // kCGHeadInsertEventTap
-            1,  // kCGEventTapOptionListenOnly (passive — don't modify events)
+            0, // kCGSessionEventTap
+            0, // kCGHeadInsertEventTap
+            1, // kCGEventTapOptionListenOnly (passive — don't modify events)
             mask,
             gesture_callback,
             buffer_ptr,
@@ -228,7 +228,9 @@ fn macos_gesture_tap(
     if tap.is_null() {
         tracing::warn!("Failed to create gesture event tap — need accessibility permission");
         // Reclaim the leaked Arc
-        unsafe { let _ = Arc::from_raw(buffer_ptr as *const Mutex<Vec<GestureEvent>>); }
+        unsafe {
+            let _ = Arc::from_raw(buffer_ptr as *const Mutex<Vec<GestureEvent>>);
+        }
         return;
     }
 
@@ -267,10 +269,18 @@ mod tests {
     fn test_gesture_event_serialization() {
         let events = vec![
             GestureEvent::PinchZoom { scale: 1.5 },
-            GestureEvent::Swipe { direction: "left".into(), finger_count: 2 },
-            GestureEvent::Rotate { angle_degrees: 45.0 },
+            GestureEvent::Swipe {
+                direction: "left".into(),
+                finger_count: 2,
+            },
+            GestureEvent::Rotate {
+                angle_degrees: 45.0,
+            },
             GestureEvent::SmartZoom,
-            GestureEvent::MomentumScroll { dx: 0.0, dy: -120.0 },
+            GestureEvent::MomentumScroll {
+                dx: 0.0,
+                dy: -120.0,
+            },
         ];
         for event in &events {
             let json = serde_json::to_string(event).unwrap();

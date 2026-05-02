@@ -1,0 +1,65 @@
+# Path-based auto-labeling for PRs (used by .github/workflows/label.yml)
+
+rust:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'cel/**'
+          - 'adapters/adapter-common/**'
+          - 'adapters/excel/**'
+          - 'adapters/sap-gui/**'
+          - 'adapters/bloomberg/**'
+          - 'adapters/metatrader/**'
+          - 'Cargo.toml'
+          - 'Cargo.lock'
+
+typescript:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'agent/**'
+          - 'mcp-server/**'
+          - 'cli/**'
+          - 'adapters/browser/**'
+          - 'live-view/**'
+          - 'recorder/**'
+          - 'registry/**'
+          - 'package.json'
+          - 'pnpm-lock.yaml'
+          - 'tsconfig.base.json'
+
+cortex:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'cel/cel-cortex/**'
+          - 'cel/cel-napi/**'
+          - 'tests/cortex/**'
+
+mcp:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'mcp-server/**'
+
+adapters:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'adapters/**'
+
+e2e:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'e2e/**'
+
+app:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'app/**'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/**'
+          - '**/*.md'

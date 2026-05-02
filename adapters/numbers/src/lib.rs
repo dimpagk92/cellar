@@ -19,16 +19,19 @@
 //! packaging convention as `adapters/browser`, per the adapter-sdk
 //! pivot in April 2026 (see `docs/adapter-roadmap.md` P0).
 
+// AppleScript-only — entire adapter compiles to a no-op on non-macOS.
+#![cfg(target_os = "macos")]
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use cel_accessibility::ElementState;
 use cel_context::{ContentRole, ContextElement, ContextSource};
+use cel_cortex::adapter::{LifecycleDeclaration, VerificationDeclaration};
 use cel_cortex::{
     ActionDeclaration, ActionResult, AdapterDriver, AdapterError, AdapterManifest,
     ContextDeclaration,
 };
-use cel_cortex::adapter::{LifecycleDeclaration, VerificationDeclaration};
 #[cfg(target_os = "macos")]
 use cel_input::CellWrite;
 use serde_json::{json, Value};
@@ -106,7 +109,11 @@ impl NumbersAdapter {
                 (String::from("app"), String::from("Numbers")),
                 (
                     String::from("preview_range"),
-                    format!("A1:{}{}", column_label(NUMBERS_PREVIEW_COLS - 1), NUMBERS_PREVIEW_ROWS),
+                    format!(
+                        "A1:{}{}",
+                        column_label(NUMBERS_PREVIEW_COLS - 1),
+                        NUMBERS_PREVIEW_ROWS
+                    ),
                 ),
             ]),
         }];
@@ -205,13 +212,9 @@ impl NumbersAdapter {
             .and_then(Value::as_bool)
             .unwrap_or(true);
         let writes = parse_cell_writes(params)?;
-        let readbacks = cel_input::write_numbers_cells(
-            sheet.as_deref(),
-            table.as_deref(),
-            &writes,
-            verify,
-        )
-        .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
+        let readbacks =
+            cel_input::write_numbers_cells(sheet.as_deref(), table.as_deref(), &writes, verify)
+                .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
         Ok(json!({
             "app": "Numbers",
             "writes": writes
@@ -487,14 +490,11 @@ fn parse_cell_writes(params: &Value) -> Result<Vec<CellWrite>, AdapterError> {
                     "write_cells expects each entry to include non-empty `cell_ref`".into(),
                 )
             })?;
-        let cell_value = value
-            .get("value")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AdapterError::ExecutionFailed(
-                    "write_cells expects each entry to include string `value`".into(),
-                )
-            })?;
+        let cell_value = value.get("value").and_then(Value::as_str).ok_or_else(|| {
+            AdapterError::ExecutionFailed(
+                "write_cells expects each entry to include string `value`".into(),
+            )
+        })?;
         parsed.push(CellWrite {
             cell_ref: cell_ref.to_string(),
             value: cell_value.to_string(),
@@ -578,7 +578,10 @@ mod tests {
     fn manifest_declares_document_model_truth_and_actions() {
         let adapter = NumbersAdapter::new();
         assert_eq!(adapter.manifest.context.truth_surface, "document_model");
-        assert_eq!(adapter.manifest.verification.truth_surface, "document_model");
+        assert_eq!(
+            adapter.manifest.verification.truth_surface,
+            "document_model"
+        );
         assert_eq!(
             adapter.manifest.verification.readback_action.as_deref(),
             Some("read_cells")

@@ -111,12 +111,13 @@ impl AppCost {
     }
 
     fn maybe_decay(&mut self) {
-        if self.last_walk.elapsed() > DECAY_IDLE_THRESHOLD && self.tier != WalkTier::Light {
-            if self.durations.len() > 2 {
-                self.durations.drain(..self.durations.len() / 2);
-                self.truncation_count = self.truncation_count.saturating_sub(2);
-                self.tier = self.compute_tier();
-            }
+        if self.last_walk.elapsed() > DECAY_IDLE_THRESHOLD
+            && self.tier != WalkTier::Light
+            && self.durations.len() > 2
+        {
+            self.durations.drain(..self.durations.len() / 2);
+            self.truncation_count = self.truncation_count.saturating_sub(2);
+            self.tier = self.compute_tier();
         }
     }
 }

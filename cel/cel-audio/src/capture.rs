@@ -19,7 +19,7 @@
 //! empty. Wire in `whisper-rs` or a local Whisper HTTP endpoint at the
 //! `cel-cortex` level.
 
-use crate::transcribe::{TranscriptionHandle, Transcriber};
+use crate::transcribe::{Transcriber, TranscriptionHandle};
 use crate::{AudioCapture, AudioChunk, AudioConfig, AudioError, AudioSource, TranscriptChunk};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
@@ -184,7 +184,9 @@ impl CpalCapture {
 
         macro_rules! mic_callback {
             ($data:expr) => {{
-                let chunk = raw.lock().push_returning(AudioSource::Microphone, $data, sr, ch);
+                let chunk = raw
+                    .lock()
+                    .push_returning(AudioSource::Microphone, $data, sr, ch);
                 let mut tb = tx.lock();
                 if tb.len() < 500 {
                     tb.push_back(chunk);
@@ -202,8 +204,7 @@ impl CpalCapture {
             cpal::SampleFormat::I16 => device.build_input_stream(
                 &cpal_config,
                 move |data: &[i16], _| {
-                    let f32s: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                    let f32s: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
                     mic_callback!(&f32s)
                 },
                 move |err| tracing::error!("mic capture error: {}", err),
@@ -212,8 +213,10 @@ impl CpalCapture {
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &cpal_config,
                 move |data: &[u16], _| {
-                    let f32s: Vec<f32> =
-                        data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
+                    let f32s: Vec<f32> = data
+                        .iter()
+                        .map(|&s| (s as f32 - 32768.0) / 32768.0)
+                        .collect();
                     mic_callback!(&f32s)
                 },
                 move |err| tracing::error!("mic capture error: {}", err),
@@ -265,9 +268,7 @@ impl CpalCapture {
         let mut candidates: Vec<(usize, cpal::Device)> = devices
             .filter_map(|d| {
                 let name = d.name().ok()?;
-                let priority = LOOPBACK_PREFIXES
-                    .iter()
-                    .position(|&p| name.contains(p))?;
+                let priority = LOOPBACK_PREFIXES.iter().position(|&p| name.contains(p))?;
                 Some((priority, d))
             })
             .collect();
@@ -310,8 +311,9 @@ impl CpalCapture {
 
         macro_rules! sys_callback {
             ($data:expr) => {{
-                let chunk =
-                    raw.lock().push_returning(AudioSource::SystemOutput, $data, sr, ch);
+                let chunk = raw
+                    .lock()
+                    .push_returning(AudioSource::SystemOutput, $data, sr, ch);
                 let mut tb = tx.lock();
                 if tb.len() < 500 {
                     tb.push_back(chunk);
@@ -338,8 +340,10 @@ impl CpalCapture {
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &cpal_config,
                 move |data: &[u16], _| {
-                    let f32s: Vec<f32> =
-                        data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
+                    let f32s: Vec<f32> = data
+                        .iter()
+                        .map(|&s| (s as f32 - 32768.0) / 32768.0)
+                        .collect();
                     sys_callback!(&f32s)
                 },
                 move |err| tracing::error!("system audio capture error: {}", err),

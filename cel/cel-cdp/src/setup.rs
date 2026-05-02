@@ -44,7 +44,11 @@ fn launch_agent_plist() -> String {
 /// Get the LaunchAgent plist file path.
 fn launch_agent_path() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join("Library/LaunchAgents").join(format!("{}.plist", LAUNCH_AGENT_LABEL)))
+    Some(
+        PathBuf::from(home)
+            .join("Library/LaunchAgents")
+            .join(format!("{}.plist", LAUNCH_AGENT_LABEL)),
+    )
 }
 
 /// Install the LaunchAgent that enables CDP on Electron apps.
@@ -102,8 +106,7 @@ fn chrome_wrapper_dir() -> Option<PathBuf> {
 /// Also creates an Automator app that replaces Dock/Spotlight Chrome with the wrapper.
 fn install_chrome_wrapper() -> Result<(), String> {
     let dir = chrome_wrapper_dir().ok_or("Could not determine wrapper dir")?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create wrapper dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create wrapper dir: {}", e))?;
 
     // Create the wrapper script
     let wrapper_path = dir.join("chrome-cdp-wrapper.sh");
@@ -163,8 +166,7 @@ pub fn uninstall_cdp_launch_agent() -> Result<bool, String> {
         .output();
 
     // Delete the LaunchAgent plist
-    std::fs::remove_file(&path)
-        .map_err(|e| format!("Failed to remove LaunchAgent: {}", e))?;
+    std::fs::remove_file(&path).map_err(|e| format!("Failed to remove LaunchAgent: {}", e))?;
 
     // Remove Chrome wrapper
     if let Some(dir) = chrome_wrapper_dir() {
@@ -177,7 +179,7 @@ pub fn uninstall_cdp_launch_agent() -> Result<bool, String> {
 
 /// Check if the LaunchAgent is installed.
 pub fn is_cdp_setup_installed() -> bool {
-    launch_agent_path().map_or(false, |p| p.exists())
+    launch_agent_path().is_some_and(|p| p.exists())
 }
 
 #[cfg(test)]

@@ -514,9 +514,11 @@ impl MentalModel {
             TaskPhase::Input
         } else if self.temporal.idle_since.is_some() {
             TaskPhase::Idle
-        } else if self.last_diff_summary.as_ref().map_or(false, |diff| {
-            diff.added_count + diff.removed_count + diff.changed_count > 0
-        }) {
+        } else if self
+            .last_diff_summary
+            .as_ref()
+            .is_some_and(|diff| diff.added_count + diff.removed_count + diff.changed_count > 0)
+        {
             TaskPhase::Navigation
         } else {
             TaskPhase::Review

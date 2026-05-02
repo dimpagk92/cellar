@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Cel } from "@cellar/agent";
-import { sleep, resolveCoords, contextReferenceSchema, textResult, errorResult } from "./shared.js";
+import { sleep, resolveCoords, contextReferenceSchema, textResult, errorResult, axPermissionGuard } from "./shared.js";
 
 const coordActionBase = {
   x: z.number().optional().describe("X coordinate. Not needed if target_ref is provided."),
@@ -257,6 +257,8 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
 }
 
 export async function handleCelAct(cel: Cel, args: Input) {
+  const denied = axPermissionGuard(cel);
+  if (denied) return denied;
   try {
     if ("actions" in args) {
       const results: string[] = [];

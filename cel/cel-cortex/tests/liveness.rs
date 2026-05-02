@@ -59,8 +59,13 @@ async fn last_tick_age_is_small_right_after_tick() {
 
     // Force a tick, then immediately sample age.
     let _ = cortex.refresh_now(Some(500)).await.unwrap();
-    let age = cortex.last_tick_age_ms().expect("age must be set after refresh");
-    assert!(age < 100, "age right after refresh should be <100ms, got {age}ms");
+    let age = cortex
+        .last_tick_age_ms()
+        .expect("age must be set after refresh");
+    assert!(
+        age < 100,
+        "age right after refresh should be <100ms, got {age}ms"
+    );
     cortex.shutdown();
 }
 
@@ -99,13 +104,17 @@ async fn refresh_now_concurrent_callers_all_succeed() {
     let mut handles = Vec::new();
     for _ in 0..10 {
         let c = cortex_arc.clone();
-        handles.push(tokio::spawn(async move {
-            c.refresh_now(Some(1_000)).await
-        }));
+        handles.push(tokio::spawn(
+            async move { c.refresh_now(Some(1_000)).await },
+        ));
     }
     for h in handles {
         let result = h.await.expect("task panicked");
-        assert!(result.is_ok(), "concurrent refresh_now returned {:?}", result);
+        assert!(
+            result.is_ok(),
+            "concurrent refresh_now returned {:?}",
+            result
+        );
     }
     cortex_arc.shutdown();
 }

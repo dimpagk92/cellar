@@ -64,7 +64,10 @@ pub fn detect_anomalies_from_context(context: &ScreenContext) -> Vec<Anomaly> {
             anomalies.push(Anomaly {
                 anomaly_type: AnomalyType::Dialog,
                 title: el.label.clone(),
-                description: format!("Dialog detected: \"{}\"", el.label.as_deref().unwrap_or("unknown")),
+                description: format!(
+                    "Dialog detected: \"{}\"",
+                    el.label.as_deref().unwrap_or("unknown")
+                ),
                 timestamp: now,
                 element_ids: vec![el.id.clone()],
             });
@@ -119,7 +122,12 @@ mod tests {
             description: None,
             element_type: el_type.to_string(),
             value: None,
-            bounds: Some(Bounds { x: 0, y: 0, width: 100, height: 30 }),
+            bounds: Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            }),
             state: ElementState {
                 focused: false,
                 enabled: true,
@@ -189,21 +197,31 @@ mod tests {
     fn test_dialog_element_detected() {
         let ctx = make_context(vec![make_element("1", "dialog", Some("Confirm"))]);
         let anomalies = detect_anomalies_from_context(&ctx);
-        assert!(anomalies.iter().any(|a| a.anomaly_type == AnomalyType::Dialog));
+        assert!(anomalies
+            .iter()
+            .any(|a| a.anomaly_type == AnomalyType::Dialog));
     }
 
     #[test]
     fn test_error_element_detected() {
         let ctx = make_context(vec![make_element("1", "text", Some("Connection error"))]);
         let anomalies = detect_anomalies_from_context(&ctx);
-        assert!(anomalies.iter().any(|a| a.anomaly_type == AnomalyType::Error));
+        assert!(anomalies
+            .iter()
+            .any(|a| a.anomaly_type == AnomalyType::Error));
     }
 
     #[test]
     fn test_auth_prompt_detected() {
-        let ctx = make_context(vec![make_element("1", "dialog", Some("Sign in to continue"))]);
+        let ctx = make_context(vec![make_element(
+            "1",
+            "dialog",
+            Some("Sign in to continue"),
+        )]);
         let anomalies = detect_anomalies_from_context(&ctx);
-        assert!(anomalies.iter().any(|a| a.anomaly_type == AnomalyType::AuthPrompt));
+        assert!(anomalies
+            .iter()
+            .any(|a| a.anomaly_type == AnomalyType::AuthPrompt));
     }
 
     #[test]
@@ -219,7 +237,10 @@ mod tests {
     #[test]
     fn test_non_significant_events_no_anomalies() {
         let events = vec![
-            CelEvent::FocusChanged { old: None, new: Some("a".into()) },
+            CelEvent::FocusChanged {
+                old: None,
+                new: Some("a".into()),
+            },
             CelEvent::NetworkIdle,
         ];
         let anomalies = detect_anomalies_from_events(&events, "Finder");

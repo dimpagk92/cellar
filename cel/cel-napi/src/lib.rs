@@ -58,3 +58,22 @@ pub(crate) fn rt_handle() -> napi::Result<tokio::runtime::Handle> {
 pub fn cel_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
+
+/// Check whether the current host process has been granted macOS Accessibility
+/// permission. Returns true when granted, false when denied. On non-macOS
+/// platforms returns true (no-op — Accessibility permission is a macOS concept).
+///
+/// Pure boolean check via `AXIsProcessTrusted()` — does not prompt the user.
+/// Cheap (microseconds) so safe to call on every MCP tool invocation as a
+/// pre-flight guard rather than failing late inside an AX traversal.
+#[napi]
+pub fn ax_permission_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        cel_accessibility::ax_is_process_trusted()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}

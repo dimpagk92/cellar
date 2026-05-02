@@ -1025,11 +1025,32 @@ export class BrowserAdapter {
                     }
                   }
                   if (!el) return 'not_found';
+                  const commitValue = (node, next) => {
+                    const tag = (node.tagName || '').toUpperCase();
+                    const proto = tag === 'TEXTAREA'
+                      ? HTMLTextAreaElement.prototype
+                      : tag === 'SELECT'
+                        ? HTMLSelectElement.prototype
+                        : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value')?.set;
+                    if (setter) setter.call(node, next);
+                    else node.value = next;
+                    try {
+                      node.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        composed: true,
+                        inputType: 'insertReplacementText',
+                        data: next,
+                      }));
+                    } catch (_) {
+                      node.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+                    }
+                    node.dispatchEvent(new Event('change', {bubbles: true, composed: true}));
+                  };
                   el.focus();
                   ${clearFirst ? "el.value = '';" : ""}
-                  el.value = ${escapedText};
-                  el.dispatchEvent(new Event('input', {bubbles: true}));
-                  el.dispatchEvent(new Event('change', {bubbles: true}));
+                  commitValue(el, ${escapedText});
                   return 'ok:' + el.value.slice(0, 30);
                 })()`
               : null;
@@ -1050,11 +1071,32 @@ export class BrowserAdapter {
                 await cdp.send("Runtime.callFunctionOn", {
                   objectId: resolved.object.objectId,
                   functionDeclaration: `function() {
+                    const commitValue = (node, next) => {
+                      const tag = (node.tagName || '').toUpperCase();
+                      const proto = tag === 'TEXTAREA'
+                        ? HTMLTextAreaElement.prototype
+                        : tag === 'SELECT'
+                          ? HTMLSelectElement.prototype
+                          : HTMLInputElement.prototype;
+                      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                        || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), 'value')?.set;
+                      if (setter) setter.call(node, next);
+                      else node.value = next;
+                      try {
+                        node.dispatchEvent(new InputEvent('input', {
+                          bubbles: true,
+                          composed: true,
+                          inputType: 'insertReplacementText',
+                          data: next,
+                        }));
+                      } catch (_) {
+                        node.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                      }
+                      node.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                    };
                     this.focus();
                     ${clearFirst ? "this.value = '';" : ""}
-                    this.value = ${escapedText};
-                    this.dispatchEvent(new Event('input', {bubbles: true}));
-                    this.dispatchEvent(new Event('change', {bubbles: true}));
+                    commitValue(this, ${escapedText});
                   }`,
                 } as any);
                 await new Promise(r => setTimeout(r, 300));

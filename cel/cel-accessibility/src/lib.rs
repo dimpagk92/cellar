@@ -36,6 +36,21 @@ pub use tree::{
     TruncationReason,
 };
 
+/// Check whether the host process has macOS Accessibility permission granted.
+///
+/// On macOS this calls `AXIsProcessTrusted()` (cheap, no UI prompt). On every
+/// other platform it returns `true` — Accessibility permission is a macOS-only
+/// concept; AT-SPI2 on Linux and UIA on Windows have different permission models.
+#[cfg(target_os = "macos")]
+pub fn ax_is_process_trusted() -> bool {
+    macos::is_process_trusted()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ax_is_process_trusted() -> bool {
+    true
+}
+
 /// Create a platform-appropriate accessibility tree provider.
 pub fn create_tree() -> Box<dyn AccessibilityTree> {
     #[cfg(target_os = "linux")]

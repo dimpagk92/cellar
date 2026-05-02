@@ -3,7 +3,11 @@ use serde::{Deserialize, Serialize};
 /// Path to the user-level config file written by `cellar init`.
 fn config_file_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".cellar").join("config.toml"))
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".cellar")
+            .join("config.toml"),
+    )
 }
 
 /// On-disk config file schema. Only the `[llm]` section is consulted today.
@@ -339,8 +343,9 @@ impl LlmProviderConfig {
             ProviderKind::Gemini => nonempty("GEMINI_API_KEY")
                 .or_else(|| nonempty("GOOGLE_GEMINI_API_KEY"))
                 .or_else(|| nonempty("GOOGLE_API_KEY")),
-            ProviderKind::HuggingFace => nonempty("HUGGINGFACE_API_KEY")
-                .or_else(|| nonempty("HF_API_KEY")),
+            ProviderKind::HuggingFace => {
+                nonempty("HUGGINGFACE_API_KEY").or_else(|| nonempty("HF_API_KEY"))
+            }
             ProviderKind::Ollama | ProviderKind::Custom => None,
         }
     }
@@ -450,10 +455,7 @@ temperature = 0.2
         let _lock = ENV_MUTEX.lock().unwrap();
         let prev_home = std::env::var("HOME").ok();
 
-        let tmp = std::env::temp_dir().join(format!(
-            "cel-llm-config-test-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("cel-llm-config-test-{}", std::process::id()));
         let cellar_dir = tmp.join(".cellar");
         std::fs::create_dir_all(&cellar_dir).unwrap();
         std::fs::write(
@@ -554,30 +556,63 @@ model = "gemma4:e4b"
 
     #[test]
     fn test_model_tier_flash() {
-        assert_eq!(ModelProfile::from_model_id("gemini-2.0-flash").tier, ModelTier::Flash);
-        assert_eq!(ModelProfile::from_model_id("gpt-4o-mini").tier, ModelTier::Flash);
-        assert_eq!(ModelProfile::from_model_id("claude-haiku-4-5").tier, ModelTier::Flash);
+        assert_eq!(
+            ModelProfile::from_model_id("gemini-2.0-flash").tier,
+            ModelTier::Flash
+        );
+        assert_eq!(
+            ModelProfile::from_model_id("gpt-4o-mini").tier,
+            ModelTier::Flash
+        );
+        assert_eq!(
+            ModelProfile::from_model_id("claude-haiku-4-5").tier,
+            ModelTier::Flash
+        );
     }
 
     #[test]
     fn test_model_tier_standard() {
-        assert_eq!(ModelProfile::from_model_id("gpt-4o").tier, ModelTier::Standard);
-        assert_eq!(ModelProfile::from_model_id("claude-sonnet-4-20250514").tier, ModelTier::Standard);
+        assert_eq!(
+            ModelProfile::from_model_id("gpt-4o").tier,
+            ModelTier::Standard
+        );
+        assert_eq!(
+            ModelProfile::from_model_id("claude-sonnet-4-20250514").tier,
+            ModelTier::Standard
+        );
     }
 
     #[test]
     fn test_model_tier_premium() {
-        assert_eq!(ModelProfile::from_model_id("claude-opus-4-6").tier, ModelTier::Premium);
+        assert_eq!(
+            ModelProfile::from_model_id("claude-opus-4-6").tier,
+            ModelTier::Premium
+        );
         assert_eq!(ModelProfile::from_model_id("o3").tier, ModelTier::Premium);
-        assert_eq!(ModelProfile::from_model_id("gpt-5").tier, ModelTier::Premium);
+        assert_eq!(
+            ModelProfile::from_model_id("gpt-5").tier,
+            ModelTier::Premium
+        );
     }
 
     #[test]
     fn test_model_profile_provider_detection() {
-        assert_eq!(ModelProfile::from_model_id("claude-sonnet-4").provider, ProviderKind::Anthropic);
-        assert_eq!(ModelProfile::from_model_id("gpt-4o").provider, ProviderKind::OpenAI);
-        assert_eq!(ModelProfile::from_model_id("gemini-2.0-flash").provider, ProviderKind::Gemini);
-        assert_eq!(ModelProfile::from_model_id("llama-3").provider, ProviderKind::Custom);
+        assert_eq!(
+            ModelProfile::from_model_id("claude-sonnet-4").provider,
+            ProviderKind::Anthropic
+        );
+        assert_eq!(
+            ModelProfile::from_model_id("gpt-4o").provider,
+            ProviderKind::OpenAI
+        );
+        assert_eq!(
+            ModelProfile::from_model_id("gemini-2.0-flash").provider,
+            ProviderKind::Gemini
+        );
+        assert_eq!(
+            ModelProfile::from_model_id("llama-3").provider,
+            ProviderKind::Custom
+        );
     }
 
     #[test]

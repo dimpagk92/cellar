@@ -10,7 +10,6 @@
 /// - Visibility filtering (hidden elements omitted)
 /// - Compact/ActionableOnly context modes
 /// - Loop warning injection
-
 use cel_context::ScreenContext;
 
 use crate::history::StepHistory;
@@ -40,12 +39,12 @@ const DEFAULT_MAX_HISTORY_STEPS: usize = 25;
 /// Task type classification for prompt section selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskType {
-    Navigation,     // "go to", "open", "navigate"
-    Extraction,     // "find", "extract", "what is", "how many", "list"
-    Comparison,     // "compare", "difference", "pricing", "vs"
-    FormFill,       // "fill", "enter", "submit", "register", "sign up"
-    BrowserSearch,  // "search for", "look up", "google", "stock price", URL patterns
-    General,        // everything else
+    Navigation,    // "go to", "open", "navigate"
+    Extraction,    // "find", "extract", "what is", "how many", "list"
+    Comparison,    // "compare", "difference", "pricing", "vs"
+    FormFill,      // "fill", "enter", "submit", "register", "sign up"
+    BrowserSearch, // "search for", "look up", "google", "stock price", URL patterns
+    General,       // everything else
 }
 
 /// Context about the current page state for action filtering.
@@ -53,7 +52,7 @@ pub struct PageState {
     pub has_inputs: bool,
     pub has_links: bool,
     pub has_buttons: bool,
-    pub is_data_page: bool,  // page-text has substantial content
+    pub is_data_page: bool, // page-text has substantial content
     pub element_count: usize,
 }
 
@@ -63,30 +62,60 @@ pub fn detect_task_type(goal: &str) -> TaskType {
 
     // BrowserSearch: goals involving web search, URL navigation, or looking things up online.
     // Must be checked before Extraction (which also matches "find", "what is", etc.).
-    let has_browser_signal = lower.contains("google") || lower.contains("search for")
-        || lower.contains("look up") || lower.contains("stock price")
-        || lower.contains("website") || lower.contains("browse")
-        || lower.contains(".com") || lower.contains(".org") || lower.contains(".gr")
-        || lower.contains(".io") || lower.contains("http");
-    let has_search_intent = lower.contains("search") || lower.contains("find")
-        || lower.contains("what is") || lower.contains("how much")
-        || lower.contains("get the") || lower.contains("show me")
+    let has_browser_signal = lower.contains("google")
+        || lower.contains("search for")
+        || lower.contains("look up")
+        || lower.contains("stock price")
+        || lower.contains("website")
+        || lower.contains("browse")
+        || lower.contains(".com")
+        || lower.contains(".org")
+        || lower.contains(".gr")
+        || lower.contains(".io")
+        || lower.contains("http");
+    let has_search_intent = lower.contains("search")
+        || lower.contains("find")
+        || lower.contains("what is")
+        || lower.contains("how much")
+        || lower.contains("get the")
+        || lower.contains("show me")
         || lower.contains("look up");
     if has_browser_signal && has_search_intent {
         return TaskType::BrowserSearch;
     }
     // Also catch direct URL navigation + extraction patterns
-    if has_browser_signal && (lower.contains("navigate") || lower.contains("go to") || lower.contains("open")) {
+    if has_browser_signal
+        && (lower.contains("navigate") || lower.contains("go to") || lower.contains("open"))
+    {
         return TaskType::BrowserSearch;
     }
 
-    if lower.contains("compare") || lower.contains("difference") || lower.contains("pricing") || lower.contains(" vs ") || lower.contains("versus") {
+    if lower.contains("compare")
+        || lower.contains("difference")
+        || lower.contains("pricing")
+        || lower.contains(" vs ")
+        || lower.contains("versus")
+    {
         TaskType::Comparison
-    } else if lower.contains("fill") || lower.contains("enter") || lower.contains("submit") || lower.contains("register") || lower.contains("sign up") || lower.contains("log in") {
+    } else if lower.contains("fill")
+        || lower.contains("enter")
+        || lower.contains("submit")
+        || lower.contains("register")
+        || lower.contains("sign up")
+        || lower.contains("log in")
+    {
         TaskType::FormFill
     } else if lower.contains("navigate") || lower.contains("go to") || lower.contains("open ") {
         TaskType::Navigation
-    } else if lower.contains("find") || lower.contains("extract") || lower.contains("what is") || lower.contains("how many") || lower.contains("how much") || lower.contains("list ") || lower.contains("show ") || lower.contains("get ") {
+    } else if lower.contains("find")
+        || lower.contains("extract")
+        || lower.contains("what is")
+        || lower.contains("how many")
+        || lower.contains("how much")
+        || lower.contains("list ")
+        || lower.contains("show ")
+        || lower.contains("get ")
+    {
         TaskType::Extraction
     } else {
         TaskType::General
@@ -399,7 +428,9 @@ pub fn build_composable_system_prompt_with_adapters(
     // === [ACTIONS] Section — filtered by page state ===
     prompt.push_str("\n\n## Actions\n");
     // Always include these
-    prompt.push_str("- {\"type\": \"scroll\", \"dx\": 0, \"dy\": -3} — Scroll (negative dy = down)\n");
+    prompt.push_str(
+        "- {\"type\": \"scroll\", \"dx\": 0, \"dy\": -3} — Scroll (negative dy = down)\n",
+    );
     prompt.push_str("- {\"type\": \"done\", \"summary\": \"<ACTUAL DATA from the page>\"} — Task complete. Summary MUST contain the real answer (prices, names, dates, numbers). Never write just \"achieved\".\n");
     prompt.push_str("- {\"type\": \"fail\", \"reason\": \"...\"} — Cannot proceed\n");
     // Browser navigation goes through cdp_eval (set window.location.href).
@@ -408,20 +439,26 @@ pub fn build_composable_system_prompt_with_adapters(
     // cdp_eval for navigation and dropdown selection.
 
     // Conditional actions based on page state
-    let show_click = page_state.map_or(true, |ps| ps.has_links || ps.has_buttons || ps.element_count > 0);
+    let show_click = page_state.map_or(true, |ps| {
+        ps.has_links || ps.has_buttons || ps.element_count > 0
+    });
     let show_type = page_state.map_or(true, |ps| ps.has_inputs || ps.element_count > 0);
-    let show_extract = page_state.map_or(true, |ps| ps.is_data_page) || task_type == TaskType::Extraction;
+    let show_extract =
+        page_state.map_or(true, |ps| ps.is_data_page) || task_type == TaskType::Extraction;
 
     if show_click {
         prompt.push_str("- {\"type\": \"click\", \"target_id\": \"3\"} — Click element [3]\n");
     }
     if show_type {
         prompt.push_str("- {\"type\": \"type\", \"target_id\": \"5\", \"text\": \"hello\"} — Click element then type\n");
-        prompt.push_str("- {\"type\": \"type\", \"text\": \"hello\"} — Type into focused element\n");
+        prompt
+            .push_str("- {\"type\": \"type\", \"text\": \"hello\"} — Type into focused element\n");
         prompt.push_str("- {\"type\": \"set_value\", \"target_id\": \"5\", \"value\": \"Technical Support\"} — Set a text input (when settable=true) OR pick a <select> option. For <select>, `value` may be either the option's underlying value attribute (e.g. \"support\") OR its visible text (e.g. \"Technical Support\"); both are matched case-insensitively. Do NOT click-and-type a select.\n");
     }
     prompt.push_str("- {\"type\": \"key\", \"key\": \"Enter\"} — Press key\n");
-    prompt.push_str("- {\"type\": \"key_combo\", \"keys\": [\"Control\", \"a\"]} — Key combination\n");
+    prompt.push_str(
+        "- {\"type\": \"key_combo\", \"keys\": [\"Control\", \"a\"]} — Key combination\n",
+    );
     if show_extract {
         prompt.push_str("- {\"type\": \"extract\", \"goal\": \"what to read\", \"data\": \"the extracted text as a single string\"} — Extract data from current page. \"data\" MUST be a plain string, never a JSON object or array.\n");
     }
@@ -494,7 +531,8 @@ pub fn system_prompt() -> String {
 /// System prompt for blind mode — no screen context available.
 /// The planner must rely on goal, history, and device baseline alone.
 pub fn system_prompt_blind(device_baseline: &str) -> String {
-    format!(r#"You are a UI automation agent controlling a computer desktop.
+    format!(
+        r#"You are a UI automation agent controlling a computer desktop.
 You do NOT have screen context for this step. Decide your action based on
 the goal, your step history, and the device information below.
 
@@ -542,15 +580,13 @@ CRITICAL: ALWAYS use the EXACT keyboard shortcuts from the Device Baseline above
 PERFORMANCE: Prefer "batch" whenever you have a predictable sequence of 2+ actions. It's MUCH faster.
 Example: {{"type": "batch", "actions": [{{"type": "key_combo", "keys": ["Control", "Space"]}}, {{"type": "type", "text": "Finder"}}, {{"type": "key", "key": "Enter"}}]}}
 
-Respond ONLY with valid JSON."#, device_baseline)
+Respond ONLY with valid JSON."#,
+        device_baseline
+    )
 }
 
 /// Build user prompt for blind mode (no elements table).
-pub fn build_user_prompt_blind(
-    goal: &str,
-    history: &StepHistory,
-    opts: &PromptOptions,
-) -> String {
+pub fn build_user_prompt_blind(goal: &str, history: &StepHistory, opts: &PromptOptions) -> String {
     let mut prompt = String::with_capacity(1024);
 
     // Goal
@@ -561,7 +597,9 @@ pub fn build_user_prompt_blind(
         let remaining = opts.max_steps.saturating_sub(opts.step_index + 1);
         prompt.push_str(&format!(
             "## Budget\nStep {} of {}. {} steps remaining.\n\n",
-            opts.step_index + 1, opts.max_steps, remaining,
+            opts.step_index + 1,
+            opts.max_steps,
+            remaining,
         ));
     }
 
@@ -571,14 +609,23 @@ pub fn build_user_prompt_blind(
     }
 
     // History (recent steps only)
-    let max_hist = if opts.max_history_steps > 0 { opts.max_history_steps } else { DEFAULT_MAX_HISTORY_STEPS };
+    let max_hist = if opts.max_history_steps > 0 {
+        opts.max_history_steps
+    } else {
+        DEFAULT_MAX_HISTORY_STEPS
+    };
     let recent = history.recent(max_hist);
     if !recent.is_empty() {
         prompt.push_str("## Recent Steps\n");
         for entry in recent {
             let status = if entry.success { "OK" } else { "FAILED" };
             let action_json = serde_json::to_string(&entry.action).unwrap_or_default();
-            prompt.push_str(&format!("Step {}: [{}] {}", entry.step_index + 1, status, action_json));
+            prompt.push_str(&format!(
+                "Step {}: [{}] {}",
+                entry.step_index + 1,
+                status,
+                action_json
+            ));
             if let Some(err) = &entry.error {
                 prompt.push_str(&format!(" — Error: {}", err));
             }
@@ -612,7 +659,6 @@ pub struct PromptOptions<'a> {
     pub max_network_events: usize,
 
     // ── Cognitive loop extensions ──────────────────────────────────────
-
     /// Notebook context one-liner (e.g. "SAVED DATA: cheapest=$149, dates=Mar15-17").
     /// Injected after the goal. Empty string = no notebook data.
     pub notebook_context: Option<&'a str>,
@@ -624,7 +670,6 @@ pub struct PromptOptions<'a> {
     pub trail_context: Option<&'a str>,
 
     // ── Phase 3A: Cortex perception signals ────────────────────────────
-
     /// Cortex-derived perception signals (stability, anomalies, vision hint,
     /// model confidence). Surfaces as a "## Perception signals" section when
     /// at least one field is populated. `None` or all-empty → section is
@@ -632,7 +677,6 @@ pub struct PromptOptions<'a> {
     pub cortex_signals: Option<&'a crate::signals::CortexSignals>,
 
     // ── Phase 3B: Cross-goal rolling memory ────────────────────────────
-
     /// Pre-rendered "## Recent runs" block from the runner. Runner builds
     /// this from cel-cortex's `MemoryLenses` (three views: same cortex,
     /// same machine, similar goal_type), so the planner crate stays
@@ -711,7 +755,11 @@ pub fn build_user_prompt(
             opts.max_steps,
             remaining,
         ));
-        let used_pct = if opts.max_steps > 0 { ((opts.step_index + 1) as f64 / opts.max_steps as f64 * 100.0) as u32 } else { 0 };
+        let used_pct = if opts.max_steps > 0 {
+            ((opts.step_index + 1) as f64 / opts.max_steps as f64 * 100.0) as u32
+        } else {
+            0
+        };
         if remaining < 5 {
             prompt.push_str(
                 " URGENT: Running low on steps. Complete the goal now or fail gracefully.",
@@ -764,7 +812,11 @@ pub fn build_user_prompt(
     }
     if let Some(ref audio) = context.audio {
         let muted = if audio.is_muted { ", muted" } else { "" };
-        env_lines.push(format!("Audio: volume {}%{}", (audio.volume * 100.0) as u32, muted));
+        env_lines.push(format!(
+            "Audio: volume {}%{}",
+            (audio.volume * 100.0) as u32,
+            muted
+        ));
     }
     if let Some(ref power) = context.power {
         if let Some(level) = power.battery_level {
@@ -791,9 +843,21 @@ pub fn build_user_prompt(
     }
 
     // Resolve configurable limits (0 = use defaults)
-    let max_elements = if opts.max_elements > 0 { opts.max_elements } else { DEFAULT_MAX_ELEMENTS };
-    let max_history = if opts.max_history_steps > 0 { opts.max_history_steps } else { DEFAULT_MAX_HISTORY_STEPS };
-    let max_network = if opts.max_network_events > 0 { opts.max_network_events } else { 5 };
+    let max_elements = if opts.max_elements > 0 {
+        opts.max_elements
+    } else {
+        DEFAULT_MAX_ELEMENTS
+    };
+    let max_history = if opts.max_history_steps > 0 {
+        opts.max_history_steps
+    } else {
+        DEFAULT_MAX_HISTORY_STEPS
+    };
+    let max_network = if opts.max_network_events > 0 {
+        opts.max_network_events
+    } else {
+        5
+    };
 
     // Separate page-text elements from regular UI elements.
     // Page-text contains the full visible text of the page (up to 4K chars)
@@ -808,7 +872,9 @@ pub fn build_user_prompt(
             if !el.state.visible {
                 // Keep hidden elements that have a description (menu items, dropdowns)
                 // so the LLM knows they exist and can click a trigger to reveal them
-                if el.description.as_deref().unwrap_or("").is_empty() { return false; }
+                if el.description.as_deref().unwrap_or("").is_empty() {
+                    return false;
+                }
             }
             // Extract page-text into separate section — don't include in element table
             if el.id.contains("page-text") || el.id.contains("page_text") {
@@ -845,7 +911,11 @@ pub fn build_user_prompt(
         _ => visible.into_iter().take(max_elements).collect(),
     };
 
-    let total_visible = context.elements.iter().filter(|el| el.state.visible).count();
+    let total_visible = context
+        .elements
+        .iter()
+        .filter(|el| el.state.visible)
+        .count();
 
     // Page statistics summary (inspired by browser-use)
     let mut input_count = 0;
@@ -933,7 +1003,9 @@ pub fn build_user_prompt(
                 children_map: &HashMap<&str, Vec<&str>>,
                 depth: usize,
             ) {
-                let Some(el) = element_map.get(id) else { return };
+                let Some(el) = element_map.get(id) else {
+                    return;
+                };
                 let indent = "\t".repeat(depth);
                 let label = el.label.as_deref().unwrap_or("");
                 let has_actions = !el.actions.is_empty();
@@ -976,22 +1048,36 @@ pub fn build_user_prompt(
                             "input_type" => {
                                 // Show input subtype so LLM knows to click radio/checkbox vs type in text
                                 attrs.push_str(&format!(" type=\"{}\"", val));
-                            },
+                            }
                             "settable" => {
-                                if val == "true" { attrs.push_str(" settable"); }
-                            },
-                            "placeholder" => attrs.push_str(&format!(" placeholder=\"{}\"", truncate(val, 30))),
-                            "label_for" => attrs.push_str(&format!(" for=\"{}\"", truncate(val, 30))),
+                                if val == "true" {
+                                    attrs.push_str(" settable");
+                                }
+                            }
+                            "placeholder" => {
+                                attrs.push_str(&format!(" placeholder=\"{}\"", truncate(val, 30)))
+                            }
+                            "label_for" => {
+                                attrs.push_str(&format!(" for=\"{}\"", truncate(val, 30)))
+                            }
                             "url" => attrs.push_str(&format!(" href=\"{}\"", truncate(val, 50))),
                             "required" => attrs.push_str(" required"),
                             "invalid" => attrs.push_str(" invalid"),
-                            "char_count" => if val != "0" { attrs.push_str(&format!(" chars={}", val)) },
+                            "char_count" => {
+                                if val != "0" {
+                                    attrs.push_str(&format!(" chars={}", val))
+                                }
+                            }
                             "has_popup" => attrs.push_str(" has-popup"),
-                            "role_desc" => attrs.push_str(&format!(" role-desc=\"{}\"", truncate(val, 20))),
+                            "role_desc" => {
+                                attrs.push_str(&format!(" role-desc=\"{}\"", truncate(val, 20)))
+                            }
                             "min_value" => attrs.push_str(&format!(" min=\"{}\"", val)),
                             "max_value" => attrs.push_str(&format!(" max=\"{}\"", val)),
                             "orientation" => attrs.push_str(&format!(" orient=\"{}\"", val)),
-                            "column_headers" => attrs.push_str(&format!(" headers=\"{}\"", truncate(val, 60))),
+                            "column_headers" => {
+                                attrs.push_str(&format!(" headers=\"{}\"", truncate(val, 60)))
+                            }
                             "column_count" => attrs.push_str(&format!(" cols={}", val)),
                             "row_count" => attrs.push_str(&format!(" rows={}", val)),
                             _ => {} // dom_id, document, etc. omitted to save tokens
@@ -1006,7 +1092,9 @@ pub fn build_user_prompt(
                     if !label.is_empty() && label.len() > 2 {
                         prompt.push_str(&format!(
                             "{}<{} label=\"{}\" />\n",
-                            indent, el.element_type, truncate(label, 80)
+                            indent,
+                            el.element_type,
+                            truncate(label, 80)
                         ));
                     }
                 }
@@ -1020,7 +1108,14 @@ pub fn build_user_prompt(
             }
 
             for root_id in &root_ids {
-                render_tree(&mut prompt, &mut index_map, root_id, &element_map, &children_map, 0);
+                render_tree(
+                    &mut prompt,
+                    &mut index_map,
+                    root_id,
+                    &element_map,
+                    &children_map,
+                    0,
+                );
             }
         }
         ContextDetail::Full => {
@@ -1101,16 +1196,29 @@ pub fn build_user_prompt(
                     };
                     prompt.push_str(&format!(
                         "  F{}: [{}] <{}> \"{}\" current=\"{}\" {}\n",
-                        field_idx, i + 1, el.element_type, truncate(label, 40), truncate(current, 20), hint
+                        field_idx,
+                        i + 1,
+                        el.element_type,
+                        truncate(label, 40),
+                        truncate(current, 20),
+                        hint
                     ));
                 }
                 "checkbox" | "radio" | "radio_button" => {
                     field_idx += 1;
                     let label = el.label.as_deref().unwrap_or("(unlabeled)");
-                    let checked = if el.state.checked.unwrap_or(false) { "checked" } else { "unchecked" };
+                    let checked = if el.state.checked.unwrap_or(false) {
+                        "checked"
+                    } else {
+                        "unchecked"
+                    };
                     prompt.push_str(&format!(
                         "  F{}: [{}] <{}> \"{}\" {} → use click\n",
-                        field_idx, i + 1, el.element_type, truncate(label, 40), checked
+                        field_idx,
+                        i + 1,
+                        el.element_type,
+                        truncate(label, 40),
+                        checked
                     ));
                 }
                 _ => {}
@@ -1192,7 +1300,8 @@ pub fn build_user_prompt(
         prompt.push_str("## Previous Steps\n");
         for step in recent {
             let status = if step.success { "OK" } else { "FAILED" };
-            let action_summary = summarize_action_with_label(&step.action, step.element_label.as_deref());
+            let action_summary =
+                summarize_action_with_label(&step.action, step.element_label.as_deref());
             let err = step.error.as_deref().unwrap_or("");
             prompt.push_str(&format!(
                 "{}. [{}] {}",
@@ -1225,7 +1334,10 @@ pub fn build_user_prompt(
     }
 
     prompt.push_str("## Your Next Step\nRespond with ONE action as JSON.\n");
-    PromptResult { text: prompt, index_map }
+    PromptResult {
+        text: prompt,
+        index_map,
+    }
 }
 
 /// Resolve a numbered target_id from an LLM response back to the real element ID.
@@ -1267,7 +1379,10 @@ pub fn resolve_action_indices(action: &mut PlannedAction, index_map: &[String]) 
                 }
             }
         }
-        PlannedAction::Drag { from_target_id, to_target_id } => {
+        PlannedAction::Drag {
+            from_target_id,
+            to_target_id,
+        } => {
             if let Some(real_id) = resolve_index(index_map, from_target_id) {
                 *from_target_id = real_id;
             }
@@ -1342,9 +1457,7 @@ fn render_cortex_signals(s: &crate::signals::CortexSignals) -> String {
         }
     }
     if s.vision_needed {
-        out.push_str(
-            "- Cortex flagged context as sparse — vision fallback may be invoked\n",
-        );
+        out.push_str("- Cortex flagged context as sparse — vision fallback may be invoked\n");
     }
     out
 }
@@ -1380,7 +1493,24 @@ fn format_state(state: &cel_context::ElementState) -> String {
 fn format_properties(props: &std::collections::HashMap<String, String>) -> String {
     let mut parts = Vec::new();
     // Show the most useful properties first, truncated
-    for key in &["placeholder", "label_for", "url", "required", "invalid", "input_type", "settable", "char_count", "has_popup", "role_desc", "min_value", "max_value", "orientation", "column_count", "row_count", "column_headers"] {
+    for key in &[
+        "placeholder",
+        "label_for",
+        "url",
+        "required",
+        "invalid",
+        "input_type",
+        "settable",
+        "char_count",
+        "has_popup",
+        "role_desc",
+        "min_value",
+        "max_value",
+        "orientation",
+        "column_count",
+        "row_count",
+        "column_headers",
+    ] {
         if let Some(val) = props.get(*key) {
             if val == "true" {
                 parts.push(key.to_string());
@@ -1428,31 +1558,52 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
         PlannedAction::SetValue { target_id, value } => {
             format!("set_value {} = {}", lbl(target_id), truncate(value, 20))
         }
-        PlannedAction::Drag { from_target_id, to_target_id } => {
+        PlannedAction::Drag {
+            from_target_id,
+            to_target_id,
+        } => {
             format!("drag {} → {}", from_target_id, to_target_id)
         }
         PlannedAction::Scroll { dx, dy } => format!("scroll({},{})", dx, dy),
         PlannedAction::Wait { ms } => format!("wait({}ms)", ms),
-        PlannedAction::Custom { adapter, action, .. } => {
+        PlannedAction::Custom {
+            adapter, action, ..
+        } => {
             format!("custom({}.{})", adapter, action)
         }
-        PlannedAction::Extract { goal, data } => format!("extract({}): {}", truncate(goal, 20), truncate(data, 40)),
+        PlannedAction::Extract { goal, data } => {
+            format!("extract({}): {}", truncate(goal, 20), truncate(data, 40))
+        }
         PlannedAction::Done { summary, .. } => format!("DONE: {}", truncate(summary, 40)),
         PlannedAction::Fail { reason } => format!("FAIL: {}", truncate(reason, 40)),
         PlannedAction::Act { instruction } => format!("act(\"{}\")", truncate(instruction, 40)),
         PlannedAction::Batch { actions } => {
-            let parts: Vec<String> = actions.iter().map(|a| summarize_action_with_label(a, None)).collect();
+            let parts: Vec<String> = actions
+                .iter()
+                .map(|a| summarize_action_with_label(a, None))
+                .collect();
             format!("batch[{}]", parts.join(", "))
         }
-        PlannedAction::AxAction { target_id, action, .. } => {
+        PlannedAction::AxAction {
+            target_id, action, ..
+        } => {
             format!("ax_action {} ({})", lbl(target_id), action)
         }
         PlannedAction::ActivateApp { app_name } => format!("activate_app({})", app_name),
-        PlannedAction::Select { from_x, from_y, to_x, to_y } => {
+        PlannedAction::Select {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+        } => {
             format!("select({},{})→({},{})", from_x, from_y, to_x, to_y)
         }
         PlannedAction::CdpEval { expression } => {
-            let expr = if expression.len() > 40 { &expression[..40] } else { expression };
+            let expr = if expression.len() > 40 {
+                &expression[..40]
+            } else {
+                expression
+            };
             format!("cdp_eval(\"{}…\")", expr)
         }
         PlannedAction::Navigate { url } => format!("navigate({})", url),
@@ -1463,7 +1614,9 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
         PlannedAction::ReadCells { app, cell_refs, .. } => {
             format!("read_cells({}, {} cells)", app, cell_refs.len())
         }
-        PlannedAction::ExtractWithFallback { name, selectors, .. } => {
+        PlannedAction::ExtractWithFallback {
+            name, selectors, ..
+        } => {
             format!("extract({}, {} selectors)", name, selectors.len())
         }
     }
@@ -1556,24 +1709,63 @@ mod tests {
 
     #[test]
     fn test_detect_task_type() {
-        assert_eq!(detect_task_type("Compare plans on GitHub"), TaskType::Comparison);
-        assert_eq!(detect_task_type("Compare the price vs competitors"), TaskType::Comparison);
-        assert_eq!(detect_task_type("Fill the registration form"), TaskType::FormFill);
-        assert_eq!(detect_task_type("Submit the contact form"), TaskType::FormFill);
-        assert_eq!(detect_task_type("Navigate to the about page"), TaskType::Navigation);
+        assert_eq!(
+            detect_task_type("Compare plans on GitHub"),
+            TaskType::Comparison
+        );
+        assert_eq!(
+            detect_task_type("Compare the price vs competitors"),
+            TaskType::Comparison
+        );
+        assert_eq!(
+            detect_task_type("Fill the registration form"),
+            TaskType::FormFill
+        );
+        assert_eq!(
+            detect_task_type("Submit the contact form"),
+            TaskType::FormFill
+        );
+        assert_eq!(
+            detect_task_type("Navigate to the about page"),
+            TaskType::Navigation
+        );
         assert_eq!(detect_task_type("Go to settings"), TaskType::Navigation);
         assert_eq!(detect_task_type("Open the dashboard"), TaskType::Navigation);
         assert_eq!(detect_task_type("Find the CEO name"), TaskType::Extraction);
-        assert_eq!(detect_task_type("What is the pricing?"), TaskType::Comparison); // "pricing" triggers Comparison
-        assert_eq!(detect_task_type("What is the CEO's email?"), TaskType::Extraction);
-        assert_eq!(detect_task_type("How many items are listed?"), TaskType::Extraction);
+        assert_eq!(
+            detect_task_type("What is the pricing?"),
+            TaskType::Comparison
+        ); // "pricing" triggers Comparison
+        assert_eq!(
+            detect_task_type("What is the CEO's email?"),
+            TaskType::Extraction
+        );
+        assert_eq!(
+            detect_task_type("How many items are listed?"),
+            TaskType::Extraction
+        );
         assert_eq!(detect_task_type("Do something cool"), TaskType::General);
         // BrowserSearch detection
-        assert_eq!(detect_task_type("Search Google for Apple stock price"), TaskType::BrowserSearch);
-        assert_eq!(detect_task_type("Go to capital.gr and find the stock price"), TaskType::BrowserSearch);
-        assert_eq!(detect_task_type("Look up weather on weather.com"), TaskType::BrowserSearch);
-        assert_eq!(detect_task_type("Search for flights on google.com"), TaskType::BrowserSearch);
-        assert_eq!(detect_task_type("Open https://example.com and get the title"), TaskType::BrowserSearch);
+        assert_eq!(
+            detect_task_type("Search Google for Apple stock price"),
+            TaskType::BrowserSearch
+        );
+        assert_eq!(
+            detect_task_type("Go to capital.gr and find the stock price"),
+            TaskType::BrowserSearch
+        );
+        assert_eq!(
+            detect_task_type("Look up weather on weather.com"),
+            TaskType::BrowserSearch
+        );
+        assert_eq!(
+            detect_task_type("Search for flights on google.com"),
+            TaskType::BrowserSearch
+        );
+        assert_eq!(
+            detect_task_type("Open https://example.com and get the title"),
+            TaskType::BrowserSearch
+        );
     }
 
     #[test]
@@ -1629,11 +1821,8 @@ mod tests {
 
     #[test]
     fn test_composable_prompt_includes_baseline() {
-        let prompt = build_composable_system_prompt(
-            Some("{\"os\": \"macOS\"}"),
-            TaskType::General,
-            None,
-        );
+        let prompt =
+            build_composable_system_prompt(Some("{\"os\": \"macOS\"}"), TaskType::General, None);
         assert!(prompt.contains("## Device Baseline"));
         assert!(prompt.contains("{\"os\": \"macOS\"}"));
     }
@@ -1682,8 +1871,14 @@ mod tests {
 
     #[test]
     fn test_index_resolution() {
-        assert_eq!(resolve_index(&["a".into(), "b".into()], "1"), Some("a".into()));
-        assert_eq!(resolve_index(&["a".into(), "b".into()], "2"), Some("b".into()));
+        assert_eq!(
+            resolve_index(&["a".into(), "b".into()], "1"),
+            Some("a".into())
+        );
+        assert_eq!(
+            resolve_index(&["a".into(), "b".into()], "2"),
+            Some("b".into())
+        );
         assert_eq!(resolve_index(&["a".into()], "3"), None); // Out of range
         assert_eq!(resolve_index(&["a".into()], "0"), None); // 0 is invalid (1-based)
         assert_eq!(resolve_index(&["a".into()], "a11y:19"), None); // Non-numeric fallback
@@ -1692,17 +1887,25 @@ mod tests {
     #[test]
     fn test_resolve_action_indices() {
         let map = vec!["dom:btn1".into(), "dom:input1".into()];
-        let mut action = PlannedAction::Click { target_id: "1".into() };
+        let mut action = PlannedAction::Click {
+            target_id: "1".into(),
+        };
         resolve_action_indices(&mut action, &map);
         match &action {
             PlannedAction::Click { target_id } => assert_eq!(target_id, "dom:btn1"),
             _ => panic!("Wrong variant"),
         }
 
-        let mut type_action = PlannedAction::Type { target_id: Some("2".into()), text: "hi".into() };
+        let mut type_action = PlannedAction::Type {
+            target_id: Some("2".into()),
+            text: "hi".into(),
+        };
         resolve_action_indices(&mut type_action, &map);
         match &type_action {
-            PlannedAction::Type { target_id: Some(tid), .. } => assert_eq!(tid, "dom:input1"),
+            PlannedAction::Type {
+                target_id: Some(tid),
+                ..
+            } => assert_eq!(tid, "dom:input1"),
             _ => panic!("Wrong variant"),
         }
     }
@@ -1823,9 +2026,7 @@ mod tests {
 
     #[test]
     fn test_compact_mode() {
-        let context = make_context(vec![
-            make_element("btn1", "button", "Submit"),
-        ]);
+        let context = make_context(vec![make_element("btn1", "button", "Submit")]);
         let history = StepHistory::new();
         let opts = PromptOptions {
             context_detail: ContextDetail::Compact,
@@ -1900,11 +2101,15 @@ mod tests {
     fn test_summarize_action_variants() {
         // Without label
         assert_eq!(
-            summarize_action(&PlannedAction::Click { target_id: "btn".into() }),
+            summarize_action(&PlannedAction::Click {
+                target_id: "btn".into()
+            }),
             "click btn"
         );
         assert_eq!(
-            summarize_action(&PlannedAction::Key { key: "Enter".into() }),
+            summarize_action(&PlannedAction::Key {
+                key: "Enter".into()
+            }),
             "key(Enter)"
         );
         assert_eq!(
@@ -1917,14 +2122,19 @@ mod tests {
         // With label
         assert_eq!(
             summarize_action_with_label(
-                &PlannedAction::Click { target_id: "btn".into() },
+                &PlannedAction::Click {
+                    target_id: "btn".into()
+                },
                 Some("Submit"),
             ),
             "click 'Submit' (btn)"
         );
         assert_eq!(
             summarize_action_with_label(
-                &PlannedAction::Type { target_id: Some("inp".into()), text: "hello".into() },
+                &PlannedAction::Type {
+                    target_id: Some("inp".into()),
+                    text: "hello".into()
+                },
                 Some("Username"),
             ),
             "type 'Username' (inp) = \"hello\""

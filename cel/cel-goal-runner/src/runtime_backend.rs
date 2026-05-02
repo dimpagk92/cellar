@@ -92,7 +92,9 @@ fn from_env() -> Option<RuntimeBackend> {
 
 fn from_config_file() -> Option<RuntimeBackend> {
     let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home).join(".cellar").join("config.toml");
+    let path = std::path::PathBuf::from(home)
+        .join(".cellar")
+        .join("config.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     let file: ConfigFile = toml::from_str(&content).ok()?;
     let runtime = file.runtime?;

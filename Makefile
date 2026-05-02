@@ -1,4 +1,4 @@
-.PHONY: build build-rust build-ts build-cortex build-napi build-mcp-sidecar test test-all test-rust test-ts test-cortex test-cortex-napi test-cortex-mcp test-e2e test-real-extraction lint lint-rust lint-rust-fmt lint-rust-clippy lint-ts clean dev-tauri build-tauri
+.PHONY: build build-rust build-ts build-cortex build-napi build-mcp-sidecar test test-all test-rust test-ts test-cortex test-cortex-napi test-cortex-mcp test-e2e test-real-extraction lint lint-rust lint-rust-fmt lint-rust-clippy lint-ts fmt fmt-rust clean dev-tauri build-tauri
 
 build: build-rust build-ts
 
@@ -43,6 +43,12 @@ lint-rust-clippy:
 
 lint-ts:
 	pnpm lint
+
+# Auto-fix formatting (companion to lint-rust-fmt)
+fmt: fmt-rust
+
+fmt-rust:
+	cargo fmt --all
 
 build-cortex:
 	cargo build -p cel-cortex

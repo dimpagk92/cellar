@@ -10,9 +10,8 @@ mod stub_capture;
 mod xcap_capture;
 
 pub use capture::{
-    crop_frame, diff_regions, encode_for_llm, encode_jpeg, encode_png, frames_differ,
-    pixel_color, resize_frame, CaptureError, Frame, LatestFrame, MonitorInfo, ScreenCapture,
-    WindowInfo,
+    crop_frame, diff_regions, encode_for_llm, encode_jpeg, encode_png, frames_differ, pixel_color,
+    resize_frame, CaptureError, Frame, LatestFrame, MonitorInfo, ScreenCapture, WindowInfo,
 };
 #[cfg(not(feature = "xcap"))]
 pub use stub_capture::StubCapture;
@@ -68,10 +67,7 @@ mod tests {
     fn test_encode_png_valid_2x2() {
         let frame = Frame {
             data: vec![
-                255, 0, 0, 255,
-                0, 255, 0, 255,
-                0, 0, 255, 255,
-                255, 255, 0, 255,
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
             ],
             width: 2,
             height: 2,
@@ -163,10 +159,7 @@ mod tests {
             CaptureError::NotInitialized.to_string(),
             "Capture not initialized"
         );
-        assert_eq!(
-            CaptureError::NoMonitors.to_string(),
-            "No monitors found"
-        );
+        assert_eq!(CaptureError::NoMonitors.to_string(), "No monitors found");
         assert_eq!(
             CaptureError::EncodingError("bad".into()).to_string(),
             "Image encoding error: bad"
@@ -204,14 +197,31 @@ mod tests {
         // 4x4 frame: 64 bytes (4 pixels wide × 4 pixels tall × 4 channels)
         let mut data = vec![0u8; 4 * 4 * 4];
         // Top-left pixel: red
-        data[0] = 255; data[1] = 0; data[2] = 0; data[3] = 255;
+        data[0] = 255;
+        data[1] = 0;
+        data[2] = 0;
+        data[3] = 255;
         // (1,0): green
-        data[4] = 0; data[5] = 255; data[6] = 0; data[7] = 255;
+        data[4] = 0;
+        data[5] = 255;
+        data[6] = 0;
+        data[7] = 255;
         // (2,0): blue
-        data[8] = 0; data[9] = 0; data[10] = 255; data[11] = 255;
+        data[8] = 0;
+        data[9] = 0;
+        data[10] = 255;
+        data[11] = 255;
         // (3,0): white
-        data[12] = 255; data[13] = 255; data[14] = 255; data[15] = 255;
-        Frame { data, width: 4, height: 4, timestamp_ms: 1000 }
+        data[12] = 255;
+        data[13] = 255;
+        data[14] = 255;
+        data[15] = 255;
+        Frame {
+            data,
+            width: 4,
+            height: 4,
+            timestamp_ms: 1000,
+        }
     }
 
     #[test]
@@ -278,7 +288,9 @@ mod tests {
         assert!(!b64.is_empty());
         // Should be valid base64
         use base64::Engine;
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&b64).unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .unwrap();
         assert!(!decoded.is_empty());
     }
 }

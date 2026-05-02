@@ -6,15 +6,20 @@
 //! CEL transparently enables CDP on Chromium apps via environment variables
 //! and discovers active debug ports automatically.
 
-mod discovery;
 mod client;
 mod content;
+mod discovery;
 pub mod setup;
 
-pub use discovery::{discover_cdp_targets, discover_cdp_targets_filtered, reset_preferred_target, CdpTarget};
 pub use client::{CdpClient, CdpError};
-pub use content::{extract_page_content, PageContent, TextBlock, DomElement, ConsoleMessage, ResourceEntry, ElementBounds, ViewportInfo};
-pub use setup::{install_cdp_launch_agent, uninstall_cdp_launch_agent, is_cdp_setup_installed};
+pub use content::{
+    extract_page_content, ConsoleMessage, DomElement, ElementBounds, PageContent, ResourceEntry,
+    TextBlock, ViewportInfo,
+};
+pub use discovery::{
+    discover_cdp_targets, discover_cdp_targets_filtered, reset_preferred_target, CdpTarget,
+};
+pub use setup::{install_cdp_launch_agent, is_cdp_setup_installed, uninstall_cdp_launch_agent};
 
 pub const DEFAULT_CEL_CDP_PORT: u16 = 9333;
 
@@ -130,10 +135,7 @@ fn get_frontmost_pid() -> Option<i32> {
         .output()
         .ok()?;
     if output.status.success() {
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse()
-            .ok()
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
     } else {
         None
     }

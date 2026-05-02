@@ -276,7 +276,9 @@ impl CelStore {
         })();
         match &result {
             Ok(_) => self.conn.execute_batch("COMMIT")?,
-            Err(_) => { let _ = self.conn.execute_batch("ROLLBACK"); }
+            Err(_) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+            }
         }
         result
     }
@@ -361,14 +363,20 @@ mod tests {
     fn test_store_open_and_migrate() {
         let store = CelStore::open_memory().expect("Failed to open in-memory store");
         // Verify tables exist by inserting
-        store.add_knowledge("test fact", "test").expect("Failed to add knowledge");
+        store
+            .add_knowledge("test fact", "test")
+            .expect("Failed to add knowledge");
     }
 
     #[test]
     fn test_knowledge_roundtrip() {
         let store = CelStore::open_memory().unwrap();
-        store.add_knowledge("Vendor X maps to code 10045", "manual").unwrap();
-        store.add_knowledge("Vendor Y requires approval over 50000", "learned").unwrap();
+        store
+            .add_knowledge("Vendor X maps to code 10045", "manual")
+            .unwrap();
+        store
+            .add_knowledge("Vendor Y requires approval over 50000", "learned")
+            .unwrap();
 
         let results = store.query_knowledge("Vendor").unwrap();
         assert_eq!(results.len(), 2);
@@ -388,9 +396,42 @@ mod tests {
         let store = CelStore::open_memory().unwrap();
         let run_id = store.start_run("test-wf", 3).unwrap();
 
-        store.log_step(run_id, 0, "step-1", r#"{"type":"click"}"#, true, 0.95, Some(r#"{"app":"Excel"}"#), None).unwrap();
-        store.log_step(run_id, 1, "step-2", r#"{"type":"type"}"#, true, 0.88, None, None).unwrap();
-        store.log_step(run_id, 2, "step-3", r#"{"type":"key"}"#, false, 0.45, None, Some("Element not found")).unwrap();
+        store
+            .log_step(
+                run_id,
+                0,
+                "step-1",
+                r#"{"type":"click"}"#,
+                true,
+                0.95,
+                Some(r#"{"app":"Excel"}"#),
+                None,
+            )
+            .unwrap();
+        store
+            .log_step(
+                run_id,
+                1,
+                "step-2",
+                r#"{"type":"type"}"#,
+                true,
+                0.88,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .log_step(
+                run_id,
+                2,
+                "step-3",
+                r#"{"type":"key"}"#,
+                false,
+                0.45,
+                None,
+                Some("Element not found"),
+            )
+            .unwrap();
 
         let steps = store.get_step_results(run_id).unwrap();
         assert_eq!(steps.len(), 3);
@@ -407,9 +448,15 @@ mod tests {
         let store = CelStore::open_memory().unwrap();
         let run_id = store.start_run("test-wf", 3).unwrap();
 
-        store.log_step(run_id, 0, "s1", "{}", true, 0.9, None, None).unwrap();
-        store.log_step(run_id, 1, "s2", "{}", true, 0.9, None, None).unwrap();
-        store.log_step(run_id, 2, "s3", "{}", false, 0.4, None, Some("fail")).unwrap();
+        store
+            .log_step(run_id, 0, "s1", "{}", true, 0.9, None, None)
+            .unwrap();
+        store
+            .log_step(run_id, 1, "s2", "{}", true, 0.9, None, None)
+            .unwrap();
+        store
+            .log_step(run_id, 2, "s3", "{}", false, 0.4, None, Some("fail"))
+            .unwrap();
 
         let history = store.get_run_history(10).unwrap();
         assert_eq!(history.len(), 1);
@@ -435,12 +482,15 @@ mod tests {
         let store = CelStore::open_memory().unwrap();
         let run_id = store.start_run("test-wf", 3).unwrap();
 
-        let id = store.record_intervention(
-            run_id, 1,
-            r#"{"elements":[]}"#,
-            r#"{"type":"click","x":100,"y":200}"#,
-            Some(r#"{"type":"click","target":"submit-btn"}"#),
-        ).unwrap();
+        let id = store
+            .record_intervention(
+                run_id,
+                1,
+                r#"{"elements":[]}"#,
+                r#"{"type":"click","x":100,"y":200}"#,
+                Some(r#"{"type":"click","target":"submit-btn"}"#),
+            )
+            .unwrap();
         assert!(id > 0);
 
         let history = store.get_run_history(10).unwrap();

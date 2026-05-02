@@ -36,18 +36,20 @@ pub struct CdpHttpTarget {
 /// but the file-based scan is the problematic one: it reads stale port files
 /// and connects to apps that didn't ask to be controlled.
 const CDP_PASSIVE_EXCLUDED_APPS: &[&str] = &[
-    "claude",      // Claude Code / Claude Desktop / Codex
-    "codex",       // Codex CLI Electron wrapper
-    "slack",       // Rarely useful for automation
-    "discord",     // Rarely useful for automation
-    "notion",      // Has its own API
-    "obsidian",    // Has its own API
+    "claude",   // Claude Code / Claude Desktop / Codex
+    "codex",    // Codex CLI Electron wrapper
+    "slack",    // Rarely useful for automation
+    "discord",  // Rarely useful for automation
+    "notion",   // Has its own API
+    "obsidian", // Has its own API
 ];
 
 /// Check if an app name matches the passive exclusion list (case-insensitive).
 fn is_passive_excluded(app_name: &str) -> bool {
     let lower = app_name.to_lowercase();
-    CDP_PASSIVE_EXCLUDED_APPS.iter().any(|excl| lower.contains(excl))
+    CDP_PASSIVE_EXCLUDED_APPS
+        .iter()
+        .any(|excl| lower.contains(excl))
 }
 
 /// Discover all available CDP targets on this machine.
@@ -185,7 +187,9 @@ fn extract_debug_port(line: &str) -> Option<&str> {
     let marker = "--remote-debugging-port=";
     let start = line.find(marker)? + marker.len();
     let rest = &line[start..];
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     if end > 0 {
         Some(&rest[..end])
     } else {
@@ -208,9 +212,16 @@ pub fn list_http_targets(port: u16) -> Vec<CdpHttpTarget> {
 
     let mut targets = Vec::new();
     for entry in entries {
-        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else { continue };
-        let Some(ws_url) = entry.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) else { continue };
-        let entry_type = entry.get("type").and_then(|v| v.as_str()).unwrap_or_default();
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(ws_url) = entry.get("webSocketDebuggerUrl").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let entry_type = entry
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         if entry_type != "page" {
             continue;
         }
@@ -337,7 +348,11 @@ fn extract_app_name(line: &str) -> String {
     // Fallback: extract from command field
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() > 10 {
-        fields[10].split('/').last().unwrap_or("unknown").to_string()
+        fields[10]
+            .split('/')
+            .last()
+            .unwrap_or("unknown")
+            .to_string()
     } else {
         "unknown".to_string()
     }
@@ -354,20 +369,59 @@ fn scan_devtools_port_files() -> Vec<CdpTarget> {
 
     // Known app data directories on macOS
     let candidates = vec![
-        ("Google Chrome", format!("{}/Library/Application Support/Google/Chrome", home)),
-        ("Google Chrome Canary", format!("{}/Library/Application Support/Google/Chrome Canary", home)),
-        ("Microsoft Edge", format!("{}/Library/Application Support/Microsoft Edge", home)),
-        ("Brave Browser", format!("{}/Library/Application Support/BraveSoftware/Brave-Browser", home)),
+        (
+            "Google Chrome",
+            format!("{}/Library/Application Support/Google/Chrome", home),
+        ),
+        (
+            "Google Chrome Canary",
+            format!("{}/Library/Application Support/Google/Chrome Canary", home),
+        ),
+        (
+            "Microsoft Edge",
+            format!("{}/Library/Application Support/Microsoft Edge", home),
+        ),
+        (
+            "Brave Browser",
+            format!(
+                "{}/Library/Application Support/BraveSoftware/Brave-Browser",
+                home
+            ),
+        ),
         ("Arc", format!("{}/Library/Application Support/Arc", home)),
-        ("Opera", format!("{}/Library/Application Support/com.operasoftware.Opera", home)),
+        (
+            "Opera",
+            format!(
+                "{}/Library/Application Support/com.operasoftware.Opera",
+                home
+            ),
+        ),
         // Claude/Codex — excluded from passive discovery via CDP_PASSIVE_EXCLUDED_APPS.
         // Available when discover_cdp_targets_filtered(true) is called explicitly.
-        ("Claude", format!("{}/Library/Application Support/Claude", home)),
-        ("Visual Studio Code", format!("{}/Library/Application Support/Code", home)),
-        ("Slack", format!("{}/Library/Application Support/Slack", home)),
-        ("Discord", format!("{}/Library/Application Support/discord", home)),
-        ("Notion", format!("{}/Library/Application Support/Notion", home)),
-        ("Obsidian", format!("{}/Library/Application Support/obsidian", home)),
+        (
+            "Claude",
+            format!("{}/Library/Application Support/Claude", home),
+        ),
+        (
+            "Visual Studio Code",
+            format!("{}/Library/Application Support/Code", home),
+        ),
+        (
+            "Slack",
+            format!("{}/Library/Application Support/Slack", home),
+        ),
+        (
+            "Discord",
+            format!("{}/Library/Application Support/discord", home),
+        ),
+        (
+            "Notion",
+            format!("{}/Library/Application Support/Notion", home),
+        ),
+        (
+            "Obsidian",
+            format!("{}/Library/Application Support/obsidian", home),
+        ),
     ];
 
     for (app_name, dir) in candidates {
@@ -492,16 +546,14 @@ fn http_request_local(port: u16, method: &str, path: &str) -> Option<(u16, Strin
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|raw| raw.parse::<u16>().ok())
         .unwrap_or(0);
-    let content_length = header_text
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            if name.trim().eq_ignore_ascii_case("content-length") {
-                value.trim().parse::<usize>().ok()
-            } else {
-                None
-            }
-        });
+    let content_length = header_text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    });
 
     if let Some(content_length) = content_length {
         while response.len() < header_end + content_length {
@@ -515,7 +567,8 @@ fn http_request_local(port: u16, method: &str, path: &str) -> Option<(u16, Strin
         if response.len() < header_end + content_length {
             return None;
         }
-        let body = String::from_utf8(response[header_end..header_end + content_length].to_vec()).ok()?;
+        let body =
+            String::from_utf8(response[header_end..header_end + content_length].to_vec()).ok()?;
         return Some((status_code, body));
     }
 

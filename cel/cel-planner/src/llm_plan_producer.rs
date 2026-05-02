@@ -391,8 +391,12 @@ fn parse_verify_done_lenient(
         #[serde(default)]
         reason: String,
     }
-    let parsed: Raw =
-        serde_json::from_str(trimmed).map_err(|e| format!("{e} (raw starts: {:?})", &trimmed.chars().take(80).collect::<String>()))?;
+    let parsed: Raw = serde_json::from_str(trimmed).map_err(|e| {
+        format!(
+            "{e} (raw starts: {:?})",
+            &trimmed.chars().take(80).collect::<String>()
+        )
+    })?;
     Ok(crate::canonical_plan_producer::DoneVerdict {
         verified: parsed.verified,
         reason: parsed.reason,
@@ -444,10 +448,7 @@ pub fn build_user_prompt(
     out.push_str("\n## Runtime capabilities\n");
     if caps.cdp_bound {
         let browser = caps.cdp_browser.as_deref().unwrap_or("Chrome");
-        out.push_str(&format!(
-            "  - CDP-controlled browser: {}\n",
-            browser
-        ));
+        out.push_str(&format!("  - CDP-controlled browser: {}\n", browser));
         if let Some(url) = &caps.cdp_url {
             out.push_str(&format!("  - Current page: {}\n", url));
         }
@@ -455,7 +456,7 @@ pub fn build_user_prompt(
             "  - `navigate` and `cdp_eval` dispatch THROUGH THIS BROWSER ONLY.\n  \
              - DO NOT switch to Safari or any other browser. Our CDP is bound\n    \
                to the one named above. Actions on any other browser are blind.\n  \
-             - Prefer `navigate` with a direct URL over typing into a search box.\n"
+             - Prefer `navigate` with a direct URL over typing into a search box.\n",
         );
     } else {
         out.push_str("  - No CDP-controlled browser bound. Skip `cdp_eval` and `navigate`.\n");
@@ -466,7 +467,7 @@ pub fn build_user_prompt(
         out.push_str(
             "  - Native input DISABLED (sandboxed eval mode). `ax_action`,\n    \
                `set_value`, `click`, `key`, `key_combo`, `type`, `activate_app`\n    \
-               will be REFUSED by the runtime — pick cdp_eval-based actions.\n"
+               will be REFUSED by the runtime — pick cdp_eval-based actions.\n",
         );
     }
 
@@ -485,14 +486,14 @@ pub fn build_user_prompt(
                    have into the goal's target surface (spreadsheet, doc, form)\n    \
                    and then emit Done with whatever's been accomplished — even\n    \
                    if partial. Running out of steps without a terminal is a\n    \
-                   worse outcome than a partial Done.\n"
+                   worse outcome than a partial Done.\n",
             );
         } else if remaining <= caps.max_steps / 2 {
             // Midpoint — pivot away from exploration.
             out.push_str(
                 "  - You are past the midpoint. Start folding gathered data into\n    \
                    the goal's target surface. Don't open new threads of work\n    \
-                   unless they're required for the goal.\n"
+                   unless they're required for the goal.\n",
             );
         }
     }
@@ -533,12 +534,7 @@ pub fn build_user_prompt(
         // Fixation guard: if the last several turns produced no new
         // successful actions, tell the LLM to pivot strategy entirely
         // (or emit Fail) rather than iterate on the same approach.
-        let recent_wins = history
-            .iter()
-            .rev()
-            .take(5)
-            .filter(|r| r.succeeded)
-            .count();
+        let recent_wins = history.iter().rev().take(5).filter(|r| r.succeeded).count();
         if history.len() >= 5 && recent_wins == 0 {
             out.push_str(
                 "\n## FIXATION WARNING\n\
@@ -601,7 +597,10 @@ pub fn build_user_prompt(
         out.push_str("\n## Shared memory (data you've extracted)\n");
         out.push_str(&format!(
             "  {}\n",
-            truncate(&serde_json::to_string(shared_memory).unwrap_or_default(), 800)
+            truncate(
+                &serde_json::to_string(shared_memory).unwrap_or_default(),
+                800
+            )
         ));
     }
 
@@ -677,9 +676,9 @@ fn banned_action_strings(history: &[AttemptRecord], limit: usize) -> Vec<String>
 fn is_bannable(action: &crate::types::PlannedAction) -> bool {
     use crate::types::PlannedAction;
     match action {
-        PlannedAction::Key { .. }
-        | PlannedAction::KeyCombo { .. }
-        | PlannedAction::Wait { .. } => false,
+        PlannedAction::Key { .. } | PlannedAction::KeyCombo { .. } | PlannedAction::Wait { .. } => {
+            false
+        }
         PlannedAction::Type { target_id, .. } => target_id.is_some(),
         _ => true,
     }
@@ -723,7 +722,9 @@ fn parse_next_move_lenient(raw: &str) -> Result<NextMove, String> {
     let mv: NextMove = serde_json::from_str(body).map_err(|e| e.to_string())?;
     if let NextMove::Batch { steps, .. } = &mv {
         if steps.is_empty() {
-            return Err("batch has no steps (if done, emit kind=done; if stuck, emit kind=fail)".into());
+            return Err(
+                "batch has no steps (if done, emit kind=done; if stuck, emit kind=fail)".into(),
+            );
         }
     }
     Ok(mv)
@@ -801,7 +802,10 @@ mod tests {
             &RuntimeCaps::default(),
         );
         assert!(out.contains("error=\""));
-        assert!(out.contains("…"), "long error should be truncated with ellipsis");
+        assert!(
+            out.contains("…"),
+            "long error should be truncated with ellipsis"
+        );
     }
 
     fn empty_perception() -> ScreenContext {

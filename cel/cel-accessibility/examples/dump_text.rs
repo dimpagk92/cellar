@@ -1,7 +1,6 @@
 //! Dump ALL elements with text content — check what AX actually gives us for web views.
 //! Focuses on: AXValue, AXTitle, AXDescription, AXRoleDescription, AXHelp
 
-
 #![cfg(target_os = "macos")]
 
 use core_foundation::array::CFArray;
@@ -30,23 +29,41 @@ fn main() {
         .args(["-e", "tell application \"System Events\" to unix id of first process whose frontmost is true"])
         .output()
         .expect("osascript failed");
-    let pid: i32 = String::from_utf8_lossy(&output.stdout).trim().parse().expect("bad pid");
+    let pid: i32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("bad pid");
 
     let app = unsafe { AXUIElementCreateApplication(pid) };
     let window = get_attr(app, "AXFocusedWindow");
-    let win_ref = window.as_ref().map(|w| w.as_CFTypeRef() as AXUIElementRef).unwrap_or(app);
+    let win_ref = window
+        .as_ref()
+        .map(|w| w.as_CFTypeRef() as AXUIElementRef)
+        .unwrap_or(app);
 
     println!("=== Elements with text content (AXValue, AXTitle, AXDescription) ===\n");
     let mut count = 0;
     let mut text_count = 0;
     dump_text_elements(win_ref, 0, &mut count, &mut text_count, 25, 500);
-    println!("\n--- Total: {} elements scanned, {} with text content ---", count, text_count);
+    println!(
+        "\n--- Total: {} elements scanned, {} with text content ---",
+        count, text_count
+    );
 
     unsafe { CFRelease(app as *const c_void) };
 }
 
-fn dump_text_elements(el: AXUIElementRef, depth: usize, count: &mut usize, text_count: &mut usize, max_depth: usize, max_count: usize) {
-    if depth >= max_depth || *count >= max_count { return; }
+fn dump_text_elements(
+    el: AXUIElementRef,
+    depth: usize,
+    count: &mut usize,
+    text_count: &mut usize,
+    max_depth: usize,
+    max_count: usize,
+) {
+    if depth >= max_depth || *count >= max_count {
+        return;
+    }
     *count += 1;
 
     let role = get_string(el, "AXRole").unwrap_or_default();
@@ -63,19 +80,35 @@ fn dump_text_elements(el: AXUIElementRef, depth: usize, count: &mut usize, text_
         let indent = "  ".repeat(depth.min(8));
         println!("{}[{}] {}", indent, count, role);
         if let Some(t) = &title {
-            let t = if t.len() > 100 { format!("{}...", &t[..97]) } else { t.clone() };
+            let t = if t.len() > 100 {
+                format!("{}...", &t[..97])
+            } else {
+                t.clone()
+            };
             println!("{}  title: \"{}\"", indent, t);
         }
         if let Some(d) = &desc {
-            let d = if d.len() > 100 { format!("{}...", &d[..97]) } else { d.clone() };
+            let d = if d.len() > 100 {
+                format!("{}...", &d[..97])
+            } else {
+                d.clone()
+            };
             println!("{}  desc:  \"{}\"", indent, d);
         }
         if let Some(v) = &value {
-            let v = if v.len() > 200 { format!("{}...", &v[..197]) } else { v.clone() };
+            let v = if v.len() > 200 {
+                format!("{}...", &v[..197])
+            } else {
+                v.clone()
+            };
             println!("{}  value: \"{}\"", indent, v);
         }
         if let Some(h) = &help {
-            let h = if h.len() > 100 { format!("{}...", &h[..97]) } else { h.clone() };
+            let h = if h.len() > 100 {
+                format!("{}...", &h[..97])
+            } else {
+                h.clone()
+            };
             println!("{}  help:  \"{}\"", indent, h);
         }
         if let Some(r) = &role_desc {
@@ -93,9 +126,18 @@ fn dump_text_elements(el: AXUIElementRef, depth: usize, count: &mut usize, text_
                 CFArray::wrap_under_get_rule(kids_ref as core_foundation::array::CFArrayRef)
             };
             for i in 0..arr.len() {
-                if *count >= max_count { break; }
+                if *count >= max_count {
+                    break;
+                }
                 if let Some(child) = arr.get(i) {
-                    dump_text_elements(child.as_CFTypeRef() as AXUIElementRef, depth + 1, count, text_count, max_depth, max_count);
+                    dump_text_elements(
+                        child.as_CFTypeRef() as AXUIElementRef,
+                        depth + 1,
+                        count,
+                        text_count,
+                        max_depth,
+                        max_count,
+                    );
                 }
             }
         }
@@ -105,8 +147,11 @@ fn dump_text_elements(el: AXUIElementRef, depth: usize, count: &mut usize, text_
 fn get_attr(el: AXUIElementRef, attr: &str) -> Option<CFType> {
     let attr_cf = CFString::new(attr);
     let mut value: CFTypeRef = ptr::null();
-    let err = unsafe { AXUIElementCopyAttributeValue(el, attr_cf.as_concrete_TypeRef(), &mut value) };
-    if err != 0 || value.is_null() { return None; }
+    let err =
+        unsafe { AXUIElementCopyAttributeValue(el, attr_cf.as_concrete_TypeRef(), &mut value) };
+    if err != 0 || value.is_null() {
+        return None;
+    }
     Some(unsafe { CFType::wrap_under_create_rule(value) })
 }
 
@@ -118,7 +163,11 @@ fn get_string(el: AXUIElementRef, attr: &str) -> Option<String> {
     {
         let s: CFString = unsafe { CFString::wrap_under_get_rule(cf_ref as CFStringRef) };
         let r = s.to_string();
-        if r.is_empty() { None } else { Some(r) }
+        if r.is_empty() {
+            None
+        } else {
+            Some(r)
+        }
     } else {
         None
     }

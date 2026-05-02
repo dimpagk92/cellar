@@ -127,14 +127,8 @@ pub fn strip_code_fences(content: &str) -> &str {
     let s = content.trim();
 
     // Case 1: code fences
-    if let Some(inner) = s
-        .strip_prefix("```json")
-        .or_else(|| s.strip_prefix("```"))
-    {
-        return inner
-            .strip_suffix("```")
-            .unwrap_or(inner)
-            .trim();
+    if let Some(inner) = s.strip_prefix("```json").or_else(|| s.strip_prefix("```")) {
+        return inner.strip_suffix("```").unwrap_or(inner).trim();
     }
 
     // Case 2: already valid JSON start

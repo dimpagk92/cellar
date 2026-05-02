@@ -9,9 +9,15 @@ use cel_store::CelStore;
 fn test_store_lifecycle() {
     let store = CelStore::open_memory().expect("Failed to open in-memory store");
 
-    store.add_knowledge("Ctrl+S saves the file in Excel", "excel").unwrap();
-    store.add_knowledge("Ctrl+Z undoes the last action in Excel", "excel").unwrap();
-    store.add_knowledge("Use T-code VA01 for sales orders", "sap").unwrap();
+    store
+        .add_knowledge("Ctrl+S saves the file in Excel", "excel")
+        .unwrap();
+    store
+        .add_knowledge("Ctrl+Z undoes the last action in Excel", "excel")
+        .unwrap();
+    store
+        .add_knowledge("Use T-code VA01 for sales orders", "sap")
+        .unwrap();
 
     let results = store.query_knowledge("Ctrl").unwrap();
     assert_eq!(results.len(), 2);
@@ -53,12 +59,19 @@ fn test_independent_stores() {
 fn test_knowledge_search_is_case_insensitive_substring() {
     let store = CelStore::open_memory().unwrap();
 
-    store.add_knowledge("Press Ctrl+C to copy text", "general").unwrap();
-    store.add_knowledge("Use CTRL+V to paste", "general").unwrap();
+    store
+        .add_knowledge("Press Ctrl+C to copy text", "general")
+        .unwrap();
+    store
+        .add_knowledge("Use CTRL+V to paste", "general")
+        .unwrap();
 
     // Should match both regardless of case
     let results = store.query_knowledge("ctrl").unwrap();
-    assert!(results.len() >= 1, "Case-insensitive search should find 'ctrl' in 'Ctrl+C'");
+    assert!(
+        results.len() >= 1,
+        "Case-insensitive search should find 'ctrl' in 'Ctrl+C'"
+    );
 
     let results = store.query_knowledge("COPY").unwrap();
     // Depends on LIKE behavior — at minimum shouldn't crash
@@ -68,10 +81,15 @@ fn test_knowledge_search_is_case_insensitive_substring() {
 #[test]
 fn test_knowledge_query_no_match_returns_empty() {
     let store = CelStore::open_memory().unwrap();
-    store.add_knowledge("Something about Excel", "excel").unwrap();
+    store
+        .add_knowledge("Something about Excel", "excel")
+        .unwrap();
 
     let results = store.query_knowledge("nonexistent_term_xyz").unwrap();
-    assert!(results.is_empty(), "Query with no matches should return empty vec");
+    assert!(
+        results.is_empty(),
+        "Query with no matches should return empty vec"
+    );
 }
 
 #[test]
@@ -85,9 +103,15 @@ fn test_knowledge_with_special_characters() {
     // subject (we're verifying parameterization defends against it) — it is
     // never executed as SQL. The DB is `open_memory()` so even a regression
     // could only touch the test-scoped in-memory DB, never any real data.
-    store.add_knowledge("Use ' single quotes ' carefully", "sql").unwrap();
-    store.add_knowledge("Path: C:\\Users\\admin\\file.txt", "windows").unwrap();
-    store.add_knowledge("SELECT * FROM users WHERE id = 1; DROP TABLE--", "security").unwrap();
+    store
+        .add_knowledge("Use ' single quotes ' carefully", "sql")
+        .unwrap();
+    store
+        .add_knowledge("Path: C:\\Users\\admin\\file.txt", "windows")
+        .unwrap();
+    store
+        .add_knowledge("SELECT * FROM users WHERE id = 1; DROP TABLE--", "security")
+        .unwrap();
 
     // Should not crash or SQL-inject
     let results = store.query_knowledge("single quotes").unwrap();
@@ -103,9 +127,15 @@ fn test_knowledge_with_special_characters() {
 fn test_knowledge_with_unicode() {
     let store = CelStore::open_memory().unwrap();
 
-    store.add_knowledge("日本語テスト: ボタンをクリック", "japanese").unwrap();
-    store.add_knowledge("Emoji test: 🎉 click the 🔘 button", "emoji").unwrap();
-    store.add_knowledge("Ñoño: señor González", "spanish").unwrap();
+    store
+        .add_knowledge("日本語テスト: ボタンをクリック", "japanese")
+        .unwrap();
+    store
+        .add_knowledge("Emoji test: 🎉 click the 🔘 button", "emoji")
+        .unwrap();
+    store
+        .add_knowledge("Ñoño: señor González", "spanish")
+        .unwrap();
 
     let results = store.query_knowledge("クリック").unwrap();
     assert_eq!(results.len(), 1);
@@ -138,15 +168,21 @@ fn test_many_knowledge_entries() {
 
     // Insert 500 entries
     for i in 0..500 {
-        store.add_knowledge(
-            &format!("Knowledge item {} about topic-{}", i, i % 10),
-            &format!("source-{}", i % 5),
-        ).unwrap();
+        store
+            .add_knowledge(
+                &format!("Knowledge item {} about topic-{}", i, i % 10),
+                &format!("source-{}", i % 5),
+            )
+            .unwrap();
     }
 
     // Search should still work efficiently
     let results = store.query_knowledge("topic-3").unwrap();
-    assert_eq!(results.len(), 50, "Should find 50 entries for topic-3 (500/10)");
+    assert_eq!(
+        results.len(),
+        50,
+        "Should find 50 entries for topic-3 (500/10)"
+    );
 
     let results = store.query_knowledge("Knowledge item 42").unwrap();
     assert!(results.len() >= 1, "Should find specific item");
@@ -187,9 +223,13 @@ fn test_run_tracking_finish_nonexistent() {
 fn test_knowledge_source_filtering() {
     let store = CelStore::open_memory().unwrap();
 
-    store.add_knowledge("Excel shortcut: Ctrl+Home", "excel").unwrap();
+    store
+        .add_knowledge("Excel shortcut: Ctrl+Home", "excel")
+        .unwrap();
     store.add_knowledge("SAP transaction: VA01", "sap").unwrap();
-    store.add_knowledge("Excel formula: =SUM(A1:A10)", "excel").unwrap();
+    store
+        .add_knowledge("Excel formula: =SUM(A1:A10)", "excel")
+        .unwrap();
 
     // Query by content, then verify source is preserved
     let results = store.query_knowledge("Excel").unwrap();

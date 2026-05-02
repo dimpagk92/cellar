@@ -1,5 +1,4 @@
 /// Core types for the CEL planner.
-
 use serde::{Deserialize, Deserializer, Serialize};
 
 // ─── Cognitive Loop Extensions ──────────────────────────────────────────────
@@ -130,7 +129,6 @@ pub struct PlannedStep {
     pub context_tier: ContextTier,
 
     // ── Cognitive loop extensions ──────────────────────────────────────────
-
     /// Free-form internal monologue. Replaces evaluation+memory+reasoning
     /// when present. Contains the LLM's narration of what it sees and why.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,15 +254,18 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
-        serde_json::Value::Array(arr) => {
-            Ok(arr.into_iter().filter_map(|v| match v {
+        serde_json::Value::Array(arr) => Ok(arr
+            .into_iter()
+            .filter_map(|v| match v {
                 serde_json::Value::String(s) => Some(s),
                 other => Some(other.to_string()),
-            }).collect())
-        }
-        serde_json::Value::String(s) => {
-            Ok(s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
-        }
+            })
+            .collect()),
+        serde_json::Value::String(s) => Ok(s
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()),
         serde_json::Value::Null => Ok(vec![]),
         _ => Ok(vec![value.to_string()]),
     }
@@ -560,16 +561,19 @@ impl PlannedAction {
             Self::Click { target_id }
             | Self::SetValue { target_id, .. }
             | Self::AxAction { target_id, .. } => vec![target_id.as_str()],
-            Self::Type { target_id: Some(id), .. } => vec![id.as_str()],
+            Self::Type {
+                target_id: Some(id),
+                ..
+            } => vec![id.as_str()],
             Self::Drag {
                 from_target_id,
                 to_target_id,
             } => vec![from_target_id.as_str(), to_target_id.as_str()],
-            Self::Batch { actions } => {
-                actions.iter().flat_map(|a| a.target_ids()).collect()
-            }
+            Self::Batch { actions } => actions.iter().flat_map(|a| a.target_ids()).collect(),
             // No element-level targets:
-            Self::Type { target_id: None, .. }
+            Self::Type {
+                target_id: None, ..
+            }
             | Self::Key { .. }
             | Self::KeyCombo { .. }
             | Self::Scroll { .. }
@@ -625,7 +629,9 @@ mod target_ids_tests {
     fn batch_flattens_sub_action_targets() {
         let a = PlannedAction::Batch {
             actions: vec![
-                PlannedAction::CdpEval { expression: "1".into() },
+                PlannedAction::CdpEval {
+                    expression: "1".into(),
+                },
                 PlannedAction::Click {
                     target_id: "a11y:ghost".into(),
                 },
@@ -652,9 +658,11 @@ mod target_ids_tests {
 
     #[test]
     fn cdp_eval_and_terminals_have_no_targets() {
-        assert!(PlannedAction::CdpEval { expression: "x".into() }
-            .target_ids()
-            .is_empty());
+        assert!(PlannedAction::CdpEval {
+            expression: "x".into()
+        }
+        .target_ids()
+        .is_empty());
         assert!(PlannedAction::Done {
             summary: "ok".into(),
             evidence_ids: vec![]
@@ -672,7 +680,11 @@ mod target_ids_tests {
             "parse_as":"float"}"#;
         let a: PlannedAction = serde_json::from_str(raw).unwrap();
         match &a {
-            PlannedAction::ExtractWithFallback { name, selectors, parse_as } => {
+            PlannedAction::ExtractWithFallback {
+                name,
+                selectors,
+                parse_as,
+            } => {
                 assert_eq!(name, "btc_price");
                 assert_eq!(selectors.len(), 2);
                 assert_eq!(parse_as, "float");
@@ -727,10 +739,7 @@ mod target_ids_tests {
 #[derive(Debug, Clone)]
 pub enum PlannerEvent {
     /// A step was planned.
-    StepPlanned {
-        step_index: u32,
-        step: PlannedStep,
-    },
+    StepPlanned { step_index: u32, step: PlannedStep },
     /// A step was executed (caller reports success/failure).
     StepExecuted {
         step_index: u32,
@@ -738,15 +747,9 @@ pub enum PlannerEvent {
         error: Option<String>,
     },
     /// The goal was achieved.
-    GoalAchieved {
-        summary: String,
-        total_steps: u32,
-    },
+    GoalAchieved { summary: String, total_steps: u32 },
     /// The planner failed to achieve the goal.
-    GoalFailed {
-        reason: String,
-        total_steps: u32,
-    },
+    GoalFailed { reason: String, total_steps: u32 },
     /// LLM returned unparseable output (will retry).
     ParseRetry {
         step_index: u32,
@@ -760,15 +763,9 @@ pub enum PlannerEvent {
         retry_attempt: u32,
     },
     /// Grounding validation failed (element ID not in context or blocking error).
-    GroundingRejected {
-        step_index: u32,
-        reason: String,
-    },
+    GroundingRejected { step_index: u32, reason: String },
     /// Loop detected in agent behaviour.
-    LoopDetected {
-        step_index: u32,
-        signal: String,
-    },
+    LoopDetected { step_index: u32, signal: String },
 }
 
 /// Result of a single step in the history.
@@ -832,7 +829,10 @@ mod tests {
         let json = serde_json::to_string(&action).unwrap();
         let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
         match parsed {
-            PlannedAction::Done { summary, evidence_ids } => {
+            PlannedAction::Done {
+                summary,
+                evidence_ids,
+            } => {
                 assert_eq!(summary, "Login successful");
                 assert_eq!(evidence_ids, vec!["dom:welcome-banner"]);
             }
@@ -846,7 +846,10 @@ mod tests {
         let json = r#"{"type":"done","summary":"All done"}"#;
         let parsed: PlannedAction = serde_json::from_str(json).unwrap();
         match parsed {
-            PlannedAction::Done { summary, evidence_ids } => {
+            PlannedAction::Done {
+                summary,
+                evidence_ids,
+            } => {
                 assert_eq!(summary, "All done");
                 assert!(evidence_ids.is_empty());
             }
@@ -904,10 +907,19 @@ mod tests {
     #[test]
     fn test_all_action_variants_serialize() {
         let actions = vec![
-            PlannedAction::Click { target_id: "btn".into() },
-            PlannedAction::Type { target_id: Some("inp".into()), text: "hi".into() },
-            PlannedAction::Key { key: "Enter".into() },
-            PlannedAction::KeyCombo { keys: vec!["Ctrl".into(), "S".into()] },
+            PlannedAction::Click {
+                target_id: "btn".into(),
+            },
+            PlannedAction::Type {
+                target_id: Some("inp".into()),
+                text: "hi".into(),
+            },
+            PlannedAction::Key {
+                key: "Enter".into(),
+            },
+            PlannedAction::KeyCombo {
+                keys: vec!["Ctrl".into(), "S".into()],
+            },
             PlannedAction::Scroll { dx: 0, dy: -3 },
             PlannedAction::Wait { ms: 1000 },
             PlannedAction::Custom {
@@ -915,9 +927,16 @@ mod tests {
                 action: "navigate".into(),
                 params: serde_json::json!({"url": "https://example.com"}),
             },
-            PlannedAction::Act { instruction: "click the search button".into() },
-            PlannedAction::Done { summary: "Done!".into(), evidence_ids: vec!["el1".into()] },
-            PlannedAction::Fail { reason: "Not found".into() },
+            PlannedAction::Act {
+                instruction: "click the search button".into(),
+            },
+            PlannedAction::Done {
+                summary: "Done!".into(),
+                evidence_ids: vec!["el1".into()],
+            },
+            PlannedAction::Fail {
+                reason: "Not found".into(),
+            },
         ];
 
         for action in actions {
@@ -925,7 +944,11 @@ mod tests {
             let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
             // Verify type field is present in JSON
             let obj: serde_json::Value = serde_json::from_str(&json).unwrap();
-            assert!(obj.get("type").is_some(), "Missing 'type' field in: {}", json);
+            assert!(
+                obj.get("type").is_some(),
+                "Missing 'type' field in: {}",
+                json
+            );
             // Verify roundtrip doesn't panic
             let _ = serde_json::to_string(&parsed).unwrap();
         }
@@ -938,7 +961,11 @@ mod tests {
         let json = r#"{"type":"notebook_writes","key":"price","value":"$149","category":"data"}"#;
         let parsed: PlannedAction = serde_json::from_str(json).unwrap();
         match parsed {
-            PlannedAction::NotebookWrites { key, value, category } => {
+            PlannedAction::NotebookWrites {
+                key,
+                value,
+                category,
+            } => {
                 assert_eq!(key, "price");
                 assert_eq!(value, "$149");
                 assert_eq!(category, "data");
@@ -961,7 +988,10 @@ mod tests {
             "batch_next": true
         }"#;
         let step: PlannedStep = serde_json::from_str(json).unwrap();
-        assert_eq!(step.thinking.as_deref(), Some("I see a search form with destination and date fields."));
+        assert_eq!(
+            step.thinking.as_deref(),
+            Some("I see a search form with destination and date fields.")
+        );
         assert_eq!(step.progress.as_deref(), Some("on_track"));
         assert_eq!(step.notebook_writes.len(), 1);
         assert_eq!(step.notebook_writes[0].key, "destination");

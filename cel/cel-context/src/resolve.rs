@@ -59,7 +59,11 @@ fn build_ancestor_path(el: &ContextElement, all_elements: &[ContextElement]) -> 
     path
 }
 
-fn score_element(el: &ContextElement, reference: &ContextReference, context: &ScreenContext) -> f64 {
+fn score_element(
+    el: &ContextElement,
+    reference: &ContextReference,
+    context: &ScreenContext,
+) -> f64 {
     // Type must match exactly — it's a hard requirement.
     if el.element_type != reference.element_type {
         return 0.0;

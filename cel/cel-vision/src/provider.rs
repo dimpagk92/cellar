@@ -64,7 +64,9 @@ pub trait VisionProvider: Send + Sync {
     ) -> Result<String, VisionError> {
         // Default: not supported — returns error.
         let _ = (frame, question, detail);
-        Err(VisionError::ApiFailed("ask() not supported by this provider".into()))
+        Err(VisionError::ApiFailed(
+            "ask() not supported by this provider".into(),
+        ))
     }
 
     /// Compare two screenshots and describe what changed.
@@ -76,7 +78,9 @@ pub trait VisionProvider: Send + Sync {
         question: &str,
     ) -> Result<String, VisionError> {
         let _ = (before, after, question);
-        Err(VisionError::ApiFailed("compare() not supported by this provider".into()))
+        Err(VisionError::ApiFailed(
+            "compare() not supported by this provider".into(),
+        ))
     }
 
     /// Provider name for logging.

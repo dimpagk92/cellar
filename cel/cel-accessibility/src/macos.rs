@@ -36,11 +36,20 @@ type CGDirectDisplayID = u32;
 
 // CGRect in points (not pixels) for monitor geometry.
 #[repr(C)]
-struct CGPointF { x: f64, y: f64 }
+struct CGPointF {
+    x: f64,
+    y: f64,
+}
 #[repr(C)]
-struct CGSizeF { width: f64, height: f64 }
+struct CGSizeF {
+    width: f64,
+    height: f64,
+}
 #[repr(C)]
-struct CGRectF { origin: CGPointF, size: CGSizeF }
+struct CGRectF {
+    origin: CGPointF,
+    size: CGSizeF,
+}
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -57,17 +66,19 @@ extern "C" {
 fn get_display_scale_factor() -> f64 {
     use std::sync::OnceLock;
     static SCALE: OnceLock<f64> = OnceLock::new();
-    *SCALE.get_or_init(|| {
-        unsafe {
-            let display = CGMainDisplayID();
-            let mode = CGDisplayCopyDisplayMode(display);
-            if mode.is_null() {
-                return 1.0;
-            }
-            let pixel_w = CGDisplayModeGetPixelWidth(mode) as f64;
-            let point_w = CGDisplayModeGetWidth(mode) as f64;
-            CGDisplayModeRelease(mode);
-            if point_w > 0.0 { pixel_w / point_w } else { 1.0 }
+    *SCALE.get_or_init(|| unsafe {
+        let display = CGMainDisplayID();
+        let mode = CGDisplayCopyDisplayMode(display);
+        if mode.is_null() {
+            return 1.0;
+        }
+        let pixel_w = CGDisplayModeGetPixelWidth(mode) as f64;
+        let point_w = CGDisplayModeGetWidth(mode) as f64;
+        CGDisplayModeRelease(mode);
+        if point_w > 0.0 {
+            pixel_w / point_w
+        } else {
+            1.0
         }
     })
 }
@@ -77,7 +88,12 @@ fn get_main_monitor_bounds() -> (f64, f64, f64, f64) {
     unsafe {
         let display = CGMainDisplayID();
         let rect = CGDisplayBounds(display);
-        (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height)
+        (
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
     }
 }
 
@@ -111,10 +127,7 @@ extern "C" {
         attribute: CFStringRef,
         value: *mut CFTypeRef,
     ) -> AXError;
-    fn AXUIElementCopyActionNames(
-        element: AXUIElementRef,
-        names: *mut CFTypeRef,
-    ) -> AXError;
+    fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFTypeRef) -> AXError;
     fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> AXError;
     fn AXUIElementSetAttributeValue(
@@ -134,10 +147,7 @@ extern "C" {
         element: *mut AXUIElementRef,
     ) -> AXError;
     #[allow(dead_code)]
-    fn AXUIElementCopyAttributeNames(
-        element: AXUIElementRef,
-        names: *mut CFTypeRef,
-    ) -> AXError;
+    fn AXUIElementCopyAttributeNames(element: AXUIElementRef, names: *mut CFTypeRef) -> AXError;
     fn AXIsProcessTrusted() -> bool;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
     fn CFRelease(cf: *const c_void);
@@ -167,9 +177,7 @@ extern "C" {
         notification: CFStringRef,
         refcon: *mut c_void,
     ) -> AXError;
-    fn AXObserverGetRunLoopSource(
-        observer: AXObserverRef,
-    ) -> *const c_void; // CFRunLoopSourceRef
+    fn AXObserverGetRunLoopSource(observer: AXObserverRef) -> *const c_void; // CFRunLoopSourceRef
 }
 
 // CFRunLoop FFI
@@ -180,7 +188,11 @@ type CFRunLoopSourceRef = *const c_void;
 extern "C" {
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
-    fn CFRunLoopRunInMode(mode: CFStringRef, seconds: f64, return_after_source_handled: bool) -> i32;
+    fn CFRunLoopRunInMode(
+        mode: CFStringRef,
+        seconds: f64,
+        return_after_source_handled: bool,
+    ) -> i32;
     fn CFRunLoopStop(rl: CFRunLoopRef);
 }
 
@@ -250,7 +262,9 @@ unsafe extern "C" fn ax_observer_callback(
         "AXWindowResized" => AccessibilityEvent::WindowResized,
         "AXWindowMiniaturized" => AccessibilityEvent::WindowMinimized,
         "AXWindowDeminiaturized" => AccessibilityEvent::WindowRestored,
-        "AXSelectedTextChanged" | "AXSelectedChildrenChanged" => AccessibilityEvent::SelectionChanged,
+        "AXSelectedTextChanged" | "AXSelectedChildrenChanged" => {
+            AccessibilityEvent::SelectionChanged
+        }
         "AXRowCountChanged" => AccessibilityEvent::RowCountChanged,
         "AXRowExpanded" | "AXRowCollapsed" | "AXSelectedRowsChanged" | "AXSelectedCellsChanged" => {
             AccessibilityEvent::LayoutChanged
@@ -265,15 +279,14 @@ unsafe extern "C" fn ax_observer_callback(
             let app_name = get_ax_string(element, "AXTitle");
             AccessibilityEvent::AppShown { app_name }
         }
-        "AXAnnouncementRequested" => {
-            AccessibilityEvent::AnnouncementRequested { text: None }
-        }
+        "AXAnnouncementRequested" => AccessibilityEvent::AnnouncementRequested { text: None },
         "AXHelpTagCreated" => AccessibilityEvent::HelpTagShown,
         _ => return, // Ignore unknown notifications
     };
 
     if let Ok(mut events) = buffer.lock() {
-        if events.len() < 200 { // Cap buffer to prevent unbounded growth
+        if events.len() < 200 {
+            // Cap buffer to prevent unbounded growth
             events.push(event);
         }
     }
@@ -342,8 +355,7 @@ pub fn request_process_trust() -> bool {
 
     let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
     let value = CFBoolean::true_value();
-    let pairs: Vec<(CFString, CFType)> =
-        vec![(key, value.as_CFType())];
+    let pairs: Vec<(CFString, CFType)> = vec![(key, value.as_CFType())];
     let options = CFDictionary::from_CFType_pairs(&pairs);
 
     unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef() as *const c_void) }
@@ -446,11 +458,7 @@ impl MacAccessibility {
 
                     // Run the loop — blocks until CFRunLoopStop is called
                     loop {
-                        let result = CFRunLoopRunInMode(
-                            kCFRunLoopDefaultMode,
-                            1.0,
-                            false,
-                        );
+                        let result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, false);
                         // result == 1 means the run loop was stopped via CFRunLoopStop
                         if result == 1 {
                             break;
@@ -458,13 +466,17 @@ impl MacAccessibility {
                     }
 
                     // Reconstruct the Arc to drop it properly
-                    let _ = std::sync::Arc::from_raw(refcon as *const std::sync::Mutex<Vec<AccessibilityEvent>>);
+                    let _ = std::sync::Arc::from_raw(
+                        refcon as *const std::sync::Mutex<Vec<AccessibilityEvent>>,
+                    );
 
                     CFRelease(app as *const c_void);
                     CFRelease(observer);
                 }
             })
-            .map_err(|e| AccessibilityError::QueryFailed(format!("Failed to spawn observer thread: {}", e)))?;
+            .map_err(|e| {
+                AccessibilityError::QueryFailed(format!("Failed to spawn observer thread: {}", e))
+            })?;
 
         // Wait for the thread to send us its CFRunLoopRef
         let run_loop_addr = rl_rx.recv_timeout(Duration::from_secs(2)).unwrap_or(0);
@@ -540,14 +552,13 @@ impl MacAccessibility {
                 other => other, // Pass through raw AX action names
             };
             let action_cf = CFString::new(ax_action);
-            let err = unsafe {
-                AXUIElementPerformAction(element, action_cf.as_concrete_TypeRef())
-            };
+            let err = unsafe { AXUIElementPerformAction(element, action_cf.as_concrete_TypeRef()) };
             return if err == K_AX_ERROR_SUCCESS {
                 Ok(true)
             } else {
                 Err(AccessibilityError::OperationFailed(format!(
-                    "AXPerformAction '{}' failed with error {}", action, err
+                    "AXPerformAction '{}' failed with error {}",
+                    action, err
                 )))
             };
         }
@@ -565,8 +576,15 @@ impl MacAccessibility {
                     if *count >= MAX_ELEMENTS {
                         break;
                     }
-                    if let Some(child_ref) = arr.get(i).map(|c| c.as_CFTypeRef() as AXUIElementRef) {
-                        match self.find_and_perform_action(child_ref, target_id, action, depth + 1, count) {
+                    if let Some(child_ref) = arr.get(i).map(|c| c.as_CFTypeRef() as AXUIElementRef)
+                    {
+                        match self.find_and_perform_action(
+                            child_ref,
+                            target_id,
+                            action,
+                            depth + 1,
+                            count,
+                        ) {
                             Ok(true) => return Ok(true),
                             Err(e) => return Err(e),
                             Ok(false) => {} // Keep searching
@@ -636,7 +654,11 @@ impl MacAccessibility {
         }
         // Timeout check — only check every 10 elements to reduce clock overhead
         if current_count % 10 == 0 && std::time::Instant::now() > *deadline {
-            tracing::debug!("AX tree traversal hit timeout at depth {}, count {}", depth, current_count);
+            tracing::debug!(
+                "AX tree traversal hit timeout at depth {}, count {}",
+                depth,
+                current_count
+            );
             return None;
         }
 
@@ -667,9 +689,7 @@ impl MacAccessibility {
             .or_else(|| get_ax_string(element, "AXDescription"));
 
         // Filter out empty text elements and spacers early
-        if role_str == "AXStaticText"
-            && label.as_deref().map_or(true, |l| l.trim().is_empty())
-        {
+        if role_str == "AXStaticText" && label.as_deref().map_or(true, |l| l.trim().is_empty()) {
             let value_check = get_ax_string(element, "AXValue");
             if value_check.as_deref().map_or(true, |v| v.trim().is_empty()) {
                 return None;
@@ -709,7 +729,9 @@ impl MacAccessibility {
             properties.insert("required".into(), "true".into());
         }
         if let Some(v) = get_ax_string(element, "AXInvalid") {
-            if v != "false" { properties.insert("invalid".into(), v); }
+            if v != "false" {
+                properties.insert("invalid".into(), v);
+            }
         }
         // Slider bounds
         if role_str == "AXSlider" || role_str == "AXValueIndicator" {
@@ -770,7 +792,8 @@ impl MacAccessibility {
                     // Collect child refs
                     let child_refs: Vec<SendableAXRef> = (0..arr.len())
                         .filter_map(|i| {
-                            arr.get(i).map(|c| SendableAXRef(c.as_CFTypeRef() as AXUIElementRef))
+                            arr.get(i)
+                                .map(|c| SendableAXRef(c.as_CFTypeRef() as AXUIElementRef))
                         })
                         .collect();
 
@@ -782,7 +805,14 @@ impl MacAccessibility {
                                 if count.load(Ordering::Relaxed) >= max_nodes {
                                     return None;
                                 }
-                                self.build_element(child.0, Some(&id), depth + 1, count, deadline, max_nodes)
+                                self.build_element(
+                                    child.0,
+                                    Some(&id),
+                                    depth + 1,
+                                    count,
+                                    deadline,
+                                    max_nodes,
+                                )
                             })
                             .collect()
                     } else {
@@ -792,7 +822,14 @@ impl MacAccessibility {
                             if count.load(Ordering::Relaxed) >= max_nodes {
                                 break;
                             }
-                            if let Some(child_elem) = self.build_element(child.0, Some(&id), depth + 1, count, deadline, max_nodes) {
+                            if let Some(child_elem) = self.build_element(
+                                child.0,
+                                Some(&id),
+                                depth + 1,
+                                count,
+                                deadline,
+                                max_nodes,
+                            ) {
                                 kids.push(child_elem);
                             }
                         }
@@ -849,7 +886,9 @@ impl MacAccessibility {
     ) -> Result<(AccessibilityElement, TruncationReason), AccessibilityError> {
         let app = unsafe { AXUIElementCreateApplication(pid) };
         if app.is_null() {
-            return Err(AccessibilityError::QueryFailed("Failed to create app element".into()));
+            return Err(AccessibilityError::QueryFailed(
+                "Failed to create app element".into(),
+            ));
         }
 
         let app_label = get_ax_string(app, "AXTitle");
@@ -916,7 +955,9 @@ impl MacAccessibility {
     /// Get the display name of an app by PID (cheap — single AX attribute read).
     fn get_app_name_for_pid(&self, pid: i32) -> String {
         let app = unsafe { AXUIElementCreateApplication(pid) };
-        if app.is_null() { return pid.to_string(); }
+        if app.is_null() {
+            return pid.to_string();
+        }
         let name = get_ax_string(app, "AXTitle").unwrap_or_else(|| pid.to_string());
         unsafe { CFRelease(app as *const c_void) };
         name
@@ -927,9 +968,17 @@ impl MacAccessibility {
 fn collect_element_text(elem: &AccessibilityElement) -> String {
     let mut buf = String::new();
     fn recurse(e: &AccessibilityElement, b: &mut String) {
-        if let Some(ref l) = e.label { b.push_str(l); b.push(' '); }
-        if let Some(ref v) = e.value { b.push_str(v); b.push(' '); }
-        for child in &e.children { recurse(child, b); }
+        if let Some(ref l) = e.label {
+            b.push_str(l);
+            b.push(' ');
+        }
+        if let Some(ref v) = e.value {
+            b.push_str(v);
+            b.push(' ');
+        }
+        for child in &e.children {
+            recurse(child, b);
+        }
     }
     recurse(elem, &mut buf);
     buf
@@ -960,7 +1009,9 @@ impl AccessibilityTree for MacAccessibility {
         let app_name = self.get_app_name_for_pid(pid);
 
         // ── BUDGET CHECK: may throttle walk for heavy apps ──
-        let decision = self.budget.lock()
+        let decision = self
+            .budget
+            .lock()
             .map(|mut b| b.should_walk(&app_name))
             .unwrap_or(crate::budget::WalkDecision {
                 walk: true,
@@ -993,7 +1044,11 @@ impl AccessibilityTree for MacAccessibility {
                     && current_event_count == cached_event_count
                     && age_ms < CACHE_MAX_AGE_MS
                 {
-                    tracing::debug!("AX tree cache hit (age: {}ms, events: {})", age_ms, current_event_count);
+                    tracing::debug!(
+                        "AX tree cache hit (age: {}ms, events: {})",
+                        age_ms,
+                        current_event_count
+                    );
                     return Ok(cached.tree.clone());
                 }
             }
@@ -1001,22 +1056,33 @@ impl AccessibilityTree for MacAccessibility {
 
         // ── FULL TREE WALK ──
         let walk_start = std::time::Instant::now();
-        let (mut elem, truncation) = self.build_tree_for_pid(pid, decision.max_nodes, decision.timeout)?;
+        let (mut elem, truncation) =
+            self.build_tree_for_pid(pid, decision.max_nodes, decision.timeout)?;
         let walk_duration = walk_start.elapsed();
 
         // Record walk outcome in budget
         if let Ok(mut b) = self.budget.lock() {
-            b.record_walk(&app_name, walk_duration, truncation != TruncationReason::None);
+            b.record_walk(
+                &app_name,
+                walk_duration,
+                truncation != TruncationReason::None,
+            );
         }
 
         // Chromium warmup retry
         let actionable = count_actionable(&elem);
         if actionable < 5 {
             std::thread::sleep(std::time::Duration::from_millis(150));
-            if let Ok((retry, retry_trunc)) = self.build_tree_for_pid(pid, decision.max_nodes, decision.timeout) {
+            if let Ok((retry, retry_trunc)) =
+                self.build_tree_for_pid(pid, decision.max_nodes, decision.timeout)
+            {
                 if count_actionable(&retry) > actionable {
                     if let Ok(mut b) = self.budget.lock() {
-                        b.record_walk(&app_name, walk_duration, retry_trunc != TruncationReason::None);
+                        b.record_walk(
+                            &app_name,
+                            walk_duration,
+                            retry_trunc != TruncationReason::None,
+                        );
                     }
                     elem = retry;
                 }
@@ -1033,7 +1099,8 @@ impl AccessibilityTree for MacAccessibility {
             } else {
                 tracing::debug!(
                     "AX snapshot dedup: near-identical content (app={}, window={})",
-                    app_name, window_title
+                    app_name,
+                    window_title
                 );
             }
         }
@@ -1046,7 +1113,8 @@ impl AccessibilityTree for MacAccessibility {
                 created_at: std::time::Instant::now(),
             });
         }
-        self.cache_event_count.store(current_event_count, Ordering::Relaxed);
+        self.cache_event_count
+            .store(current_event_count, Ordering::Relaxed);
 
         Ok(elem)
     }
@@ -1105,7 +1173,9 @@ impl AccessibilityTree for MacAccessibility {
         let pid = self.get_focused_app_pid()?;
         let app = unsafe { AXUIElementCreateApplication(pid) };
         if app.is_null() {
-            return Err(AccessibilityError::QueryFailed("Failed to create app element".into()));
+            return Err(AccessibilityError::QueryFailed(
+                "Failed to create app element".into(),
+            ));
         }
 
         // Get the target element — prefer focused window, fall back to app
@@ -1125,11 +1195,10 @@ impl AccessibilityTree for MacAccessibility {
                 tracing::info!("AXPerformAction '{}' on element '{}'", action, element_id);
                 Ok(true)
             }
-            Ok(false) => {
-                Err(AccessibilityError::NotFound(format!(
-                    "Element '{}' not found in accessibility tree", element_id
-                )))
-            }
+            Ok(false) => Err(AccessibilityError::NotFound(format!(
+                "Element '{}' not found in accessibility tree",
+                element_id
+            ))),
             Err(e) => Err(e),
         }
     }
@@ -1138,7 +1207,9 @@ impl AccessibilityTree for MacAccessibility {
         let pid = self.get_focused_app_pid()?;
         let app = unsafe { AXUIElementCreateApplication(pid) };
         if app.is_null() {
-            return Err(AccessibilityError::QueryFailed("Failed to create app element".into()));
+            return Err(AccessibilityError::QueryFailed(
+                "Failed to create app element".into(),
+            ));
         }
 
         let window_cf = get_ax_attribute(app, "AXFocusedWindow");
@@ -1154,14 +1225,17 @@ impl AccessibilityTree for MacAccessibility {
 
         match result {
             Ok(true) => {
-                tracing::info!("AXSetAttributeValue on element '{}' = '{}'", element_id, value);
+                tracing::info!(
+                    "AXSetAttributeValue on element '{}' = '{}'",
+                    element_id,
+                    value
+                );
                 Ok(true)
             }
-            Ok(false) => {
-                Err(AccessibilityError::NotFound(format!(
-                    "Element '{}' not found in accessibility tree", element_id
-                )))
-            }
+            Ok(false) => Err(AccessibilityError::NotFound(format!(
+                "Element '{}' not found in accessibility tree",
+                element_id
+            ))),
             Err(e) => Err(e),
         }
     }
@@ -1190,16 +1264,18 @@ impl AccessibilityTree for MacAccessibility {
         result.unwrap_or(false)
     }
 
-    fn element_at_position(&self, x: f32, y: f32) -> Result<Option<AccessibilityElement>, AccessibilityError> {
+    fn element_at_position(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Result<Option<AccessibilityElement>, AccessibilityError> {
         let system_wide = unsafe { AXUIElementCreateSystemWide() };
         if system_wide.is_null() {
             return Ok(None);
         }
 
         let mut element_ref: AXUIElementRef = ptr::null();
-        let err = unsafe {
-            AXUIElementCopyElementAtPosition(system_wide, x, y, &mut element_ref)
-        };
+        let err = unsafe { AXUIElementCopyElementAtPosition(system_wide, x, y, &mut element_ref) };
         unsafe { CFRelease(system_wide as *const c_void) };
 
         if err != K_AX_ERROR_SUCCESS || element_ref.is_null() {
@@ -1231,7 +1307,9 @@ impl AccessibilityTree for MacAccessibility {
                     == unsafe { core_foundation::base::CFGetTypeID(children_ref) }
                 {
                     let arr: CFArray<CFType> = unsafe {
-                        CFArray::wrap_under_get_rule(children_ref as core_foundation::array::CFArrayRef)
+                        CFArray::wrap_under_get_rule(
+                            children_ref as core_foundation::array::CFArrayRef,
+                        )
                     };
                     for i in 0..arr.len() {
                         if let Some(top_menu) = arr.get(i) {
@@ -1271,8 +1349,11 @@ impl AccessibilityTree for MacAccessibility {
                         let win_ref = win.as_CFTypeRef() as AXUIElementRef;
                         let count = AtomicUsize::new(0);
                         // Shallow tree (depth 2) for each window — just enough for title/bounds
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-                        if let Some(elem) = self.build_element(win_ref, None, 0, &count, &deadline, MAX_ELEMENTS) {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_millis(500);
+                        if let Some(elem) =
+                            self.build_element(win_ref, None, 0, &count, &deadline, MAX_ELEMENTS)
+                        {
                             windows.push(elem);
                         }
                     }
@@ -1319,8 +1400,8 @@ fn extract_menu_items(
                             continue; // Skip separators
                         }
                         let enabled = get_ax_bool(child_ref, "AXEnabled").unwrap_or(true);
-                        let shortcut = get_ax_string(child_ref, "AXMenuItemCmdChar")
-                            .and_then(|key| {
+                        let shortcut =
+                            get_ax_string(child_ref, "AXMenuItemCmdChar").and_then(|key| {
                                 if key.is_empty() {
                                     return None;
                                 }
@@ -1352,13 +1433,21 @@ fn extract_menu_items(
                                 == unsafe { core_foundation::base::CFGetTypeID(sub_ref) }
                             {
                                 let sub_arr: CFArray<CFType> = unsafe {
-                                    CFArray::wrap_under_get_rule(sub_ref as core_foundation::array::CFArrayRef)
+                                    CFArray::wrap_under_get_rule(
+                                        sub_ref as core_foundation::array::CFArrayRef,
+                                    )
                                 };
                                 for j in 0..sub_arr.len() {
                                     if let Some(sub_child) = sub_arr.get(j) {
-                                        let sub_child_ref = sub_child.as_CFTypeRef() as AXUIElementRef;
+                                        let sub_child_ref =
+                                            sub_child.as_CFTypeRef() as AXUIElementRef;
                                         let sub_path = format!("{} > {}", path_prefix, label);
-                                        extract_menu_items(sub_child_ref, &sub_path, items, depth + 1);
+                                        extract_menu_items(
+                                            sub_child_ref,
+                                            &sub_path,
+                                            items,
+                                            depth + 1,
+                                        );
                                     }
                                 }
                             }
@@ -1425,7 +1514,8 @@ fn find_and_set_value(
                 "false" | "0" => false,
                 _ => {
                     return Err(AccessibilityError::OperationFailed(format!(
-                        "Invalid boolean value '{}' for checkbox/radio", value
+                        "Invalid boolean value '{}' for checkbox/radio",
+                        value
                     )));
                 }
             };
@@ -1443,7 +1533,10 @@ fn find_and_set_value(
             }
         } else if let Ok(num) = value.parse::<f64>() {
             // Try numeric for sliders, progress indicators, etc.
-            if matches!(role_str.as_str(), "AXSlider" | "AXScrollBar" | "AXValueIndicator") {
+            if matches!(
+                role_str.as_str(),
+                "AXSlider" | "AXScrollBar" | "AXValueIndicator"
+            ) {
                 let cf_num = CFNumber::from(num);
                 unsafe {
                     AXUIElementSetAttributeValue(
@@ -1479,7 +1572,8 @@ fn find_and_set_value(
             Ok(true)
         } else {
             Err(AccessibilityError::OperationFailed(format!(
-                "AXUIElementSetAttributeValue failed with error {}", set_err
+                "AXUIElementSetAttributeValue failed with error {}",
+                set_err
             )))
         };
     }
@@ -1564,7 +1658,9 @@ fn find_and_check_settable(
                     break;
                 }
                 if let Some(child_ref) = arr.get(i).map(|c| c.as_CFTypeRef() as AXUIElementRef) {
-                    if let Some(result) = find_and_check_settable(child_ref, target_id, depth + 1, count) {
+                    if let Some(result) =
+                        find_and_check_settable(child_ref, target_id, depth + 1, count)
+                    {
                         return Some(result);
                     }
                 }
@@ -1646,9 +1742,8 @@ fn get_ax_array_len(element: AXUIElementRef, attr: &str) -> Option<usize> {
     if unsafe { core_foundation::array::CFArrayGetTypeID() }
         == unsafe { core_foundation::base::CFGetTypeID(cf_ref) }
     {
-        let arr: CFArray<CFType> = unsafe {
-            CFArray::wrap_under_get_rule(cf_ref as core_foundation::array::CFArrayRef)
-        };
+        let arr: CFArray<CFType> =
+            unsafe { CFArray::wrap_under_get_rule(cf_ref as core_foundation::array::CFArrayRef) };
         Some(arr.len() as usize)
     } else {
         None
@@ -1700,7 +1795,10 @@ fn get_ax_state_fast(element: AXUIElementRef, role: &str) -> ElementState {
     let focused = get_ax_bool(element, "AXFocused").unwrap_or(false);
 
     // Only query selected for roles that support selection
-    let selected = if matches!(role, "AXRow" | "AXCell" | "AXMenuItem" | "AXListItem" | "AXTabButton" | "AXRadioButton") {
+    let selected = if matches!(
+        role,
+        "AXRow" | "AXCell" | "AXMenuItem" | "AXListItem" | "AXTabButton" | "AXRadioButton"
+    ) {
         get_ax_bool(element, "AXSelected").unwrap_or(false)
     } else {
         false
@@ -1736,13 +1834,34 @@ fn get_ax_state_fast(element: AXUIElementRef, role: &str) -> ElementState {
 
 /// Check if a role is interactive (worth querying actions for).
 fn is_interactive_role(role: &str) -> bool {
-    matches!(role,
-        "AXButton" | "AXLink" | "AXTextField" | "AXTextArea" | "AXSearchField"
-        | "AXSecureTextField" | "AXCheckBox" | "AXRadioButton" | "AXPopUpButton"
-        | "AXComboBox" | "AXSlider" | "AXMenuItem" | "AXMenuBarItem" | "AXMenuButton"
-        | "AXTab" | "AXTabButton" | "AXDisclosureTriangle" | "AXIncrementor"
-        | "AXColorWell" | "AXDateField" | "AXToolbar" | "AXStepper"
-        | "AXSplitGroup" | "AXImage" | "AXRow" | "AXCell"
+    matches!(
+        role,
+        "AXButton"
+            | "AXLink"
+            | "AXTextField"
+            | "AXTextArea"
+            | "AXSearchField"
+            | "AXSecureTextField"
+            | "AXCheckBox"
+            | "AXRadioButton"
+            | "AXPopUpButton"
+            | "AXComboBox"
+            | "AXSlider"
+            | "AXMenuItem"
+            | "AXMenuBarItem"
+            | "AXMenuButton"
+            | "AXTab"
+            | "AXTabButton"
+            | "AXDisclosureTriangle"
+            | "AXIncrementor"
+            | "AXColorWell"
+            | "AXDateField"
+            | "AXToolbar"
+            | "AXStepper"
+            | "AXSplitGroup"
+            | "AXImage"
+            | "AXRow"
+            | "AXCell"
     )
 }
 
@@ -1754,9 +1873,8 @@ fn get_ax_actions(element: AXUIElementRef) -> Vec<String> {
         return vec![];
     }
 
-    let arr: CFArray<CFType> = unsafe {
-        CFArray::wrap_under_create_rule(names_ref as core_foundation::array::CFArrayRef)
-    };
+    let arr: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_create_rule(names_ref as core_foundation::array::CFArrayRef) };
 
     let mut actions = Vec::new();
     for i in 0..arr.len() {
@@ -1842,9 +1960,14 @@ fn find_in_tree(
     label: Option<&str>,
     results: &mut Vec<AccessibilityElement>,
 ) {
-    let role_match = role.map_or(true, |r| std::mem::discriminant(&element.role) == std::mem::discriminant(r));
+    let role_match = role.map_or(true, |r| {
+        std::mem::discriminant(&element.role) == std::mem::discriminant(r)
+    });
     let label_match = label.map_or(true, |l| {
-        element.label.as_deref().map_or(false, |el| el.to_lowercase().contains(&l.to_lowercase()))
+        element
+            .label
+            .as_deref()
+            .map_or(false, |el| el.to_lowercase().contains(&l.to_lowercase()))
     });
 
     if role_match && label_match {
@@ -1880,8 +2003,14 @@ mod tests {
         assert!(matches!(map_role("AXTextArea", None), ElementRole::Input));
         assert!(matches!(map_role("AXStaticText", None), ElementRole::Text));
         assert!(matches!(map_role("AXWindow", None), ElementRole::Window));
-        assert!(matches!(map_role("AXCheckBox", None), ElementRole::Checkbox));
-        assert!(matches!(map_role("AXRadioButton", None), ElementRole::RadioButton));
+        assert!(matches!(
+            map_role("AXCheckBox", None),
+            ElementRole::Checkbox
+        ));
+        assert!(matches!(
+            map_role("AXRadioButton", None),
+            ElementRole::RadioButton
+        ));
         assert!(matches!(map_role("AXSlider", None), ElementRole::Slider));
         assert!(matches!(map_role("AXLink", None), ElementRole::Link));
         assert!(matches!(map_role("AXImage", None), ElementRole::Image));
@@ -1893,8 +2022,14 @@ mod tests {
 
     #[test]
     fn test_map_role_with_subrole() {
-        assert!(matches!(map_role("AXGroup", Some("AXTabPanel")), ElementRole::TabItem));
-        assert!(matches!(map_role("AXGroup", Some("AXContentList")), ElementRole::List));
+        assert!(matches!(
+            map_role("AXGroup", Some("AXTabPanel")),
+            ElementRole::TabItem
+        ));
+        assert!(matches!(
+            map_role("AXGroup", Some("AXContentList")),
+            ElementRole::List
+        ));
         assert!(matches!(map_role("AXGroup", None), ElementRole::Group));
     }
 
@@ -1910,7 +2045,10 @@ mod tests {
     fn test_map_role_table_and_dialog_variants() {
         assert!(matches!(map_role("AXRow", None), ElementRole::TableRow));
         assert!(matches!(map_role("AXCell", None), ElementRole::TableCell));
-        assert!(matches!(map_role("AXTabButton", None), ElementRole::TabItem));
+        assert!(matches!(
+            map_role("AXTabButton", None),
+            ElementRole::TabItem
+        ));
         assert!(matches!(map_role("AXDialog", None), ElementRole::Dialog));
     }
 
@@ -1979,10 +2117,7 @@ mod tests {
         // Should have some children from the focused window
         println!("Root: {:?} - children: {}", tree.label, tree.children.len());
         for child in &tree.children {
-            println!(
-                "  {:?} {:?} {:?}",
-                child.role, child.label, child.bounds
-            );
+            println!("  {:?} {:?} {:?}", child.role, child.label, child.bounds);
         }
     }
 }

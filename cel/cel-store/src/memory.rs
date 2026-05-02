@@ -261,25 +261,28 @@ impl crate::CelStore {
                  created_at DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![workflow_name, limit], |row: &rusqlite::Row| {
-            let priority_str: String = row.get(3)?;
-            let priority = match priority_str.as_str() {
-                "high" => ObservationPriority::High,
-                "low" => ObservationPriority::Low,
-                _ => ObservationPriority::Medium,
-            };
-            Ok(Observation {
-                id: row.get(0)?,
-                workflow_name: row.get(1)?,
-                content: row.get(2)?,
-                priority,
-                source_run_ids: row.get(4)?,
-                observed_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                referenced_at: row.get(6)?,
-                superseded_by: row.get(7)?,
-                created_at: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![workflow_name, limit],
+            |row: &rusqlite::Row| {
+                let priority_str: String = row.get(3)?;
+                let priority = match priority_str.as_str() {
+                    "high" => ObservationPriority::High,
+                    "low" => ObservationPriority::Low,
+                    _ => ObservationPriority::Medium,
+                };
+                Ok(Observation {
+                    id: row.get(0)?,
+                    workflow_name: row.get(1)?,
+                    content: row.get(2)?,
+                    priority,
+                    source_run_ids: row.get(4)?,
+                    observed_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    referenced_at: row.get(6)?,
+                    superseded_by: row.get(7)?,
+                    created_at: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                })
+            },
+        )?;
         let mut records = Vec::new();
         for row in rows {
             records.push(row?);
@@ -288,11 +291,7 @@ impl crate::CelStore {
     }
 
     /// Supersede an observation (mark it as replaced by a newer one).
-    pub fn supersede_observation(
-        &self,
-        old_id: i64,
-        new_id: i64,
-    ) -> Result<(), StoreError> {
+    pub fn supersede_observation(&self, old_id: i64, new_id: i64) -> Result<(), StoreError> {
         self.conn.execute(
             "UPDATE observations SET superseded_by = ?1 WHERE id = ?2",
             rusqlite::params![new_id, old_id],
@@ -321,7 +320,11 @@ impl crate::CelStore {
 
     /// Delete observations older than `days` for a workflow.
     /// Returns number of deleted rows.
-    pub fn evict_old_observations(&self, workflow_name: &str, days: u32) -> Result<usize, StoreError> {
+    pub fn evict_old_observations(
+        &self,
+        workflow_name: &str,
+        days: u32,
+    ) -> Result<usize, StoreError> {
         let affected = self.conn.execute(
             "DELETE FROM observations WHERE workflow_name = ?1 AND created_at < datetime('now', ?2)",
             rusqlite::params![workflow_name, format!("-{} days", days)],
@@ -341,7 +344,11 @@ impl crate::CelStore {
 
     /// Cap observations per workflow, keeping the most recent by priority.
     /// Returns number of deleted rows.
-    pub fn cap_observations(&self, workflow_name: &str, max_count: u32) -> Result<usize, StoreError> {
+    pub fn cap_observations(
+        &self,
+        workflow_name: &str,
+        max_count: u32,
+    ) -> Result<usize, StoreError> {
         let affected = self.conn.execute(
             "DELETE FROM observations WHERE workflow_name = ?1 AND id NOT IN (
                 SELECT id FROM observations WHERE workflow_name = ?1 AND superseded_by IS NULL
@@ -470,7 +477,9 @@ mod tests {
     #[test]
     fn test_working_memory_update() {
         let store = CelStore::open_memory().unwrap();
-        store.update_working_memory("daily-po", "# Field Mappings\n- Vendor X → 10045").unwrap();
+        store
+            .update_working_memory("daily-po", "# Field Mappings\n- Vendor X → 10045")
+            .unwrap();
         let wm = store.get_working_memory("daily-po").unwrap();
         assert!(wm.content.contains("Vendor X"));
     }
@@ -496,21 +505,36 @@ mod tests {
     #[test]
     fn test_add_and_get_observations() {
         let store = CelStore::open_memory().unwrap();
-        store.add_observation(
-            "daily-po", "Vendor X always maps to code 10045",
-            &ObservationPriority::High, &[1, 2, 3],
-            Some("2024-06-15"), None,
-        ).unwrap();
-        store.add_observation(
-            "daily-po", "SAP dialog takes ~3s after Submit click",
-            &ObservationPriority::Medium, &[2, 3],
-            None, None,
-        ).unwrap();
-        store.add_observation(
-            "other-wf", "Should not appear",
-            &ObservationPriority::Low, &[99],
-            None, None,
-        ).unwrap();
+        store
+            .add_observation(
+                "daily-po",
+                "Vendor X always maps to code 10045",
+                &ObservationPriority::High,
+                &[1, 2, 3],
+                Some("2024-06-15"),
+                None,
+            )
+            .unwrap();
+        store
+            .add_observation(
+                "daily-po",
+                "SAP dialog takes ~3s after Submit click",
+                &ObservationPriority::Medium,
+                &[2, 3],
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .add_observation(
+                "other-wf",
+                "Should not appear",
+                &ObservationPriority::Low,
+                &[99],
+                None,
+                None,
+            )
+            .unwrap();
 
         let obs = store.get_observations("daily-po", 10).unwrap();
         assert_eq!(obs.len(), 2);
@@ -522,14 +546,26 @@ mod tests {
     #[test]
     fn test_observation_supersede() {
         let store = CelStore::open_memory().unwrap();
-        let old_id = store.add_observation(
-            "wf", "Vendor X → code 10045",
-            &ObservationPriority::High, &[1], None, None,
-        ).unwrap();
-        let new_id = store.add_observation(
-            "wf", "Vendor X → code 10046 (updated Jan 2025)",
-            &ObservationPriority::High, &[1, 5], None, None,
-        ).unwrap();
+        let old_id = store
+            .add_observation(
+                "wf",
+                "Vendor X → code 10045",
+                &ObservationPriority::High,
+                &[1],
+                None,
+                None,
+            )
+            .unwrap();
+        let new_id = store
+            .add_observation(
+                "wf",
+                "Vendor X → code 10046 (updated Jan 2025)",
+                &ObservationPriority::High,
+                &[1, 5],
+                None,
+                None,
+            )
+            .unwrap();
         store.supersede_observation(old_id, new_id).unwrap();
 
         let obs = store.get_observations("wf", 10).unwrap();
@@ -540,18 +576,30 @@ mod tests {
     #[test]
     fn test_scoped_knowledge_fts5_search() {
         let store = CelStore::open_memory().unwrap();
-        store.add_scoped_knowledge(
-            "Vendor X maps to code 10045 in the SAP system",
-            "learned", Some("daily-po"), Some("sap,vendor"),
-        ).unwrap();
-        store.add_scoped_knowledge(
-            "Bloomberg terminal requires F10 to confirm trades",
-            "manual", Some("trade-wf"), Some("bloomberg"),
-        ).unwrap();
-        store.add_scoped_knowledge(
-            "Always check for stale prices before submitting",
-            "learned", None, Some("trading,risk"),
-        ).unwrap();
+        store
+            .add_scoped_knowledge(
+                "Vendor X maps to code 10045 in the SAP system",
+                "learned",
+                Some("daily-po"),
+                Some("sap,vendor"),
+            )
+            .unwrap();
+        store
+            .add_scoped_knowledge(
+                "Bloomberg terminal requires F10 to confirm trades",
+                "manual",
+                Some("trade-wf"),
+                Some("bloomberg"),
+            )
+            .unwrap();
+        store
+            .add_scoped_knowledge(
+                "Always check for stale prices before submitting",
+                "learned",
+                None,
+                Some("trading,risk"),
+            )
+            .unwrap();
 
         // Search for "vendor" — should find the SAP entry
         let results = store.search_knowledge("vendor", None, 10).unwrap();
@@ -559,14 +607,18 @@ mod tests {
         assert!(results[0].content.contains("Vendor X"));
 
         // Scoped search — only daily-po and global
-        let results = store.search_knowledge("SAP OR stale", Some("daily-po"), 10).unwrap();
+        let results = store
+            .search_knowledge("SAP OR stale", Some("daily-po"), 10)
+            .unwrap();
         assert!(results.len() >= 1);
     }
 
     #[test]
     fn test_knowledge_fts5_no_results() {
         let store = CelStore::open_memory().unwrap();
-        store.add_scoped_knowledge("Hello world", "test", None, None).unwrap();
+        store
+            .add_scoped_knowledge("Hello world", "test", None, None)
+            .unwrap();
         let results = store.search_knowledge("nonexistent_xyz", None, 10).unwrap();
         assert!(results.is_empty());
     }
@@ -574,9 +626,15 @@ mod tests {
     #[test]
     fn test_knowledge_score_ranking() {
         let store = CelStore::open_memory().unwrap();
-        store.add_scoped_knowledge("Excel cell A1 contains revenue data", "test", None, None).unwrap();
-        store.add_scoped_knowledge("Revenue report Excel macro runs weekly", "test", None, None).unwrap();
-        store.add_scoped_knowledge("Something unrelated about weather", "test", None, None).unwrap();
+        store
+            .add_scoped_knowledge("Excel cell A1 contains revenue data", "test", None, None)
+            .unwrap();
+        store
+            .add_scoped_knowledge("Revenue report Excel macro runs weekly", "test", None, None)
+            .unwrap();
+        store
+            .add_scoped_knowledge("Something unrelated about weather", "test", None, None)
+            .unwrap();
 
         let results = store.search_knowledge("Excel revenue", None, 10).unwrap();
         assert!(results.len() >= 2);
@@ -589,9 +647,36 @@ mod tests {
     #[test]
     fn test_observation_priority_ordering() {
         let store = CelStore::open_memory().unwrap();
-        store.add_observation("wf", "Low fact", &ObservationPriority::Low, &[1], None, None).unwrap();
-        store.add_observation("wf", "High fact", &ObservationPriority::High, &[1], None, None).unwrap();
-        store.add_observation("wf", "Medium fact", &ObservationPriority::Medium, &[1], None, None).unwrap();
+        store
+            .add_observation(
+                "wf",
+                "Low fact",
+                &ObservationPriority::Low,
+                &[1],
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .add_observation(
+                "wf",
+                "High fact",
+                &ObservationPriority::High,
+                &[1],
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .add_observation(
+                "wf",
+                "Medium fact",
+                &ObservationPriority::Medium,
+                &[1],
+                None,
+                None,
+            )
+            .unwrap();
 
         let obs = store.get_observations("wf", 10).unwrap();
         assert_eq!(obs[0].priority, ObservationPriority::High);
@@ -602,8 +687,12 @@ mod tests {
     #[test]
     fn test_evict_superseded_observations() {
         let store = CelStore::open_memory().unwrap();
-        let old_id = store.add_observation("wf", "old", &ObservationPriority::High, &[1], None, None).unwrap();
-        let new_id = store.add_observation("wf", "new", &ObservationPriority::High, &[2], None, None).unwrap();
+        let old_id = store
+            .add_observation("wf", "old", &ObservationPriority::High, &[1], None, None)
+            .unwrap();
+        let new_id = store
+            .add_observation("wf", "new", &ObservationPriority::High, &[2], None, None)
+            .unwrap();
         store.supersede_observation(old_id, new_id).unwrap();
 
         let deleted = store.evict_superseded_observations().unwrap();
@@ -618,9 +707,27 @@ mod tests {
     fn test_cap_observations() {
         let store = CelStore::open_memory().unwrap();
         for i in 0..10 {
-            store.add_observation("wf", &format!("obs {}", i), &ObservationPriority::Low, &[1], None, None).unwrap();
+            store
+                .add_observation(
+                    "wf",
+                    &format!("obs {}", i),
+                    &ObservationPriority::Low,
+                    &[1],
+                    None,
+                    None,
+                )
+                .unwrap();
         }
-        store.add_observation("wf", "important", &ObservationPriority::High, &[1], None, None).unwrap();
+        store
+            .add_observation(
+                "wf",
+                "important",
+                &ObservationPriority::High,
+                &[1],
+                None,
+                None,
+            )
+            .unwrap();
 
         let deleted = store.cap_observations("wf", 3).unwrap();
         assert!(deleted > 0);
@@ -666,7 +773,16 @@ mod tests {
             [],
         ).unwrap();
         let old_id = store.conn.last_insert_rowid();
-        let new_id = store.add_observation("wf", "new obs", &ObservationPriority::High, &[1], None, None).unwrap();
+        let new_id = store
+            .add_observation(
+                "wf",
+                "new obs",
+                &ObservationPriority::High,
+                &[1],
+                None,
+                None,
+            )
+            .unwrap();
         store.supersede_observation(old_id, new_id).unwrap();
 
         store.conn.execute(

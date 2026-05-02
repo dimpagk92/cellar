@@ -49,12 +49,9 @@ fn parse_key(key: &str) -> Result<enigo::Key, InputError> {
         "left" | "leftarrow" | "arrowleft" | "left arrow" | "left_arrow" | "arrow left" => {
             Ok(enigo::Key::LeftArrow)
         }
-        "right"
-        | "rightarrow"
-        | "arrowright"
-        | "right arrow"
-        | "right_arrow"
-        | "arrow right" => Ok(enigo::Key::RightArrow),
+        "right" | "rightarrow" | "arrowright" | "right arrow" | "right_arrow" | "arrow right" => {
+            Ok(enigo::Key::RightArrow)
+        }
         "home" => Ok(enigo::Key::Home),
         "end" => Ok(enigo::Key::End),
         "pageup" => Ok(enigo::Key::PageUp),
@@ -124,7 +121,10 @@ impl InputController for EnigoInput {
     }
 
     fn key_combo(&mut self, keys: &[&str]) -> Result<(), InputError> {
-        let parsed: Vec<enigo::Key> = keys.iter().map(|k| parse_key(k)).collect::<Result<_, _>>()?;
+        let parsed: Vec<enigo::Key> = keys
+            .iter()
+            .map(|k| parse_key(k))
+            .collect::<Result<_, _>>()?;
 
         // Track which keys were pressed so we can release them all on error
         let mut pressed = Vec::with_capacity(parsed.len());
@@ -166,8 +166,7 @@ impl InputController for EnigoInput {
     }
 
     fn mouse_position(&self) -> Result<(i32, i32), InputError> {
-        enigo::Mouse::location(&self.enigo)
-            .map_err(|e| InputError::Failed(e.to_string()))
+        enigo::Mouse::location(&self.enigo).map_err(|e| InputError::Failed(e.to_string()))
     }
 
     fn drag(&mut self, from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> Result<(), InputError> {
@@ -182,7 +181,8 @@ impl InputController for EnigoInput {
         let move_result = self.mouse_move(to_x, to_y);
 
         // Always release the button, even if the move failed
-        let release_result = self.enigo
+        let release_result = self
+            .enigo
             .button(Button::Left, Direction::Release)
             .map_err(|e| InputError::Failed(e.to_string()));
 

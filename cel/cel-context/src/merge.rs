@@ -12,19 +12,52 @@ use std::time::{Duration, Instant};
 /// Set to 5 to avoid unnecessary vision calls on simple dialogs (OK/Cancel = 2 buttons).
 const VISION_FALLBACK_THRESHOLD: usize = 5;
 const GENERIC_ACTION_LABELS: &[&str] = &[
-    "open", "close", "cancel", "ok", "more", "menu", "next", "back",
-    "learn more", "details", "view", "edit", "delete", "remove", "select",
-    "continue", "submit", "save", "apply", "retry", "dismiss",
+    "open",
+    "close",
+    "cancel",
+    "ok",
+    "more",
+    "menu",
+    "next",
+    "back",
+    "learn more",
+    "details",
+    "view",
+    "edit",
+    "delete",
+    "remove",
+    "select",
+    "continue",
+    "submit",
+    "save",
+    "apply",
+    "retry",
+    "dismiss",
 ];
 const CHROME_NOISE_HINTS: &[&str] = &[
-    "header", "nav", "navbar", "toolbar", "menu", "sidebar", "breadcrumb",
-    "footer", "legal", "cookie", "consent", "account", "profile", "help",
-    "support", "social", "share", "newsletter", "chat", "intercom",
+    "header",
+    "nav",
+    "navbar",
+    "toolbar",
+    "menu",
+    "sidebar",
+    "breadcrumb",
+    "footer",
+    "legal",
+    "cookie",
+    "consent",
+    "account",
+    "profile",
+    "help",
+    "support",
+    "social",
+    "share",
+    "newsletter",
+    "chat",
+    "intercom",
 ];
 
-fn frontmost_app_from_signals(
-    snapshot: &cel_signals::SignalSnapshot,
-) -> Option<String> {
+fn frontmost_app_from_signals(snapshot: &cel_signals::SignalSnapshot) -> Option<String> {
     snapshot
         .running_apps
         .iter()
@@ -48,9 +81,7 @@ fn frontmost_window_from_signals(
             .window_list
             .iter()
             .find(|window| {
-                window.is_on_screen
-                    && window.app_name == app_name
-                    && !window.title.is_empty()
+                window.is_on_screen && window.app_name == app_name && !window.title.is_empty()
             })
             .map(|window| window.title.clone())
             .or_else(|| {
@@ -335,7 +366,9 @@ impl ContextMerger {
         });
 
         // Detect foreground app/window — prefer accessibility data over display layer
-        let (app, window) = self.detect_foreground_from_a11y().unwrap_or_else(|| self.detect_foreground());
+        let (app, window) = self
+            .detect_foreground_from_a11y()
+            .unwrap_or_else(|| self.detect_foreground());
 
         // Capture screen dimensions for spatial normalization in reference resolution
         let (screen_width, screen_height) = self
@@ -361,10 +394,16 @@ impl ContextMerger {
             screen_width,
             screen_height,
             clipboard: signal_snapshot.as_ref().and_then(|s| s.clipboard.clone()),
-            window_list: signal_snapshot.as_ref().map(|s| s.window_list.clone()).unwrap_or_default(),
+            window_list: signal_snapshot
+                .as_ref()
+                .map(|s| s.window_list.clone())
+                .unwrap_or_default(),
             audio: signal_snapshot.as_ref().and_then(|s| s.audio.clone()),
             power: signal_snapshot.as_ref().and_then(|s| s.power.clone()),
-            running_apps: signal_snapshot.as_ref().map(|s| s.running_apps.clone()).unwrap_or_default(),
+            running_apps: signal_snapshot
+                .as_ref()
+                .map(|s| s.running_apps.clone())
+                .unwrap_or_default(),
             recent_files: signal_snapshot.map(|s| s.recent_files).unwrap_or_default(),
             http_events: vec![],
             transcripts: vec![],
@@ -391,18 +430,14 @@ impl ContextMerger {
         let context = self.get_context();
 
         // Try exact ID match first
-        let target = context
-            .elements
-            .iter()
-            .find(|e| e.id == element_id)
-            .or_else(|| {
-                // Fallback: parse the element_id to extract type+label hints.
-                // If the caller provides "button:Submit", match by type and label.
-                // Otherwise, try to find by reference resolution.
-                // For now, just try to find by the element's old type+label combo
-                // using the resolve_reference system.
-                None
-            })?;
+        let target = context.elements.iter().find(|e| e.id == element_id).or({
+            // Fallback: parse the element_id to extract type+label hints.
+            // If the caller provides "button:Submit", match by type and label.
+            // Otherwise, try to find by reference resolution.
+            // For now, just try to find by the element's old type+label combo
+            // using the resolve_reference system.
+            None
+        })?;
 
         // Build ancestor path by following parent_id chain
         let mut ancestor_path = Vec::new();
@@ -478,7 +513,11 @@ impl ContextMerger {
             .into_iter()
             .enumerate()
             .map(|(i, ve)| {
-                let role = crate::classify_content_role(&ve.element_type, &[], &cel_accessibility::ElementState::default_visible());
+                let role = crate::classify_content_role(
+                    &ve.element_type,
+                    &[],
+                    &cel_accessibility::ElementState::default_visible(),
+                );
                 ContextElement {
                     id: format!("vision:{}", i),
                     label: Some(ve.label),
@@ -514,6 +553,7 @@ impl ContextMerger {
     /// Strategy:
     /// 1. Try the accessibility tree's focused element (most reliable).
     /// 2. Fall back to the display layer's window list (first non-minimized).
+    ///
     /// Detect foreground app/window from the accessibility tree.
     /// Returns (app_name, window_title) if available.
     fn detect_foreground_from_a11y(&self) -> Option<(String, String)> {
@@ -538,9 +578,11 @@ impl ContextMerger {
             .or_else(|| {
                 // Fallback to display layer when signals not wired
                 self.display.as_ref().and_then(|d| {
-                    d.list_windows()
-                        .ok()
-                        .and_then(|w| w.iter().find(|w| !w.is_minimized).map(|w| w.app_name.clone()))
+                    d.list_windows().ok().and_then(|w| {
+                        w.iter()
+                            .find(|w| !w.is_minimized)
+                            .map(|w| w.app_name.clone())
+                    })
                 })
             })
             .unwrap_or_else(|| window_title.clone());
@@ -613,6 +655,7 @@ impl ContextMerger {
     /// When a vision element overlaps an existing element (IoU > 0.5):
     /// - Upgrades bounds if vision bounds are more precise (smaller area)
     /// - Boosts confidence by 0.05 for cross-source confirmation
+    ///
     /// When no overlap exists, adds the vision element as a new discovery.
     pub fn merge_vision_elements(&self, base: &mut ScreenContext, vision: Vec<ContextElement>) {
         for elem in vision {
@@ -652,6 +695,7 @@ impl ContextMerger {
     /// - +0.10 if has valid bounds (non-zero area)
     /// - +0.05 if state indicates visible and enabled
     /// - +0.05 if element is an actionable type (button, input, etc.)
+    ///
     /// Maximum: ~0.90 for a fully-qualified element
     fn flatten_a11y_tree(&self, node: &AccessibilityElement, out: &mut Vec<ContextElement>) {
         let element_type = role_to_string(&node.role);
@@ -665,8 +709,8 @@ impl ContextMerger {
 
         // Filter out noise: skip elements that are invisible AND have no useful data.
         // Keep the element if it has children (they might be useful), or if it has a label/value.
-        let has_label = node.label.as_ref().map_or(false, |l| !l.is_empty());
-        let has_value = node.value.as_ref().map_or(false, |v| !v.is_empty());
+        let has_label = node.label.as_ref().is_some_and(|l| !l.is_empty());
+        let has_value = node.value.as_ref().is_some_and(|v| !v.is_empty());
         if !node.state.visible && !has_label && !has_value && node.children.is_empty() {
             return; // Skip invisible leaf elements with no data
         }
@@ -700,9 +744,7 @@ impl ContextMerger {
             actions: node.actions.clone(),
             confidence: 0.0, // Will be scored below
             source: ContextSource::AccessibilityTree,
-            content_role: crate::classify_content_role(
-                &element_type, &node.actions, &node.state,
-            ),
+            content_role: crate::classify_content_role(element_type, &node.actions, &node.state),
             properties: node.properties.clone(),
         };
         elem.confidence = score_element_confidence(&elem);
@@ -758,8 +800,8 @@ fn role_to_string(role: &ElementRole) -> &str {
 pub fn score_element_confidence(element: &ContextElement) -> f64 {
     let mut confidence: f64 = 0.60;
 
-    let has_label = element.label.as_ref().map_or(false, |l| !l.is_empty());
-    let has_value = element.value.as_ref().map_or(false, |v| !v.is_empty());
+    let has_label = element.label.as_ref().is_some_and(|l| !l.is_empty());
+    let has_value = element.value.as_ref().is_some_and(|v| !v.is_empty());
     if has_label || has_value {
         confidence += 0.10;
     }
@@ -808,21 +850,18 @@ pub fn aria_role_to_cel_type(role: &str) -> &'static str {
         "dialog" | "alertdialog" => "dialog",
         "menu" | "menubar" => "menu",
         "navigation" | "toolbar" => "toolbar",
-        "tablist" | "tabpanel" | "group" | "region" | "banner"
-        | "complementary" | "contentinfo" | "form" | "main"
-        | "search" | "article" | "section" | "aside"
-        | "header" | "footer" | "fieldset" | "figure"
-        | "details" | "summary" => "group",
+        "tablist" | "tabpanel" | "group" | "region" | "banner" | "complementary"
+        | "contentinfo" | "form" | "main" | "search" | "article" | "section" | "aside"
+        | "header" | "footer" | "fieldset" | "figure" | "details" | "summary" => "group",
         "tree" => "tree_view",
         "grid" | "table" | "treegrid" => "table",
         "row" => "table_row",
         "img" | "image" => "image",
         "status" => "status_bar",
         "list" | "directory" | "feed" => "list",
-        "heading" | "separator" | "paragraph" | "blockquote"
-        | "caption" | "code" | "definition" | "deletion"
-        | "insertion" | "mark" | "math" | "note"
-        | "subscript" | "superscript" | "term" | "time" => "text",
+        "heading" | "separator" | "paragraph" | "blockquote" | "caption" | "code"
+        | "definition" | "deletion" | "insertion" | "mark" | "math" | "note" | "subscript"
+        | "superscript" | "term" | "time" => "text",
         "scrollbar" => "scrollbar",
         "window" | "application" | "document" => "window",
         _ => "text",
@@ -869,8 +908,8 @@ pub fn build_from_external(
         .into_iter()
         .filter(|e| {
             // Filter invisible leaf elements with no data
-            let has_label = e.label.as_ref().map_or(false, |l| !l.is_empty());
-            let has_value = e.value.as_ref().map_or(false, |v| !v.is_empty());
+            let has_label = e.label.as_ref().is_some_and(|l| !l.is_empty());
+            let has_value = e.value.as_ref().is_some_and(|v| !v.is_empty());
             if !e.state.visible && !has_label && !has_value {
                 return false;
             }
@@ -967,10 +1006,20 @@ fn is_generic_action_label(label: &str) -> bool {
 }
 
 fn has_noise_hint(el: &ContextElement) -> bool {
-    let selector = el.properties.get("css_selector").map(String::as_str).unwrap_or("");
-    let dom_id = el.properties.get("dom_id").map(String::as_str).unwrap_or("");
+    let selector = el
+        .properties
+        .get("css_selector")
+        .map(String::as_str)
+        .unwrap_or("");
+    let dom_id = el
+        .properties
+        .get("dom_id")
+        .map(String::as_str)
+        .unwrap_or("");
     let combined = format!("{} {}", selector.to_lowercase(), dom_id.to_lowercase());
-    CHROME_NOISE_HINTS.iter().any(|hint| combined.contains(hint))
+    CHROME_NOISE_HINTS
+        .iter()
+        .any(|hint| combined.contains(hint))
 }
 
 fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextElement> {
@@ -986,7 +1035,9 @@ fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextEleme
     let mut label_counts: HashMap<(String, String), usize> = HashMap::new();
     for (el, n) in elements.iter().zip(normalized.iter()) {
         if !n.is_empty() {
-            *label_counts.entry((el.element_type.clone(), n.clone())).or_insert(0) += 1;
+            *label_counts
+                .entry((el.element_type.clone(), n.clone()))
+                .or_insert(0) += 1;
         }
     }
 
@@ -1009,8 +1060,13 @@ fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextEleme
     let snapshot_for_phase1 = elements.clone();
     for (i, el) in elements.iter_mut().enumerate() {
         apply_noise_penalty_cached(
-            el, &normalized[i], &snapshot_for_phase1, &normalized,
-            &label_counts, &by_parent, &id_to_idx,
+            el,
+            &normalized[i],
+            &snapshot_for_phase1,
+            &normalized,
+            &label_counts,
+            &by_parent,
+            &id_to_idx,
         );
     }
 
@@ -1034,7 +1090,13 @@ fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextEleme
         if is_actionable_type(&el.element_type)
             && !normalized[i].is_empty()
             && is_generic_action_label(&normalized[i])
-            && !has_structural_identity_cached(el, &snapshot_for_phase2, &normalized, &by_parent, &id_to_idx)
+            && !has_structural_identity_cached(
+                el,
+                &snapshot_for_phase2,
+                &normalized,
+                &by_parent,
+                &id_to_idx,
+            )
             && has_noise_hint(el)
         {
             keep[i] = false;
@@ -1042,7 +1104,7 @@ fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextEleme
     }
     let mut filtered: Vec<ContextElement> = Vec::with_capacity(elements.len());
     let mut filtered_norm: Vec<String> = Vec::with_capacity(elements.len());
-    for (i, (el, n)) in elements.into_iter().zip(normalized.into_iter()).enumerate() {
+    for (i, (el, n)) in elements.into_iter().zip(normalized).enumerate() {
         if keep[i] {
             filtered_norm.push(n);
             filtered.push(el);
@@ -1057,9 +1119,15 @@ fn suppress_obvious_noise(mut elements: Vec<ContextElement>) -> Vec<ContextEleme
 
     'outer: for (i, el) in filtered.into_iter().enumerate() {
         for (j, existing) in deduped.iter_mut().enumerate() {
-            if are_overlapping_duplicates_cached(existing, &deduped_norm[j], &el, &filtered_norm[i]) {
+            if are_overlapping_duplicates_cached(existing, &deduped_norm[j], &el, &filtered_norm[i])
+            {
                 if !should_keep_over_cached(
-                    existing, &el, &snapshot_for_dedup, &dedup_normalized, &by_parent, &id_to_idx,
+                    existing,
+                    &el,
+                    &snapshot_for_dedup,
+                    &dedup_normalized,
+                    &by_parent,
+                    &id_to_idx,
                 ) {
                     deduped_norm[j] = filtered_norm[i].clone();
                     *existing = el;
@@ -1121,8 +1189,10 @@ fn apply_noise_penalty_cached(
 
     if !reasons.is_empty() {
         el.confidence = (el.confidence - penalty).max(0.15);
-        el.properties.insert("noise_penalty".into(), format!("{:.2}", penalty));
-        el.properties.insert("noise_reasons".into(), reasons.join(","));
+        el.properties
+            .insert("noise_penalty".into(), format!("{:.2}", penalty));
+        el.properties
+            .insert("noise_reasons".into(), reasons.join(","));
     }
 }
 
@@ -1150,7 +1220,10 @@ fn has_structural_identity_cached(
             .filter(|&&i| elements[i].id != el.id)
             .filter(|&&i| {
                 !normalized[i].is_empty()
-                    || elements[i].value.as_ref().map_or(false, |v| !normalized_text(Some(v)).is_empty())
+                    || elements[i]
+                        .value
+                        .as_ref()
+                        .is_some_and(|v| !normalized_text(Some(v)).is_empty())
             })
             .count();
         if sibling_labels >= 2 {
@@ -1184,8 +1257,10 @@ fn should_keep_over_cached(
     by_parent: &std::collections::HashMap<String, Vec<usize>>,
     id_to_idx: &std::collections::HashMap<String, usize>,
 ) -> bool {
-    let existing_richness = context_richness_cached(existing, elements, normalized, by_parent, id_to_idx);
-    let candidate_richness = context_richness_cached(candidate, elements, normalized, by_parent, id_to_idx);
+    let existing_richness =
+        context_richness_cached(existing, elements, normalized, by_parent, id_to_idx);
+    let candidate_richness =
+        context_richness_cached(candidate, elements, normalized, by_parent, id_to_idx);
     if existing_richness != candidate_richness {
         return existing_richness > candidate_richness;
     }
@@ -1201,7 +1276,9 @@ fn context_richness_cached(
 ) -> usize {
     let label_len = el.label.as_ref().map_or(0, |label| label.len().min(32));
     let value_len = el.value.as_ref().map_or(0, |value| value.len().min(16));
-    let structural = usize::from(has_structural_identity_cached(el, elements, normalized, by_parent, id_to_idx)) * 4;
+    let structural = usize::from(has_structural_identity_cached(
+        el, elements, normalized, by_parent, id_to_idx,
+    )) * 4;
     el.actions.len() * 3 + el.properties.len() * 2 + label_len + value_len + structural
 }
 
@@ -1239,37 +1316,87 @@ mod tests {
 
     #[test]
     fn test_bounds_overlap_full() {
-        let a = Bounds { x: 0, y: 0, width: 100, height: 100 };
-        let b = Bounds { x: 0, y: 0, width: 100, height: 100 };
+        let a = Bounds {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let b = Bounds {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
         assert!((bounds_overlap(&a, &b) - 1.0).abs() < 0.01);
     }
 
     #[test]
     fn test_bounds_overlap_none() {
-        let a = Bounds { x: 0, y: 0, width: 50, height: 50 };
-        let b = Bounds { x: 100, y: 100, width: 50, height: 50 };
+        let a = Bounds {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        };
+        let b = Bounds {
+            x: 100,
+            y: 100,
+            width: 50,
+            height: 50,
+        };
         assert_eq!(bounds_overlap(&a, &b), 0.0);
     }
 
     #[test]
     fn test_bounds_overlap_partial() {
-        let a = Bounds { x: 0, y: 0, width: 100, height: 100 };
-        let b = Bounds { x: 50, y: 50, width: 100, height: 100 };
+        let a = Bounds {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let b = Bounds {
+            x: 50,
+            y: 50,
+            width: 100,
+            height: 100,
+        };
         let iou = bounds_overlap(&a, &b);
         assert!(iou > 0.0 && iou < 1.0);
     }
 
     #[test]
     fn test_bounds_overlap_adjacent() {
-        let a = Bounds { x: 0, y: 0, width: 50, height: 50 };
-        let b = Bounds { x: 50, y: 0, width: 50, height: 50 };
+        let a = Bounds {
+            x: 0,
+            y: 0,
+            width: 50,
+            height: 50,
+        };
+        let b = Bounds {
+            x: 50,
+            y: 0,
+            width: 50,
+            height: 50,
+        };
         assert_eq!(bounds_overlap(&a, &b), 0.0);
     }
 
     #[test]
     fn test_bounds_overlap_contained() {
-        let a = Bounds { x: 0, y: 0, width: 200, height: 200 };
-        let b = Bounds { x: 50, y: 50, width: 50, height: 50 };
+        let a = Bounds {
+            x: 0,
+            y: 0,
+            width: 200,
+            height: 200,
+        };
+        let b = Bounds {
+            x: 50,
+            y: 50,
+            width: 50,
+            height: 50,
+        };
         let iou = bounds_overlap(&a, &b);
         assert!(iou > 0.0 && iou < 0.1);
     }
@@ -1282,8 +1409,14 @@ mod tests {
         assert!(!ctx.elements.is_empty());
         assert_eq!(ctx.elements[0].element_type, "window");
         // Stub has label "Stub Window", bounds 1920x1080, visible+enabled → 0.60+0.10+0.10+0.05 = 0.85
-        assert!(ctx.elements[0].confidence >= 0.60, "Confidence should be at least base 0.60");
-        assert!(ctx.elements[0].confidence <= 0.95, "Confidence should be at most 0.95");
+        assert!(
+            ctx.elements[0].confidence >= 0.60,
+            "Confidence should be at least base 0.60"
+        );
+        assert!(
+            ctx.elements[0].confidence <= 0.95,
+            "Confidence should be at most 0.95"
+        );
         assert_eq!(ctx.elements[0].source, ContextSource::AccessibilityTree);
         assert!(ctx.timestamp_ms > 0);
     }
@@ -1293,9 +1426,20 @@ mod tests {
         let stub = Box::new(cel_accessibility::StubAccessibility);
         let merger = ContextMerger::new(stub);
         let mut ctx = ScreenContext {
-            app: "".into(), window: "".into(), network_events: vec![], http_events: vec![], timestamp_ms: 0, screen_width: None, screen_height: None,
-            clipboard: None, window_list: vec![],
-            audio: None, power: None, running_apps: vec![], recent_files: vec![], transcripts: vec![],
+            app: "".into(),
+            window: "".into(),
+            network_events: vec![],
+            http_events: vec![],
+            timestamp_ms: 0,
+            screen_width: None,
+            screen_height: None,
+            clipboard: None,
+            window_list: vec![],
+            audio: None,
+            power: None,
+            running_apps: vec![],
+            recent_files: vec![],
+            transcripts: vec![],
             elements: vec![ContextElement {
                 id: "root".into(),
                 label: Some("Stub Window".into()),
@@ -1341,9 +1485,20 @@ mod tests {
         let stub = Box::new(cel_accessibility::StubAccessibility);
         let merger = ContextMerger::new(stub);
         let mut ctx = ScreenContext {
-            app: "".into(), window: "".into(), network_events: vec![], http_events: vec![], timestamp_ms: 0, screen_width: None, screen_height: None,
-            clipboard: None, window_list: vec![],
-            audio: None, power: None, running_apps: vec![], recent_files: vec![], transcripts: vec![],
+            app: "".into(),
+            window: "".into(),
+            network_events: vec![],
+            http_events: vec![],
+            timestamp_ms: 0,
+            screen_width: None,
+            screen_height: None,
+            clipboard: None,
+            window_list: vec![],
+            audio: None,
+            power: None,
+            running_apps: vec![],
+            recent_files: vec![],
+            transcripts: vec![],
             elements: vec![ContextElement {
                 id: "root".into(),
                 label: None,
@@ -1368,7 +1523,12 @@ mod tests {
             description: None,
             element_type: "table_cell".into(),
             value: Some("Revenue".into()),
-            bounds: Some(Bounds { x: 120, y: 200, width: 80, height: 20 }),
+            bounds: Some(Bounds {
+                x: 120,
+                y: 200,
+                width: 80,
+                height: 20,
+            }),
             state: cel_accessibility::ElementState::default(),
             parent_id: None,
             actions: vec![],
@@ -1411,7 +1571,12 @@ mod tests {
             description: None,
             element_type: "button".into(),
             value: None,
-            bounds: Some(Bounds { x: 500, y: 500, width: 100, height: 40 }),
+            bounds: Some(Bounds {
+                x: 500,
+                y: 500,
+                width: 100,
+                height: 40,
+            }),
             state: cel_accessibility::ElementState::default(),
             parent_id: None,
             actions: vec![],
@@ -1440,7 +1605,12 @@ mod tests {
                 description: None,
                 element_type: "button".into(),
                 value: None,
-                bounds: Some(Bounds { x: 100, y: 100, width: 80, height: 30 }),
+                bounds: Some(Bounds {
+                    x: 100,
+                    y: 100,
+                    width: 80,
+                    height: 30,
+                }),
                 state: cel_accessibility::ElementState::default(),
                 parent_id: None,
                 actions: vec![],
@@ -1468,7 +1638,12 @@ mod tests {
             description: None,
             element_type: "button".into(),
             value: None,
-            bounds: Some(Bounds { x: 100, y: 100, width: 80, height: 30 }),
+            bounds: Some(Bounds {
+                x: 100,
+                y: 100,
+                width: 80,
+                height: 30,
+            }),
             state: cel_accessibility::ElementState::default(),
             parent_id: None,
             actions: vec![],
@@ -1483,7 +1658,10 @@ mod tests {
         assert_eq!(ctx.elements.len(), 1);
         // Source stays a11y, but confidence boosted
         assert_eq!(ctx.elements[0].source, ContextSource::AccessibilityTree);
-        assert_eq!(ctx.elements[0].confidence, 0.90, "Should be boosted from 0.85 by 0.05");
+        assert_eq!(
+            ctx.elements[0].confidence, 0.90,
+            "Should be boosted from 0.85 by 0.05"
+        );
     }
 
     #[test]
@@ -1501,7 +1679,12 @@ mod tests {
                 description: None,
                 element_type: "button".into(),
                 value: None,
-                bounds: Some(Bounds { x: 100, y: 100, width: 100, height: 50 }), // A11y bounds (slightly larger)
+                bounds: Some(Bounds {
+                    x: 100,
+                    y: 100,
+                    width: 100,
+                    height: 50,
+                }), // A11y bounds (slightly larger)
                 state: cel_accessibility::ElementState::default(),
                 parent_id: None,
                 actions: vec![],
@@ -1529,7 +1712,12 @@ mod tests {
             description: None,
             element_type: "button".into(),
             value: None,
-            bounds: Some(Bounds { x: 105, y: 105, width: 80, height: 40 }),
+            bounds: Some(Bounds {
+                x: 105,
+                y: 105,
+                width: 80,
+                height: 40,
+            }),
             state: cel_accessibility::ElementState::default(),
             parent_id: None,
             actions: vec![],
@@ -1552,37 +1740,66 @@ mod tests {
         let stub = Box::new(cel_accessibility::StubAccessibility);
         let merger = ContextMerger::new(stub);
         let mut ctx = ScreenContext {
-            app: "".into(), window: "".into(), network_events: vec![], http_events: vec![], timestamp_ms: 0, screen_width: None, screen_height: None,
-            clipboard: None, window_list: vec![],
-            audio: None, power: None, running_apps: vec![], recent_files: vec![], transcripts: vec![],
+            app: "".into(),
+            window: "".into(),
+            network_events: vec![],
+            http_events: vec![],
+            timestamp_ms: 0,
+            screen_width: None,
+            screen_height: None,
+            clipboard: None,
+            window_list: vec![],
+            audio: None,
+            power: None,
+            running_apps: vec![],
+            recent_files: vec![],
+            transcripts: vec![],
             elements: vec![ContextElement {
-                id: "root".into(), label: None, description: None,
+                id: "root".into(),
+                label: None,
+                description: None,
                 element_type: "window".into(),
-                value: None, bounds: None, state: cel_accessibility::ElementState::default(), parent_id: None,
+                value: None,
+                bounds: None,
+                state: cel_accessibility::ElementState::default(),
+                parent_id: None,
                 actions: vec![],
                 properties: std::collections::HashMap::new(),
-                confidence: 0.85, source: ContextSource::AccessibilityTree,
+                confidence: 0.85,
+                source: ContextSource::AccessibilityTree,
                 content_role: ContentRole::default(),
             }],
         };
 
         let native = vec![
             ContextElement {
-                id: "low".into(), label: None, description: None,
+                id: "low".into(),
+                label: None,
+                description: None,
                 element_type: "text".into(),
-                value: None, bounds: None, state: cel_accessibility::ElementState::default(), parent_id: None,
+                value: None,
+                bounds: None,
+                state: cel_accessibility::ElementState::default(),
+                parent_id: None,
                 actions: vec![],
                 properties: std::collections::HashMap::new(),
-                confidence: 0.50, source: ContextSource::NativeApi,
+                confidence: 0.50,
+                source: ContextSource::NativeApi,
                 content_role: ContentRole::default(),
             },
             ContextElement {
-                id: "high".into(), label: None, description: None,
+                id: "high".into(),
+                label: None,
+                description: None,
                 element_type: "button".into(),
-                value: None, bounds: None, state: cel_accessibility::ElementState::default(), parent_id: None,
+                value: None,
+                bounds: None,
+                state: cel_accessibility::ElementState::default(),
+                parent_id: None,
                 actions: vec![],
                 properties: std::collections::HashMap::new(),
-                confidence: 0.99, source: ContextSource::NativeApi,
+                confidence: 0.99,
+                source: ContextSource::NativeApi,
                 content_role: ContentRole::default(),
             },
         ];
@@ -1834,19 +2051,48 @@ mod tests {
     #[test]
     fn test_bounds_overlap_iou_value() {
         // 50% overlap: two 100x100 boxes offset by 50px
-        let a = Bounds { x: 0, y: 0, width: 100, height: 100 };
-        let b = Bounds { x: 50, y: 0, width: 100, height: 100 };
+        let a = Bounds {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let b = Bounds {
+            x: 50,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
         let iou = bounds_overlap(&a, &b);
         // Intersection: 50x100 = 5000, Union: 10000 + 10000 - 5000 = 15000
         let expected = 5000.0 / 15000.0;
-        assert!((iou - expected).abs() < 0.01, "Expected IoU ~{:.3}, got {:.3}", expected, iou);
+        assert!(
+            (iou - expected).abs() < 0.01,
+            "Expected IoU ~{:.3}, got {:.3}",
+            expected,
+            iou
+        );
     }
 
     #[test]
     fn test_bounds_overlap_zero_area() {
-        let a = Bounds { x: 10, y: 10, width: 0, height: 0 };
-        let b = Bounds { x: 10, y: 10, width: 0, height: 0 };
-        assert_eq!(bounds_overlap(&a, &b), 0.0, "Zero-area bounds should have 0 IoU");
+        let a = Bounds {
+            x: 10,
+            y: 10,
+            width: 0,
+            height: 0,
+        };
+        let b = Bounds {
+            x: 10,
+            y: 10,
+            width: 0,
+            height: 0,
+        };
+        assert_eq!(
+            bounds_overlap(&a, &b),
+            0.0,
+            "Zero-area bounds should have 0 IoU"
+        );
     }
 
     #[test]
@@ -1854,11 +2100,21 @@ mod tests {
         let stub = Box::new(cel_accessibility::StubAccessibility);
         let merger = ContextMerger::new(stub);
         let mut ctx = ScreenContext {
-            app: "test".into(), window: "test".into(),
-            network_events: vec![], http_events: vec![], elements: vec![], timestamp_ms: 0,
-            screen_width: None, screen_height: None,
-            clipboard: None, window_list: vec![],
-            audio: None, power: None, running_apps: vec![], recent_files: vec![], transcripts: vec![],
+            app: "test".into(),
+            window: "test".into(),
+            network_events: vec![],
+            http_events: vec![],
+            elements: vec![],
+            timestamp_ms: 0,
+            screen_width: None,
+            screen_height: None,
+            clipboard: None,
+            window_list: vec![],
+            audio: None,
+            power: None,
+            running_apps: vec![],
+            recent_files: vec![],
+            transcripts: vec![],
         };
 
         let vision = vec![
@@ -1868,7 +2124,12 @@ mod tests {
                 description: None,
                 element_type: "button".into(),
                 value: None,
-                bounds: Some(Bounds { x: 100, y: 200, width: 80, height: 30 }),
+                bounds: Some(Bounds {
+                    x: 100,
+                    y: 200,
+                    width: 80,
+                    height: 30,
+                }),
                 state: cel_accessibility::ElementState::default(),
                 parent_id: None,
                 actions: vec![],
@@ -1883,7 +2144,12 @@ mod tests {
                 description: None,
                 element_type: "button".into(),
                 value: None,
-                bounds: Some(Bounds { x: 200, y: 200, width: 80, height: 30 }),
+                bounds: Some(Bounds {
+                    x: 200,
+                    y: 200,
+                    width: 80,
+                    height: 30,
+                }),
                 state: cel_accessibility::ElementState::default(),
                 parent_id: None,
                 actions: vec![],
@@ -1899,7 +2165,10 @@ mod tests {
         assert_eq!(ctx.elements.len(), 2);
         for e in &ctx.elements {
             assert_eq!(e.source, ContextSource::Vision);
-            assert!(e.confidence < 0.85, "Vision elements should have lower confidence");
+            assert!(
+                e.confidence < 0.85,
+                "Vision elements should have lower confidence"
+            );
             assert!(e.bounds.is_some(), "Vision elements should have bounds");
             assert!(e.label.is_some(), "Vision elements should have labels");
         }
@@ -1910,16 +2179,29 @@ mod tests {
         let stub = Box::new(cel_accessibility::StubAccessibility);
         let merger = ContextMerger::new(stub);
         let mut ctx = ScreenContext {
-            app: "".into(), window: "".into(), network_events: vec![], http_events: vec![], timestamp_ms: 0, screen_width: None, screen_height: None,
-            clipboard: None, window_list: vec![],
-            audio: None, power: None, running_apps: vec![], recent_files: vec![], transcripts: vec![],
+            app: "".into(),
+            window: "".into(),
+            network_events: vec![],
+            http_events: vec![],
+            timestamp_ms: 0,
+            screen_width: None,
+            screen_height: None,
+            clipboard: None,
+            window_list: vec![],
+            audio: None,
+            power: None,
+            running_apps: vec![],
+            recent_files: vec![],
+            transcripts: vec![],
             elements: vec![ContextElement {
                 id: "btn1".into(),
                 label: Some("OK".into()),
                 description: None,
                 element_type: "button".into(),
-                value: None, bounds: None,
-                state: cel_accessibility::ElementState::default(), parent_id: None,
+                value: None,
+                bounds: None,
+                state: cel_accessibility::ElementState::default(),
+                parent_id: None,
                 actions: vec![],
                 properties: std::collections::HashMap::new(),
                 confidence: 0.95,
@@ -1934,8 +2216,10 @@ mod tests {
             label: Some("OK (native)".into()),
             description: None,
             element_type: "button".into(),
-            value: None, bounds: None,
-            state: cel_accessibility::ElementState::default(), parent_id: None,
+            value: None,
+            bounds: None,
+            state: cel_accessibility::ElementState::default(),
+            parent_id: None,
             actions: vec![],
             confidence: 0.80,
             source: ContextSource::NativeApi,
@@ -1958,7 +2242,12 @@ mod tests {
             description: None,
             element_type: "button".into(),
             value: None,
-            bounds: Some(Bounds { x: 100, y: 100, width: 120, height: 32 }),
+            bounds: Some(Bounds {
+                x: 100,
+                y: 100,
+                width: 120,
+                height: 32,
+            }),
             state: cel_accessibility::ElementState {
                 visible: true,
                 enabled: true,
@@ -1969,9 +2258,10 @@ mod tests {
             confidence: 0.0,
             source: ContextSource::AccessibilityTree,
             content_role: ContentRole::Interactive,
-            properties: std::collections::HashMap::from([
-                ("css_selector".into(), "#save-primary".into()),
-            ]),
+            properties: std::collections::HashMap::from([(
+                "css_selector".into(),
+                "#save-primary".into(),
+            )]),
         };
         let button_b = ContextElement {
             id: "dom:save-2".into(),
@@ -1979,7 +2269,12 @@ mod tests {
             description: Some("Duplicate wrapper".into()),
             element_type: "button".into(),
             value: None,
-            bounds: Some(Bounds { x: 101, y: 100, width: 120, height: 32 }),
+            bounds: Some(Bounds {
+                x: 101,
+                y: 100,
+                width: 120,
+                height: 32,
+            }),
             state: cel_accessibility::ElementState {
                 visible: true,
                 enabled: true,
@@ -2003,8 +2298,16 @@ mod tests {
             "Test".into(),
         );
 
-        let save_buttons: Vec<_> = ctx.elements.iter().filter(|el| el.label.as_deref() == Some("Save")).collect();
-        assert_eq!(save_buttons.len(), 1, "Expected overlapping duplicate buttons to collapse to one");
+        let save_buttons: Vec<_> = ctx
+            .elements
+            .iter()
+            .filter(|el| el.label.as_deref() == Some("Save"))
+            .collect();
+        assert_eq!(
+            save_buttons.len(),
+            1,
+            "Expected overlapping duplicate buttons to collapse to one"
+        );
     }
 
     #[test]
@@ -2017,7 +2320,12 @@ mod tests {
                 description: None,
                 element_type: "button".into(),
                 value: None,
-                bounds: Some(Bounds { x: 1200, y: 24, width: 80, height: 28 }),
+                bounds: Some(Bounds {
+                    x: 1200,
+                    y: 24,
+                    width: 80,
+                    height: 28,
+                }),
                 state: cel_accessibility::ElementState {
                     visible: true,
                     enabled: true,
@@ -2028,9 +2336,10 @@ mod tests {
                 confidence: 0.0,
                 source: ContextSource::AccessibilityTree,
                 content_role: ContentRole::Interactive,
-                properties: std::collections::HashMap::from([
-                    ("css_selector".into(), "header .toolbar .more".into()),
-                ]),
+                properties: std::collections::HashMap::from([(
+                    "css_selector".into(),
+                    "header .toolbar .more".into(),
+                )]),
             },
             ContextElement {
                 id: row_id.into(),
@@ -2038,7 +2347,12 @@ mod tests {
                 description: None,
                 element_type: "group".into(),
                 value: None,
-                bounds: Some(Bounds { x: 100, y: 200, width: 900, height: 48 }),
+                bounds: Some(Bounds {
+                    x: 100,
+                    y: 200,
+                    width: 900,
+                    height: 48,
+                }),
                 state: cel_accessibility::ElementState {
                     visible: true,
                     enabled: true,
@@ -2057,7 +2371,12 @@ mod tests {
                 description: None,
                 element_type: "text".into(),
                 value: None,
-                bounds: Some(Bounds { x: 120, y: 210, width: 220, height: 24 }),
+                bounds: Some(Bounds {
+                    x: 120,
+                    y: 210,
+                    width: 220,
+                    height: 24,
+                }),
                 state: cel_accessibility::ElementState {
                     visible: true,
                     enabled: true,
@@ -2076,7 +2395,12 @@ mod tests {
                 description: None,
                 element_type: "text".into(),
                 value: None,
-                bounds: Some(Bounds { x: 360, y: 210, width: 90, height: 24 }),
+                bounds: Some(Bounds {
+                    x: 360,
+                    y: 210,
+                    width: 90,
+                    height: 24,
+                }),
                 state: cel_accessibility::ElementState {
                     visible: true,
                     enabled: true,
@@ -2095,7 +2419,12 @@ mod tests {
                 description: None,
                 element_type: "button".into(),
                 value: None,
-                bounds: Some(Bounds { x: 840, y: 206, width: 120, height: 28 }),
+                bounds: Some(Bounds {
+                    x: 840,
+                    y: 206,
+                    width: 120,
+                    height: 28,
+                }),
                 state: cel_accessibility::ElementState {
                     visible: true,
                     enabled: true,
@@ -2106,9 +2435,10 @@ mod tests {
                 confidence: 0.0,
                 source: ContextSource::AccessibilityTree,
                 content_role: ContentRole::Interactive,
-                properties: std::collections::HashMap::from([
-                    ("css_selector".into(), ".user-row [data-action='remove']".into()),
-                ]),
+                properties: std::collections::HashMap::from([(
+                    "css_selector".into(),
+                    ".user-row [data-action='remove']".into(),
+                )]),
             },
         ];
 
@@ -2142,8 +2472,18 @@ mod tests {
 
         // All a11y elements should have confidence in valid range (0.60 base to ~0.90 max)
         for e in &ctx.elements {
-            assert!(e.confidence >= 0.60, "Confidence {} too low for {}", e.confidence, e.id);
-            assert!(e.confidence <= 0.95, "Confidence {} too high for {}", e.confidence, e.id);
+            assert!(
+                e.confidence >= 0.60,
+                "Confidence {} too low for {}",
+                e.confidence,
+                e.id
+            );
+            assert!(
+                e.confidence <= 0.95,
+                "Confidence {} too high for {}",
+                e.confidence,
+                e.id
+            );
             assert_eq!(e.source, ContextSource::AccessibilityTree);
         }
     }
@@ -2152,22 +2492,48 @@ mod tests {
     fn test_role_to_string_covers_all_roles() {
         // Ensure no role maps to empty string
         let roles = vec![
-            ElementRole::Button, ElementRole::Input, ElementRole::Text,
-            ElementRole::Window, ElementRole::List, ElementRole::ListItem,
-            ElementRole::Menu, ElementRole::MenuItem, ElementRole::Checkbox,
-            ElementRole::ComboBox, ElementRole::Table, ElementRole::TableRow,
-            ElementRole::TableCell, ElementRole::Dialog, ElementRole::Tab,
-            ElementRole::TabItem, ElementRole::RadioButton, ElementRole::Slider,
-            ElementRole::ScrollBar, ElementRole::TreeView, ElementRole::TreeItem,
-            ElementRole::Toolbar, ElementRole::StatusBar, ElementRole::Group,
-            ElementRole::Image, ElementRole::Link,
+            ElementRole::Button,
+            ElementRole::Input,
+            ElementRole::Text,
+            ElementRole::Window,
+            ElementRole::List,
+            ElementRole::ListItem,
+            ElementRole::Menu,
+            ElementRole::MenuItem,
+            ElementRole::Checkbox,
+            ElementRole::ComboBox,
+            ElementRole::Table,
+            ElementRole::TableRow,
+            ElementRole::TableCell,
+            ElementRole::Dialog,
+            ElementRole::Tab,
+            ElementRole::TabItem,
+            ElementRole::RadioButton,
+            ElementRole::Slider,
+            ElementRole::ScrollBar,
+            ElementRole::TreeView,
+            ElementRole::TreeItem,
+            ElementRole::Toolbar,
+            ElementRole::StatusBar,
+            ElementRole::Group,
+            ElementRole::Image,
+            ElementRole::Link,
             ElementRole::Custom("custom_widget".into()),
         ];
 
         for role in &roles {
             let s = role_to_string(role);
-            assert!(!s.is_empty(), "role_to_string({:?}) returned empty string", role);
-            assert!(!s.contains(' '), "role_to_string({:?}) contains spaces: '{}'", role, s);
+            assert!(
+                !s.is_empty(),
+                "role_to_string({:?}) returned empty string",
+                role
+            );
+            assert!(
+                !s.contains(' '),
+                "role_to_string({:?}) contains spaces: '{}'",
+                role,
+                s
+            );
         }
     }
 }

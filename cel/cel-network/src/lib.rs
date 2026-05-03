@@ -45,7 +45,9 @@ pub fn service_for_port(port: u16) -> Option<&'static str> {
     }
 }
 
-fn default_protocol() -> String { "tcp".to_string() }
+fn default_protocol() -> String {
+    "tcp".to_string()
+}
 
 /// A raw TCP/UDP connection observed at the OS level.
 ///
@@ -159,6 +161,13 @@ pub struct ProcNetMonitor {
 }
 
 #[cfg(target_os = "linux")]
+impl Default for ProcNetMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl ProcNetMonitor {
     pub fn new() -> Self {
         Self {
@@ -185,8 +194,10 @@ impl ProcNetMonitor {
                     if let Some(event) = self.parse_proc_line(line, now, proto) {
                         let key = format!(
                             "{}:{}->{}:{}",
-                            event.local_addr, event.local_port,
-                            event.remote_addr, event.remote_port
+                            event.local_addr,
+                            event.local_port,
+                            event.remote_addr,
+                            event.remote_port
                         );
                         if self.known_connections.insert(key) {
                             if let Ok(mut events) = self.events.lock() {
@@ -314,7 +325,10 @@ fn parse_hex_ip(addr: &str) -> Option<String> {
             .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
             .collect();
         if bytes.len() == 4 {
-            Some(format!("{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0]))
+            Some(format!(
+                "{}.{}.{}.{}",
+                bytes[3], bytes[2], bytes[1], bytes[0]
+            ))
         } else {
             None
         }
@@ -346,11 +360,11 @@ fn tcp_state_name(hex: &str) -> &str {
 pub fn create_monitor() -> Box<dyn NetworkMonitor> {
     #[cfg(target_os = "linux")]
     {
-        return Box::new(ProcNetMonitor::new());
+        Box::new(ProcNetMonitor::new())
     }
     #[cfg(target_os = "macos")]
     {
-        return Box::new(macos::LsofNetMonitor::new());
+        Box::new(macos::LsofNetMonitor::new())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

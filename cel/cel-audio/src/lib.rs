@@ -318,7 +318,10 @@ mod tests {
         let chunks = a.drain_raw_chunks();
         a.stop().unwrap();
 
-        assert!(!chunks.is_empty(), "no system audio chunks received after 300ms");
+        assert!(
+            !chunks.is_empty(),
+            "no system audio chunks received after 300ms"
+        );
         let total_samples: usize = chunks.iter().map(|c| c.samples.len()).sum();
         println!(
             "system_output_delivers_samples: {} chunks, {} samples @ {} Hz",

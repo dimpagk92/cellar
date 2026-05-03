@@ -77,10 +77,7 @@ impl PlannerBackend for NoopBackend {
     async fn get_context(&self) -> Result<ScreenContext, PlannerError> {
         Ok(empty_context())
     }
-    async fn execute(
-        &self,
-        _action: &cel_planner::PlannedAction,
-    ) -> Result<bool, PlannerError> {
+    async fn execute(&self, _action: &cel_planner::PlannedAction) -> Result<bool, PlannerError> {
         Ok(true)
     }
     fn on_event(&self, _event: PlannerEvent) {}
@@ -292,10 +289,14 @@ async fn vision_path_sends_image_and_ground_truth_hint() {
         .expect("expected user-role message");
 
     // (a) image part survived
-    let has_image = user_msg.content.iter().any(|p| {
-        matches!(p, ContentPart::ImageUrl { image_url } if image_url.url == fake_image)
-    });
-    assert!(has_image, "expected ImageUrl ContentPart with the supplied data URL");
+    let has_image = user_msg
+        .content
+        .iter()
+        .any(|p| matches!(p, ContentPart::ImageUrl { image_url } if image_url.url == fake_image));
+    assert!(
+        has_image,
+        "expected ImageUrl ContentPart with the supplied data URL"
+    );
 
     // (b) text part carries the ground-truth hint
     let text_body = user_msg

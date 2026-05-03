@@ -17,9 +17,13 @@ use crate::differ::{diff_contexts, is_diff_significant, ContextDiff};
 use crate::model::*;
 use crate::skeleton::{is_skeleton_screen, skeleton_wait_ms};
 
-use cel_accessibility::{AccessibilityTree, ElementRole};
+use cel_accessibility::AccessibilityTree;
+#[cfg(target_os = "macos")]
+use cel_accessibility::ElementRole;
 use cel_context::{CelEvent, ContextMerger, ContextWatchdog, ScreenContext};
-use cel_input::{create_controller, InputError, MouseButton};
+#[cfg(target_os = "macos")]
+use cel_input::InputError;
+use cel_input::{create_controller, MouseButton};
 use cel_planner::PlannedAction;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -865,7 +869,7 @@ impl Cortex {
                     while m
                         .anomaly_queue
                         .front()
-                        .map_or(false, |a| a.timestamp < ttl_cutoff)
+                        .is_some_and(|a| a.timestamp < ttl_cutoff)
                     {
                         m.anomaly_queue.pop_front();
                     }
@@ -1117,9 +1121,7 @@ impl Cortex {
     /// legitimate browser-chrome AX ids don't come up in web-content
     /// goals in practice.
     fn refuse_ax_on_browser_page(&self, target_id: &str, action: &str) -> Option<String> {
-        if self.cdp_client.is_none() {
-            return None;
-        }
+        self.cdp_client.as_ref()?;
         if !target_id.starts_with("ax:") {
             return None;
         }
@@ -1514,7 +1516,7 @@ impl Cortex {
                         && el
                             .label
                             .as_ref()
-                            .map_or(false, |l| lower.contains(&l.to_lowercase()))
+                            .is_some_and(|l| lower.contains(&l.to_lowercase()))
                 }) {
                     let click = PlannedAction::Click {
                         target_id: el.id.clone(),
@@ -2128,7 +2130,7 @@ fn parse_extracted(raw: &str, parse_as: &str) -> Option<serde_json::Value> {
                 .ok()
                 .map(|n| serde_json::Value::Number(n.into()))
         }
-        "html" | "text" | _ => Some(serde_json::Value::String(cleaned.to_string())),
+        _ => Some(serde_json::Value::String(cleaned.to_string())),
     }
 }
 
@@ -2145,6 +2147,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// `"108432.5"`, `"$108,432.50"` becomes `"108432.5"`. Compare as
 /// floats when both sides parse; otherwise fall back to trimmed
 /// string equality.
+#[cfg(target_os = "macos")]
 fn cells_match(requested: &str, got: &str) -> bool {
     let r = requested.trim();
     let g = got.trim();
@@ -2240,9 +2243,7 @@ fn parse_role_hint(hint: &str) -> Option<cel_accessibility::ElementRole> {
         .trim()
         .to_ascii_lowercase()
         .trim_start_matches("ax")
-        .replace('_', "")
-        .replace('-', "")
-        .replace(' ', "");
+        .replace(['_', '-', ' '], "");
     Some(match normalized.as_str() {
         "button" => ElementRole::Button,
         "input" | "textfield" | "text" => ElementRole::Input,
@@ -2277,7 +2278,7 @@ fn try_set_value(target_id: &str, value: &str) -> Result<bool, CortexError> {
 /// Try to dispatch the action through CDP. Returns:
 ///  * `Ok(Some(result))` — we handled it (succeeded or failed via CDP)
 ///  * `Ok(None)` — not a browser-targeted action; caller should fall back
-///                 to the native execution path
+///    to the native execution path
 ///
 /// Targets a `dom:*` element by parsing the embedded backend_node_id (the
 /// element id format is `dom:<element_type>:<id>` per the CDP context pump

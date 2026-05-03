@@ -122,8 +122,8 @@ pub fn resize_frame(frame: &Frame, max_width: u32, max_height: u32) -> Result<Fr
         frame.data.clone(),
     )
     .ok_or(CaptureError::EncodingError("Invalid frame data".into()))?;
-    let ratio = (max_width as f64 / frame.width as f64)
-        .min(max_height as f64 / frame.height as f64);
+    let ratio =
+        (max_width as f64 / frame.width as f64).min(max_height as f64 / frame.height as f64);
     let new_w = (frame.width as f64 * ratio) as u32;
     let new_h = (frame.height as f64 * ratio) as u32;
     let resized =
@@ -202,8 +202,8 @@ pub fn diff_regions(a: &Frame, b: &Frame, cell_size: u32) -> Vec<(u32, u32, u32,
     if a.width != b.width || a.height != b.height || cell_size == 0 {
         return vec![(0, 0, a.width, a.height)]; // Entirely different
     }
-    let cols = (a.width + cell_size - 1) / cell_size;
-    let rows = (a.height + cell_size - 1) / cell_size;
+    let cols = a.width.div_ceil(cell_size);
+    let rows = a.height.div_ceil(cell_size);
     let mut changed_cells = Vec::new();
 
     for row in 0..rows {
@@ -244,7 +244,11 @@ pub fn diff_regions(a: &Frame, b: &Frame, cell_size: u32) -> Vec<(u32, u32, u32,
 /// One-call optimization for the LLM vision path.
 /// Resize to fit within max_dimension (longest side), encode as JPEG, return base64.
 /// This is the hot path for screenshot → LLM API calls.
-pub fn encode_for_llm(frame: &Frame, max_dimension: u32, jpeg_quality: u8) -> Result<String, CaptureError> {
+pub fn encode_for_llm(
+    frame: &Frame,
+    max_dimension: u32,
+    jpeg_quality: u8,
+) -> Result<String, CaptureError> {
     use base64::Engine;
     let resized = resize_frame(frame, max_dimension, max_dimension)?;
     let jpeg = encode_jpeg(&resized, jpeg_quality)?;

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -66,8 +65,10 @@ impl NormalizedBounds {
 /// [`crate::budget::AppWalkBudget`] for adaptive throttling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TruncationReason {
     /// Walk completed naturally — visited all reachable nodes.
+    #[default]
     None,
     /// Hit the wall-clock timeout.
     Timeout,
@@ -75,12 +76,6 @@ pub enum TruncationReason {
     MaxNodes,
     /// Hit the maximum recursion depth.
     MaxDepth,
-}
-
-impl Default for TruncationReason {
-    fn default() -> Self {
-        TruncationReason::None
-    }
 }
 
 /// Why a window was skipped during a tree walk.
@@ -290,7 +285,10 @@ pub enum AccessibilityEvent {
     /// Focus moved to a different element.
     FocusChanged { element_id: Option<String> },
     /// An element's value changed (input text, checkbox state, slider position).
-    ValueChanged { element_id: String, new_value: Option<String> },
+    ValueChanged {
+        element_id: String,
+        new_value: Option<String>,
+    },
     /// UI layout changed (elements added, removed, or repositioned).
     LayoutChanged,
     /// A new window was created.
@@ -302,7 +300,10 @@ pub enum AccessibilityEvent {
     /// A sheet/dialog appeared.
     SheetCreated,
     /// An element's title changed.
-    TitleChanged { element_id: Option<String>, new_title: Option<String> },
+    TitleChanged {
+        element_id: Option<String>,
+        new_title: Option<String>,
+    },
     /// An application was activated (brought to foreground).
     AppActivated { app_name: Option<String> },
     /// An application was deactivated (sent to background).
@@ -362,8 +363,7 @@ pub trait AccessibilityTree: Send + Sync {
 
     /// Stop observing accessibility events.
     /// Default: no-op.
-    fn stop_observing(&mut self) {
-    }
+    fn stop_observing(&mut self) {}
 
     /// Execute an action on an element by its ID (e.g., "click" on a button).
     /// Uses the native accessibility API (AXPerformAction on macOS) instead of mouse/keyboard.
@@ -389,7 +389,11 @@ pub trait AccessibilityTree: Send + Sync {
     /// Get the accessibility element at a screen coordinate (hit testing).
     /// Returns the element under the given (x, y) point, or None.
     /// Default: not supported.
-    fn element_at_position(&self, _x: f32, _y: f32) -> Result<Option<AccessibilityElement>, AccessibilityError> {
+    fn element_at_position(
+        &self,
+        _x: f32,
+        _y: f32,
+    ) -> Result<Option<AccessibilityElement>, AccessibilityError> {
         Ok(None)
     }
 
@@ -435,7 +439,12 @@ impl AccessibilityTree for StubAccessibility {
             label: Some("Stub Window".into()),
             description: None,
             value: None,
-            bounds: Some(Bounds { x: 0, y: 0, width: 1920, height: 1080 }),
+            bounds: Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
             state: ElementState {
                 focused: true,
                 enabled: true,

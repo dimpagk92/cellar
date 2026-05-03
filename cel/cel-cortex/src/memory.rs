@@ -231,7 +231,7 @@ impl Memory {
     /// renderer deduplicates by line-id if it wants to.
     pub fn lens(&self, goal_type: &str, per_lens: usize) -> Result<MemoryLenses, MemoryError> {
         let mut all = self.all()?;
-        all.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms));
+        all.sort_by_key(|a| std::cmp::Reverse(a.ts_ms));
 
         let same_cortex: Vec<_> = all
             .iter()

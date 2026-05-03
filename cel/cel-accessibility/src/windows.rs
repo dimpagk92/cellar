@@ -104,9 +104,11 @@ impl AccessibilityTree for WindowsAccessibility {
             match budget.decide(app_name) {
                 WalkDecision::Full => DEFAULT_MAX_ELEMENTS,
                 WalkDecision::Reduced(n) => n,
-                WalkDecision::Skip => return Err(AccessibilityError::QueryFailed(
-                    "budget: walk skipped".into()
-                )),
+                WalkDecision::Skip => {
+                    return Err(AccessibilityError::QueryFailed(
+                        "budget: walk skipped".into(),
+                    ))
+                }
             }
         };
 
@@ -218,8 +220,8 @@ fn uia_control_type_to_role(control_type_id: i32) -> ElementRole {
 /// `*const ()` with `IUIAutomationElement` and `IUIAutomationTreeWalker`.
 #[allow(dead_code)]
 fn walk_uia_tree(
-    _element: *const (),      // IUIAutomationElement
-    _walker: *const (),       // IUIAutomationTreeWalker
+    _element: *const (), // IUIAutomationElement
+    _walker: *const (),  // IUIAutomationTreeWalker
     _parent_id: Option<String>,
     _depth: usize,
     _max_elements: usize,
@@ -237,7 +239,7 @@ fn walk_uia_tree(
 /// Placeholder — replace `*const ()` with `IUIAutomationElement`.
 #[allow(dead_code)]
 fn build_element(
-    _element: *const (),   // IUIAutomationElement
+    _element: *const (), // IUIAutomationElement
     parent_id: Option<String>,
     _depth: usize,
 ) -> Option<AccessibilityElement> {
@@ -278,30 +280,42 @@ mod tests {
 
     #[test]
     fn test_uia_button_maps_to_button_role() {
-        assert!(matches!(uia_control_type_to_role(50000), ElementRole::Button));
+        assert!(matches!(
+            uia_control_type_to_role(50000),
+            ElementRole::Button
+        ));
     }
 
     #[test]
     fn test_uia_edit_maps_to_input_role() {
-        assert!(matches!(uia_control_type_to_role(50004), ElementRole::Input));
+        assert!(matches!(
+            uia_control_type_to_role(50004),
+            ElementRole::Input
+        ));
     }
 
     #[test]
     fn test_uia_window_maps_to_window_role() {
-        assert!(matches!(uia_control_type_to_role(50032), ElementRole::Window));
+        assert!(matches!(
+            uia_control_type_to_role(50032),
+            ElementRole::Window
+        ));
     }
 
     #[test]
     fn test_uia_unknown_maps_to_custom() {
-        assert!(matches!(uia_control_type_to_role(99999), ElementRole::Custom(_)));
+        assert!(matches!(
+            uia_control_type_to_role(99999),
+            ElementRole::Custom(_)
+        ));
     }
 
     #[test]
     fn test_uia_all_known_roles_dont_panic() {
         let known = [
-            50000, 50002, 50003, 50004, 50006, 50007, 50008, 50009, 50010,
-            50011, 50013, 50014, 50015, 50017, 50018, 50019, 50020, 50021,
-            50023, 50024, 50026, 50032, 50034, 50036, 50057,
+            50000, 50002, 50003, 50004, 50006, 50007, 50008, 50009, 50010, 50011, 50013, 50014,
+            50015, 50017, 50018, 50019, 50020, 50021, 50023, 50024, 50026, 50032, 50034, 50036,
+            50057,
         ];
         for id in known {
             let _ = uia_control_type_to_role(id);

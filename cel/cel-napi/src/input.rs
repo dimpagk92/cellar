@@ -259,7 +259,7 @@ pub fn shell_exec(command: String, args: Vec<String>) -> napi::Result<String> {
         "pmset",
         "sw_vers",
     ];
-    let cmd_name = command.split('/').last().unwrap_or(&command);
+    let cmd_name = command.split('/').next_back().unwrap_or(&command);
     if !ALLOWED.contains(&cmd_name) {
         return Err(napi::Error::from_reason(format!(
             "Command '{}' not in allowlist: {:?}",

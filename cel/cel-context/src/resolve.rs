@@ -26,10 +26,8 @@ pub fn resolve_reference<'a>(
 
     for el in &context.elements {
         let score = score_element(el, reference, context);
-        if score >= MATCH_THRESHOLD {
-            if best.is_none() || score > best.unwrap().1 {
-                best = Some((el, score));
-            }
+        if score >= MATCH_THRESHOLD && (best.is_none() || score > best.unwrap().1) {
+            best = Some((el, score));
         }
     }
 
@@ -59,7 +57,11 @@ fn build_ancestor_path(el: &ContextElement, all_elements: &[ContextElement]) -> 
     path
 }
 
-fn score_element(el: &ContextElement, reference: &ContextReference, context: &ScreenContext) -> f64 {
+fn score_element(
+    el: &ContextElement,
+    reference: &ContextReference,
+    context: &ScreenContext,
+) -> f64 {
     // Type must match exactly — it's a hard requirement.
     if el.element_type != reference.element_type {
         return 0.0;

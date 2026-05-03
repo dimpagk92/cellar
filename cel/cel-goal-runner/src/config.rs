@@ -46,11 +46,21 @@ pub struct GoalConfig {
     pub deterministic_seed: Option<u64>,
 }
 
-fn default_max_steps() -> u32 { 30 }
-fn default_step_delay() -> u64 { 500 }
-fn default_timeout() -> u64 { 120_000 }
-fn default_max_failures() -> u32 { 8 }
-fn default_max_rate_limits() -> u32 { 3 }
+fn default_max_steps() -> u32 {
+    30
+}
+fn default_step_delay() -> u64 {
+    500
+}
+fn default_timeout() -> u64 {
+    120_000
+}
+fn default_max_failures() -> u32 {
+    8
+}
+fn default_max_rate_limits() -> u32 {
+    3
+}
 
 impl Default for GoalConfig {
     fn default() -> Self {

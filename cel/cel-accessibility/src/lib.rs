@@ -123,7 +123,9 @@ mod tests {
     #[test]
     fn test_stub_find_elements_returns_empty() {
         let stub = StubAccessibility;
-        let results = stub.find_elements(Some(&ElementRole::Button), None).unwrap();
+        let results = stub
+            .find_elements(Some(&ElementRole::Button), None)
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -145,15 +147,33 @@ mod tests {
     #[test]
     fn test_element_role_all_variants() {
         let roles = vec![
-            ElementRole::Window, ElementRole::Button, ElementRole::Input,
-            ElementRole::Text, ElementRole::List, ElementRole::ListItem,
-            ElementRole::Menu, ElementRole::MenuItem, ElementRole::Tab,
-            ElementRole::TabItem, ElementRole::Table, ElementRole::TableRow,
-            ElementRole::TableCell, ElementRole::Checkbox, ElementRole::RadioButton,
-            ElementRole::ComboBox, ElementRole::Slider, ElementRole::ScrollBar,
-            ElementRole::TreeView, ElementRole::TreeItem, ElementRole::Toolbar,
-            ElementRole::StatusBar, ElementRole::Dialog, ElementRole::Group,
-            ElementRole::Image, ElementRole::Link, ElementRole::Custom("custom".into()),
+            ElementRole::Window,
+            ElementRole::Button,
+            ElementRole::Input,
+            ElementRole::Text,
+            ElementRole::List,
+            ElementRole::ListItem,
+            ElementRole::Menu,
+            ElementRole::MenuItem,
+            ElementRole::Tab,
+            ElementRole::TabItem,
+            ElementRole::Table,
+            ElementRole::TableRow,
+            ElementRole::TableCell,
+            ElementRole::Checkbox,
+            ElementRole::RadioButton,
+            ElementRole::ComboBox,
+            ElementRole::Slider,
+            ElementRole::ScrollBar,
+            ElementRole::TreeView,
+            ElementRole::TreeItem,
+            ElementRole::Toolbar,
+            ElementRole::StatusBar,
+            ElementRole::Dialog,
+            ElementRole::Group,
+            ElementRole::Image,
+            ElementRole::Link,
+            ElementRole::Custom("custom".into()),
         ];
         assert_eq!(roles.len(), 27);
         for role in &roles {
@@ -196,7 +216,12 @@ mod tests {
 
     #[test]
     fn test_bounds_serialization() {
-        let bounds = Bounds { x: 10, y: 20, width: 100, height: 50 };
+        let bounds = Bounds {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        };
         let json = serde_json::to_string(&bounds).unwrap();
         let back: Bounds = serde_json::from_str(&json).unwrap();
         assert_eq!(back.x, 10);
@@ -212,10 +237,19 @@ mod tests {
             role: ElementRole::Button,
             label: Some("OK".into()),
             value: None,
-            bounds: Some(Bounds { x: 100, y: 200, width: 80, height: 30 }),
+            bounds: Some(Bounds {
+                x: 100,
+                y: 200,
+                width: 80,
+                height: 30,
+            }),
             state: ElementState {
-                focused: false, enabled: true, visible: true,
-                selected: false, expanded: None, checked: None,
+                focused: false,
+                enabled: true,
+                visible: true,
+                selected: false,
+                expanded: None,
+                checked: None,
             },
             description: None,
             parent_id: None,
@@ -229,10 +263,19 @@ mod tests {
             role: ElementRole::Dialog,
             label: Some("Confirm".into()),
             value: None,
-            bounds: Some(Bounds { x: 50, y: 50, width: 300, height: 200 }),
+            bounds: Some(Bounds {
+                x: 50,
+                y: 50,
+                width: 300,
+                height: 200,
+            }),
             state: ElementState {
-                focused: true, enabled: true, visible: true,
-                selected: false, expanded: None, checked: None,
+                focused: true,
+                enabled: true,
+                visible: true,
+                selected: false,
+                expanded: None,
+                checked: None,
             },
             description: None,
             parent_id: None,
@@ -253,10 +296,19 @@ mod tests {
             role: ElementRole::Input,
             label: Some("Username".into()),
             value: Some("admin".into()),
-            bounds: Some(Bounds { x: 0, y: 0, width: 200, height: 30 }),
+            bounds: Some(Bounds {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 30,
+            }),
             state: ElementState {
-                focused: true, enabled: true, visible: true,
-                selected: false, expanded: None, checked: None,
+                focused: true,
+                enabled: true,
+                visible: true,
+                selected: false,
+                expanded: None,
+                checked: None,
             },
             description: None,
             parent_id: None,

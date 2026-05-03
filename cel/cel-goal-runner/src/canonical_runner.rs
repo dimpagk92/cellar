@@ -114,7 +114,11 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
 
     /// Run `goal` to completion or structured failure.
     pub async fn run(&self, goal: &str, limits: RunLimits) -> GoalOutcome {
-        info!(goal, max_steps = limits.max_steps, "Canonical runner started");
+        info!(
+            goal,
+            max_steps = limits.max_steps,
+            "Canonical runner started"
+        );
         let start = Instant::now();
         let mut history: Vec<AttemptRecord> = Vec::new();
         let mut shared_memory = serde_json::json!({});
@@ -344,9 +348,9 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                     // (exactly what happened in the crypto scenario
                     // when the agent concluded "arrow keys are
                     // banned" and couldn't move to cell D3).
-                    let mut steps_iter = steps.into_iter();
+                    let steps_iter = steps.into_iter();
                     let mut remaining: Vec<Step> = Vec::new();
-                    while let Some(s) = steps_iter.next() {
+                    for s in steps_iter {
                         if !should_ban_on_repeat(&s.action) {
                             remaining.push(s);
                             continue;
@@ -435,7 +439,11 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                     .unwrap_or(data.clone());
                                 merge_into_shared_memory(&mut shared_memory, name, value);
                             } else {
-                                merge_into_shared_memory(&mut shared_memory, &step.purpose, data.clone());
+                                merge_into_shared_memory(
+                                    &mut shared_memory,
+                                    &step.purpose,
+                                    data.clone(),
+                                );
                             }
                             consecutive_repeat = 0;
                         } else if action_hash == last_action_hash {
@@ -558,9 +566,7 @@ fn budget_exhausted(kind: &str, last_purpose: &str, steps_used: u32) -> GoalOutc
     GoalOutcome::Failed(FailureReport {
         failing_sub_goal: last_purpose.to_string(),
         failing_step: "<budget>".into(),
-        attempts: vec![format!(
-            "{kind} budget exhausted after {steps_used} steps"
-        )],
+        attempts: vec![format!("{kind} budget exhausted after {steps_used} steps")],
     })
 }
 
@@ -607,8 +613,7 @@ fn phase_gate_check(
         r.succeeded
             && matches!(
                 &r.action,
-                PlannedAction::WriteCells { .. }
-                // Future: SaveDocument goes here too.
+                PlannedAction::WriteCells { .. } // Future: SaveDocument goes here too.
             )
     });
     if landed {
@@ -634,7 +639,11 @@ fn phase_gate_check(
             used_pct,
             steps_used,
             limits.max_steps,
-            if perception.app.is_empty() { "<unknown>" } else { &perception.app },
+            if perception.app.is_empty() {
+                "<unknown>"
+            } else {
+                &perception.app
+            },
             terminal_app,
             terminal_app
         )),
@@ -691,9 +700,9 @@ fn hash_action(action: &PlannedAction) -> u64 {
 /// it had concluded arrow keys were off-limits).
 fn should_ban_on_repeat(action: &PlannedAction) -> bool {
     match action {
-        PlannedAction::Key { .. }
-        | PlannedAction::KeyCombo { .. }
-        | PlannedAction::Wait { .. } => false,
+        PlannedAction::Key { .. } | PlannedAction::KeyCombo { .. } | PlannedAction::Wait { .. } => {
+            false
+        }
         PlannedAction::Type { target_id, .. } => target_id.is_some(),
         _ => true,
     }
@@ -814,7 +823,11 @@ impl StepExecutor for CortexStepExecutor {
         };
         RuntimeCaps {
             cdp_bound,
-            cdp_browser: if cdp_bound { Some("Google Chrome".into()) } else { None },
+            cdp_browser: if cdp_bound {
+                Some("Google Chrome".into())
+            } else {
+                None
+            },
             cdp_url,
             native_input: self.cortex.native_input_allowed(),
             steps_used: 0,
@@ -824,7 +837,10 @@ impl StepExecutor for CortexStepExecutor {
 }
 
 fn is_unrecoverable(action: &PlannedAction) -> bool {
-    matches!(action, PlannedAction::Done { .. } | PlannedAction::Fail { .. })
+    matches!(
+        action,
+        PlannedAction::Done { .. } | PlannedAction::Fail { .. }
+    )
 }
 
 fn action_kind(action: &PlannedAction) -> String {
@@ -911,7 +927,14 @@ fn action_args_summary(action: &PlannedAction) -> Option<String> {
             let mut summary = app.clone();
             if !cell_refs.is_empty() {
                 summary.push(' ');
-                summary.push_str(&cell_refs.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
+                summary.push_str(
+                    &cell_refs
+                        .iter()
+                        .take(8)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
             }
             if cell_refs.len() > 8 {
                 summary.push_str(", ...");
@@ -1096,7 +1119,11 @@ mod tests {
         let planner = ScriptedPlanner::new(vec![
             NextMove::Batch {
                 purpose: "extract".into(),
-                steps: vec![failing_step.clone(), failing_step.clone(), failing_step.clone()],
+                steps: vec![
+                    failing_step.clone(),
+                    failing_step.clone(),
+                    failing_step.clone(),
+                ],
             },
             NextMove::Done {
                 summary: "proceeded with partial data".into(),
@@ -1150,7 +1177,11 @@ mod tests {
         let got = phase_gate_check(&limits, 50, &history, &empty_perception("Google Chrome"), 0);
         let rec = got.expect("gate should fire at 50% with wrong frontmost");
         assert!(rec.error.as_ref().unwrap().contains("phase gate"));
-        assert!(rec.error.as_ref().unwrap().contains("activate_app(Numbers)"));
+        assert!(rec
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("activate_app(Numbers)"));
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 
 /// Re-export Bounds and ElementState from the accessibility crate — single source of truth.
@@ -47,30 +46,26 @@ pub enum ContentRole {
 }
 
 /// Classify an element's content role based on its type and properties.
-pub fn classify_content_role(element_type: &str, actions: &[String], state: &ElementState) -> ContentRole {
+pub fn classify_content_role(
+    element_type: &str,
+    actions: &[String],
+    state: &ElementState,
+) -> ContentRole {
     match element_type {
         // Interactive controls
-        "button" | "link" | "input" | "textfield" | "textarea" | "combobox"
-        | "select" | "checkbox" | "radio" | "slider" | "switch" | "toggle"
-        | "tab" | "tab_item" | "menuitem" | "menu_item" | "menubar" | "menu"
-        | "toolbar" | "searchfield" | "tree_item" => {
-            ContentRole::Interactive
-        }
+        "button" | "link" | "input" | "textfield" | "textarea" | "combobox" | "select"
+        | "checkbox" | "radio" | "slider" | "switch" | "toggle" | "tab" | "tab_item"
+        | "menuitem" | "menu_item" | "menubar" | "menu" | "toolbar" | "searchfield"
+        | "tree_item" => ContentRole::Interactive,
         // System chrome
-        "scrollbar" | "splitter" | "statusbar" | "status_bar" | "progressbar"
-        | "indicator" | "dialog" | "window" => {
-            ContentRole::System
-        }
+        "scrollbar" | "splitter" | "statusbar" | "status_bar" | "progressbar" | "indicator"
+        | "dialog" | "window" => ContentRole::System,
         // Decorative
-        "separator" | "image" | "icon" | "spacer" => {
-            ContentRole::Decorative
-        }
+        "separator" | "image" | "icon" | "spacer" => ContentRole::Decorative,
         // Text content — untrusted
-        "text" | "statictext" | "paragraph" | "heading" | "label" | "cell"
-        | "table" | "table_row" | "table_cell" | "list" | "listitem" | "list_item"
-        | "article" | "blockquote" => {
-            ContentRole::Content
-        }
+        "text" | "statictext" | "paragraph" | "heading" | "label" | "cell" | "table"
+        | "table_row" | "table_cell" | "list" | "listitem" | "list_item" | "article"
+        | "blockquote" => ContentRole::Content,
         // Default: if it has actions, it's interactive; otherwise content
         _ => {
             if !actions.is_empty() || state.focused {
@@ -119,7 +114,11 @@ pub struct ContextElement {
     /// Keys: "placeholder", "url", "required", "invalid", "role_desc", "selected_text",
     ///        "dom_id", "document", "filename", "min_value", "max_value", "has_popup",
     ///        "column_count", "row_count", "loading_progress"
-    #[serde(default, skip_serializing_if = "HashMap::is_empty", deserialize_with = "flexible_properties")]
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        deserialize_with = "flexible_properties"
+    )]
     pub properties: HashMap<String, String>,
 }
 
@@ -347,19 +346,49 @@ mod tests {
 
     #[test]
     fn test_classify_interactive_elements() {
-        let types = ["button", "link", "input", "textfield", "textarea",
-                     "combobox", "select", "checkbox", "radio", "slider",
-                     "switch", "toggle", "tab", "menuitem"];
+        let types = [
+            "button",
+            "link",
+            "input",
+            "textfield",
+            "textarea",
+            "combobox",
+            "select",
+            "checkbox",
+            "radio",
+            "slider",
+            "switch",
+            "toggle",
+            "tab",
+            "menuitem",
+        ];
         for t in types {
             let role = classify_content_role(t, &[], &default_state());
-            assert_eq!(role, ContentRole::Interactive, "Expected Interactive for '{}'", t);
+            assert_eq!(
+                role,
+                ContentRole::Interactive,
+                "Expected Interactive for '{}'",
+                t
+            );
         }
     }
 
     #[test]
     fn test_classify_content_elements() {
-        let types = ["text", "statictext", "paragraph", "heading",
-                     "label", "cell", "table", "table_row", "table_cell", "list", "listitem", "list_item"];
+        let types = [
+            "text",
+            "statictext",
+            "paragraph",
+            "heading",
+            "label",
+            "cell",
+            "table",
+            "table_row",
+            "table_cell",
+            "list",
+            "listitem",
+            "list_item",
+        ];
         for t in types {
             let role = classify_content_role(t, &[], &default_state());
             assert_eq!(role, ContentRole::Content, "Expected Content for '{}'", t);
@@ -368,7 +397,15 @@ mod tests {
 
     #[test]
     fn test_classify_system_elements() {
-        let types = ["scrollbar", "splitter", "statusbar", "status_bar", "progressbar", "dialog", "window"];
+        let types = [
+            "scrollbar",
+            "splitter",
+            "statusbar",
+            "status_bar",
+            "progressbar",
+            "dialog",
+            "window",
+        ];
         for t in types {
             let role = classify_content_role(t, &[], &default_state());
             assert_eq!(role, ContentRole::System, "Expected System for '{}'", t);
@@ -380,7 +417,12 @@ mod tests {
         let types = ["separator", "image", "icon", "spacer"];
         for t in types {
             let role = classify_content_role(t, &[], &default_state());
-            assert_eq!(role, ContentRole::Decorative, "Expected Decorative for '{}'", t);
+            assert_eq!(
+                role,
+                ContentRole::Decorative,
+                "Expected Decorative for '{}'",
+                t
+            );
         }
     }
 

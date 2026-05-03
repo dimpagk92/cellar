@@ -16,9 +16,7 @@ pub use openai_compat::OpenAICompatProvider;
 pub use provider::{VisionBounds, VisionElement, VisionError, VisionProvider};
 
 /// Create a vision provider from configuration.
-pub fn create_provider(
-    config: LlmProviderConfig,
-) -> Result<Box<dyn VisionProvider>, VisionError> {
+pub fn create_provider(config: LlmProviderConfig) -> Result<Box<dyn VisionProvider>, VisionError> {
     // All known providers use the OpenAI-compatible chat completions protocol.
     Ok(Box::new(OpenAICompatProvider::new(config)?))
 }
@@ -28,7 +26,6 @@ pub fn create_provider(
 /// Reads `CEL_LLM_PROVIDER`, `CEL_LLM_API_KEY`, etc. See
 /// [`LlmProviderConfig::from_env`] for full documentation.
 pub fn create_provider_from_env() -> Result<Box<dyn VisionProvider>, VisionError> {
-    let config = LlmProviderConfig::from_env()
-        .ok_or(VisionError::NotConfigured)?;
+    let config = LlmProviderConfig::from_env().ok_or(VisionError::NotConfigured)?;
     create_provider(config)
 }

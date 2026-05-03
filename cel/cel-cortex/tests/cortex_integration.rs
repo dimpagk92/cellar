@@ -2,6 +2,7 @@
 //!
 //! Uses `Cortex::isolated()` (StubAccessibility — no OS permissions needed)
 //! and cel_audio::StubAudioCapture to verify the engine lifecycle without hardware.
+#![allow(dead_code)]
 
 use cel_accessibility::StubAccessibility;
 use cel_audio::{

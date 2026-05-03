@@ -69,7 +69,9 @@ fn get_active_window_name() -> Option<String> {
     if !wid_output.status.success() {
         return None;
     }
-    let wid = String::from_utf8_lossy(&wid_output.stdout).trim().to_string();
+    let wid = String::from_utf8_lossy(&wid_output.stdout)
+        .trim()
+        .to_string();
     if wid.is_empty() {
         return None;
     }
@@ -101,7 +103,9 @@ fn get_active_window_name() -> Option<String> {
         .output()
         .ok()?;
     if name_output.status.success() {
-        let name = String::from_utf8_lossy(&name_output.stdout).trim().to_string();
+        let name = String::from_utf8_lossy(&name_output.stdout)
+            .trim()
+            .to_string();
         if !name.is_empty() {
             return Some(name);
         }
@@ -180,12 +184,10 @@ fn list_apps_xdotool() -> Option<Vec<RunningApp>> {
             .output()
             .ok();
         let pid: u32 = match pid_output {
-            Some(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0)
-            }
+            Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0),
             _ => 0,
         };
 
@@ -224,7 +226,9 @@ fn list_apps_xdotool() -> Option<Vec<RunningApp>> {
 fn list_running_apps_macos() -> Vec<RunningApp> {
     // Get app names and frontmost status in a single osascript call
     let output = std::process::Command::new("osascript")
-        .args(["-e", r#"
+        .args([
+            "-e",
+            r#"
             tell application "System Events"
                 set frontName to name of first process whose frontmost is true
                 set appNames to name of every process whose background only is false
@@ -234,7 +238,8 @@ fn list_running_apps_macos() -> Vec<RunningApp> {
                 end repeat
                 return output
             end tell
-        "#])
+        "#,
+        ])
         .output()
         .ok();
 
@@ -248,7 +253,9 @@ fn list_running_apps_macos() -> Vec<RunningApp> {
             let parts: Vec<&str> = line.split("||").collect();
             if parts.len() >= 2 {
                 let name = parts[0].trim().to_string();
-                if name.is_empty() { return None; }
+                if name.is_empty() {
+                    return None;
+                }
                 Some(RunningApp {
                     name,
                     is_frontmost: parts[1].trim() == "true",

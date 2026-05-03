@@ -106,10 +106,7 @@ impl Transcriber for WhisperApiTranscriber {
             form = form.text("language", lang.clone());
         }
 
-        let mut req = self
-            .client
-            .post(&self.config.endpoint)
-            .multipart(form);
+        let mut req = self.client.post(&self.config.endpoint).multipart(form);
 
         if !self.config.api_key.is_empty() {
             req = req.bearer_auth(&self.config.api_key);
@@ -166,7 +163,10 @@ pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
     if ch <= 1 {
         return samples.to_vec();
     }
-    samples.chunks(ch).map(|frame| frame.iter().sum::<f32>() / ch as f32).collect()
+    samples
+        .chunks(ch)
+        .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+        .collect()
 }
 
 /// Linear-interpolation resample from src_rate to dst_rate (mono input).
@@ -309,8 +309,7 @@ impl VadState {
             self.segment.extend_from_slice(samples);
         }
 
-        let max_samples =
-            (MAX_SEGMENT_SECS * sample_rate as f32 * channels as f32) as usize;
+        let max_samples = (MAX_SEGMENT_SECS * sample_rate as f32 * channels as f32) as usize;
         let segment_too_long = self.segment.len() >= max_samples;
         let speech_ended =
             self.in_speech && !is_speech && self.silence_frames >= SILENCE_END_FRAMES;
@@ -402,7 +401,11 @@ impl TranscriptionHandle {
                                 chunk.channels,
                                 chunk.timestamp_ms,
                             ) {
-                                let whisper_samples = prepare_for_whisper(&seg.samples, seg.sample_rate, seg.channels);
+                                let whisper_samples = prepare_for_whisper(
+                                    &seg.samples,
+                                    seg.sample_rate,
+                                    seg.channels,
+                                );
                                 let wav = encode_wav(&whisper_samples, 16_000, 1);
                                 if let Some(t) = transcriber.transcribe(
                                     &wav,
@@ -426,7 +429,11 @@ impl TranscriptionHandle {
                                 chunk.channels,
                                 chunk.timestamp_ms,
                             ) {
-                                let whisper_samples = prepare_for_whisper(&seg.samples, seg.sample_rate, seg.channels);
+                                let whisper_samples = prepare_for_whisper(
+                                    &seg.samples,
+                                    seg.sample_rate,
+                                    seg.channels,
+                                );
                                 let wav = encode_wav(&whisper_samples, 16_000, 1);
                                 if let Some(t) = transcriber.transcribe(
                                     &wav,

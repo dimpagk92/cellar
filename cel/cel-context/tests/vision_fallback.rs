@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use cel_accessibility::{
-    AccessibilityElement, AccessibilityError, AccessibilityTree, Bounds as A11yBounds,
-    ElementRole, ElementState,
+    AccessibilityElement, AccessibilityError, AccessibilityTree, Bounds as A11yBounds, ElementRole,
+    ElementState,
 };
 use cel_context::{ContextMerger, ContextSource};
 use cel_display::{CaptureError, Frame, MonitorInfo, ScreenCapture, WindowInfo};
@@ -43,7 +43,12 @@ impl AccessibilityTree for SparseAccessibility {
             label: Some("Legacy App".into()),
             description: None,
             value: None,
-            bounds: Some(A11yBounds { x: 0, y: 0, width: 800, height: 600 }),
+            bounds: Some(A11yBounds {
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+            }),
             state: default_state(),
             parent_id: None,
             actions: vec![],
@@ -54,7 +59,12 @@ impl AccessibilityTree for SparseAccessibility {
                 label: Some("Title".into()),
                 description: None,
                 value: None,
-                bounds: Some(A11yBounds { x: 10, y: 10, width: 200, height: 30 }),
+                bounds: Some(A11yBounds {
+                    x: 10,
+                    y: 10,
+                    width: 200,
+                    height: 30,
+                }),
                 state: default_state(),
                 parent_id: Some("root".into()),
                 actions: vec![],
@@ -103,7 +113,12 @@ impl AccessibilityTree for RichAccessibility {
             label: Some("Rich App".into()),
             description: None,
             value: None,
-            bounds: Some(A11yBounds { x: 0, y: 0, width: 1920, height: 1080 }),
+            bounds: Some(A11yBounds {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
             state: default_state(),
             parent_id: None,
             actions: vec![],
@@ -115,7 +130,12 @@ impl AccessibilityTree for RichAccessibility {
                     label: Some("OK".into()),
                     description: None,
                     value: None,
-                    bounds: Some(A11yBounds { x: 100, y: 100, width: 80, height: 30 }),
+                    bounds: Some(A11yBounds {
+                        x: 100,
+                        y: 100,
+                        width: 80,
+                        height: 30,
+                    }),
                     state: default_state(),
                     parent_id: Some("root".into()),
                     actions: vec![],
@@ -129,7 +149,12 @@ impl AccessibilityTree for RichAccessibility {
                     label: Some("Name".into()),
                     description: None,
                     value: Some("John".into()),
-                    bounds: Some(A11yBounds { x: 100, y: 150, width: 200, height: 30 }),
+                    bounds: Some(A11yBounds {
+                        x: 100,
+                        y: 150,
+                        width: 200,
+                        height: 30,
+                    }),
                     state: default_state(),
                     parent_id: Some("root".into()),
                     actions: vec![],
@@ -143,7 +168,12 @@ impl AccessibilityTree for RichAccessibility {
                     label: Some("Help".into()),
                     description: None,
                     value: None,
-                    bounds: Some(A11yBounds { x: 100, y: 200, width: 60, height: 20 }),
+                    bounds: Some(A11yBounds {
+                        x: 100,
+                        y: 200,
+                        width: 60,
+                        height: 20,
+                    }),
                     state: default_state(),
                     parent_id: Some("root".into()),
                     actions: vec![],
@@ -157,7 +187,12 @@ impl AccessibilityTree for RichAccessibility {
                     label: Some("Remember me".into()),
                     description: None,
                     value: None,
-                    bounds: Some(A11yBounds { x: 100, y: 250, width: 120, height: 20 }),
+                    bounds: Some(A11yBounds {
+                        x: 100,
+                        y: 250,
+                        width: 120,
+                        height: 20,
+                    }),
                     state: default_state(),
                     parent_id: Some("root".into()),
                     actions: vec![],
@@ -171,7 +206,12 @@ impl AccessibilityTree for RichAccessibility {
                     label: Some("Cancel".into()),
                     description: None,
                     value: None,
-                    bounds: Some(A11yBounds { x: 200, y: 100, width: 80, height: 30 }),
+                    bounds: Some(A11yBounds {
+                        x: 200,
+                        y: 100,
+                        width: 80,
+                        height: 30,
+                    }),
                     state: default_state(),
                     parent_id: Some("root".into()),
                     actions: vec![],
@@ -242,7 +282,12 @@ impl HugeAccessibility {
             label: Some(format!("Node {}", prefix)),
             description: None,
             value: None,
-            bounds: Some(A11yBounds { x: 0, y: 0, width: 100, height: 30 }),
+            bounds: Some(A11yBounds {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 30,
+            }),
             state: default_state(),
             parent_id: None,
             actions: vec![],
@@ -468,19 +513,34 @@ fn make_vision_elements() -> Vec<VisionElement> {
         VisionElement {
             label: "Submit".into(),
             element_type: "button".into(),
-            bounds: Some(VisionBounds { x: 300, y: 400, width: 100, height: 35 }),
+            bounds: Some(VisionBounds {
+                x: 300,
+                y: 400,
+                width: 100,
+                height: 35,
+            }),
             confidence: 0.82,
         },
         VisionElement {
             label: "Cancel".into(),
             element_type: "button".into(),
-            bounds: Some(VisionBounds { x: 420, y: 400, width: 100, height: 35 }),
+            bounds: Some(VisionBounds {
+                x: 420,
+                y: 400,
+                width: 100,
+                height: 35,
+            }),
             confidence: 0.78,
         },
         VisionElement {
             label: "Email".into(),
             element_type: "input".into(),
-            bounds: Some(VisionBounds { x: 200, y: 300, width: 300, height: 30 }),
+            bounds: Some(VisionBounds {
+                x: 200,
+                y: 300,
+                width: 300,
+                height: 30,
+            }),
             confidence: 0.75,
         },
     ]
@@ -497,12 +557,10 @@ fn test_vision_fallback_triggers_on_sparse_a11y() {
     let vision = MockVision::new(make_vision_elements());
     let call_count = vision.call_count();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(vision))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(vision))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
@@ -522,7 +580,9 @@ fn test_vision_fallback_triggers_on_sparse_a11y() {
     );
 
     // Vision elements should have correct IDs and types
-    let submit = vision_elements.iter().find(|e| e.label.as_deref() == Some("Submit"));
+    let submit = vision_elements
+        .iter()
+        .find(|e| e.label.as_deref() == Some("Submit"));
     assert!(submit.is_some(), "Should find Submit button from vision");
     assert_eq!(submit.unwrap().element_type, "button");
     assert_eq!(submit.unwrap().source, ContextSource::Vision);
@@ -535,12 +595,10 @@ fn test_vision_fallback_does_not_trigger_on_rich_a11y() {
     let vision = MockVision::new(make_vision_elements());
     let call_count = vision.call_count();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(RichAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(vision))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(RichAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(vision))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
@@ -548,56 +606,62 @@ fn test_vision_fallback_does_not_trigger_on_rich_a11y() {
     assert_eq!(call_count.load(Ordering::SeqCst), 0);
 
     // All elements should be from accessibility
-    assert!(ctx.elements.iter().all(|e| e.source == ContextSource::AccessibilityTree));
+    assert!(ctx
+        .elements
+        .iter()
+        .all(|e| e.source == ContextSource::AccessibilityTree));
 }
 
 #[test]
 fn test_vision_fallback_graceful_on_capture_failure() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(FailingCapture),
-    )
-    .with_vision(Box::new(MockVision::new(make_vision_elements())))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(FailingCapture))
+            .with_vision(Box::new(MockVision::new(make_vision_elements())))
+            .with_runtime(rt.handle().clone());
 
     // Should not panic — gracefully falls back to a11y-only
     let ctx = merger.get_context();
     assert!(!ctx.elements.is_empty());
-    assert!(ctx.elements.iter().all(|e| e.source == ContextSource::AccessibilityTree));
+    assert!(ctx
+        .elements
+        .iter()
+        .all(|e| e.source == ContextSource::AccessibilityTree));
 }
 
 #[test]
 fn test_vision_fallback_graceful_on_vision_api_failure() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(FailingVision))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(FailingVision))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
     // Should still have a11y elements, no vision elements
     assert!(!ctx.elements.is_empty());
-    assert!(ctx.elements.iter().all(|e| e.source == ContextSource::AccessibilityTree));
+    assert!(ctx
+        .elements
+        .iter()
+        .all(|e| e.source == ContextSource::AccessibilityTree));
 }
 
 #[test]
 fn test_vision_fallback_empty_results_produces_no_vision_elements() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(EmptyVision))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(EmptyVision))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
-    assert!(ctx.elements.iter().all(|e| e.source == ContextSource::AccessibilityTree));
+    assert!(ctx
+        .elements
+        .iter()
+        .all(|e| e.source == ContextSource::AccessibilityTree));
 }
 
 #[test]
@@ -605,11 +669,9 @@ fn test_vision_fallback_without_runtime_does_nothing() {
     // Outside a tokio context, Handle::try_current() returns None,
     // so the vision fallback path has no runtime and should be skipped.
     // with_display() calls try_current() in the constructor.
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(MockVision::new(make_vision_elements())));
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(MockVision::new(make_vision_elements())));
     // No with_runtime() call — runtime is whatever try_current() got (None outside tokio).
 
     // Should not panic — gracefully falls back to a11y-only
@@ -625,28 +687,41 @@ fn test_vision_supplements_overlapping_a11y_element() {
     let overlapping_vision = vec![VisionElement {
         label: "Title (vision)".into(),
         element_type: "text".into(),
-        bounds: Some(VisionBounds { x: 10, y: 10, width: 200, height: 30 }), // Same as a11y title
+        bounds: Some(VisionBounds {
+            x: 10,
+            y: 10,
+            width: 200,
+            height: 30,
+        }), // Same as a11y title
         confidence: 0.7,
     }];
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(MockVision::new(overlapping_vision)))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(MockVision::new(overlapping_vision)))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
     // Overlapping vision element should NOT appear as a separate element
-    let vision_count = ctx.elements.iter().filter(|e| e.source == ContextSource::Vision).count();
-    assert_eq!(vision_count, 0, "Overlapping vision element should be merged into a11y, not added separately");
+    let vision_count = ctx
+        .elements
+        .iter()
+        .filter(|e| e.source == ContextSource::Vision)
+        .count();
+    assert_eq!(
+        vision_count, 0,
+        "Overlapping vision element should be merged into a11y, not added separately"
+    );
 
     // The a11y element should have gotten a confidence boost from cross-source confirmation
     let title = ctx.elements.iter().find(|e| e.id == "title").unwrap();
     assert_eq!(title.source, ContextSource::AccessibilityTree);
     // Should be boosted: original confidence + 0.05
-    assert!(title.confidence > 0.70, "Title confidence should be boosted by cross-source confirmation");
+    assert!(
+        title.confidence > 0.70,
+        "Title confidence should be boosted by cross-source confirmation"
+    );
 }
 
 #[test]
@@ -658,16 +733,19 @@ fn test_vision_upgrades_bounds_when_more_precise() {
     let precise_vision = vec![VisionElement {
         label: "Title (precise)".into(),
         element_type: "text".into(),
-        bounds: Some(VisionBounds { x: 15, y: 12, width: 180, height: 26 }),
+        bounds: Some(VisionBounds {
+            x: 15,
+            y: 12,
+            width: 180,
+            height: 26,
+        }),
         confidence: 0.7,
     }];
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(MockVision::new(precise_vision)))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(MockVision::new(precise_vision)))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
@@ -688,22 +766,33 @@ fn test_vision_adds_non_overlapping_elements() {
     let new_vision = vec![VisionElement {
         label: "Hidden Button".into(),
         element_type: "button".into(),
-        bounds: Some(VisionBounds { x: 500, y: 500, width: 100, height: 35 }),
+        bounds: Some(VisionBounds {
+            x: 500,
+            y: 500,
+            width: 100,
+            height: 35,
+        }),
         confidence: 0.8,
     }];
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(MockVision::new(new_vision)))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(MockVision::new(new_vision)))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
     // Non-overlapping vision element should be added
-    let vision_elems: Vec<_> = ctx.elements.iter().filter(|e| e.source == ContextSource::Vision).collect();
-    assert_eq!(vision_elems.len(), 1, "Non-overlapping vision element should be added");
+    let vision_elems: Vec<_> = ctx
+        .elements
+        .iter()
+        .filter(|e| e.source == ContextSource::Vision)
+        .collect();
+    assert_eq!(
+        vision_elems.len(),
+        1,
+        "Non-overlapping vision element should be added"
+    );
     assert_eq!(vision_elems[0].label.as_deref(), Some("Hidden Button"));
 }
 
@@ -737,10 +826,8 @@ fn test_foreground_falls_back_to_display_window_list() {
 
 #[test]
 fn test_foreground_empty_when_all_fail() {
-    let mut merger = ContextMerger::with_display(
-        Box::new(FailingAccessibility),
-        Box::new(FailingCapture),
-    );
+    let mut merger =
+        ContextMerger::with_display(Box::new(FailingAccessibility), Box::new(FailingCapture));
     let ctx = merger.get_context();
 
     assert_eq!(ctx.app, "");
@@ -764,7 +851,10 @@ fn test_huge_tree_flattening_performance() {
     let ctx = merger.get_context();
     let elapsed = start.elapsed();
 
-    assert!(ctx.elements.len() > 1000, "Should have thousands of elements");
+    assert!(
+        ctx.elements.len() > 1000,
+        "Should have thousands of elements"
+    );
     let budget_ms = if cfg!(debug_assertions) { 5000 } else { 1000 };
     assert!(
         elapsed.as_millis() < budget_ms,
@@ -772,7 +862,11 @@ fn test_huge_tree_flattening_performance() {
         ctx.elements.len(),
         elapsed.as_millis(),
         budget_ms,
-        if cfg!(debug_assertions) { "debug" } else { "release" }
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
     );
 
     // All elements should have valid data
@@ -842,9 +936,7 @@ fn test_deep_tree_does_not_stack_overflow() {
         ) -> Result<Vec<AccessibilityElement>, AccessibilityError> {
             Ok(vec![])
         }
-        fn focused_element(
-            &self,
-        ) -> Result<Option<AccessibilityElement>, AccessibilityError> {
+        fn focused_element(&self) -> Result<Option<AccessibilityElement>, AccessibilityError> {
             Ok(None)
         }
     }
@@ -854,7 +946,10 @@ fn test_deep_tree_does_not_stack_overflow() {
 
     // Should have processed the deep tree without stack overflow.
     // Noise filter may remove unlabeled leaf groups, but the leaf button must survive.
-    assert!(ctx.elements.len() >= 1, "Deep tree should produce at least the leaf element");
+    assert!(
+        !ctx.elements.is_empty(),
+        "Deep tree should produce at least the leaf element"
+    );
 
     // The leaf button should be present
     let leaf = ctx.elements.iter().find(|e| e.element_type == "button");
@@ -896,9 +991,7 @@ fn test_empty_tree_produces_valid_context() {
         ) -> Result<Vec<AccessibilityElement>, AccessibilityError> {
             Ok(vec![])
         }
-        fn focused_element(
-            &self,
-        ) -> Result<Option<AccessibilityElement>, AccessibilityError> {
+        fn focused_element(&self) -> Result<Option<AccessibilityElement>, AccessibilityError> {
             Ok(None)
         }
     }
@@ -921,17 +1014,19 @@ fn test_garbage_vision_output_deduplicated() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Vision returns 100 overlapping elements at (0,0 100x30)
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(GarbageVision))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(GarbageVision))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
     // Most garbage elements should be deduplicated (they all overlap each other)
-    let vision_count = ctx.elements.iter().filter(|e| e.source == ContextSource::Vision).count();
+    let vision_count = ctx
+        .elements
+        .iter()
+        .filter(|e| e.source == ContextSource::Vision)
+        .count();
 
     // Only the first non-dominated element should survive; subsequent ones overlap with it
     // The exact count depends on whether the first vision element overlaps with a11y elements,
@@ -947,17 +1042,19 @@ fn test_garbage_vision_output_deduplicated() {
 fn test_a11y_failure_still_produces_context_with_vision_fallback() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(FailingAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(MockVision::new(make_vision_elements())))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(FailingAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(MockVision::new(make_vision_elements())))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 
     // A11y failed, but vision should have kicked in
-    let vision_count = ctx.elements.iter().filter(|e| e.source == ContextSource::Vision).count();
+    let vision_count = ctx
+        .elements
+        .iter()
+        .filter(|e| e.source == ContextSource::Vision)
+        .count();
     assert!(
         vision_count >= 2,
         "Vision should provide elements when a11y fails entirely, got {}",
@@ -1006,12 +1103,10 @@ fn test_multiple_get_context_calls_stable() {
 fn test_elements_always_sorted_by_confidence_desc() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let mut merger = ContextMerger::with_display(
-        Box::new(SparseAccessibility),
-        Box::new(MockCapture::new()),
-    )
-    .with_vision(Box::new(MockVision::new(make_vision_elements())))
-    .with_runtime(rt.handle().clone());
+    let mut merger =
+        ContextMerger::with_display(Box::new(SparseAccessibility), Box::new(MockCapture::new()))
+            .with_vision(Box::new(MockVision::new(make_vision_elements())))
+            .with_runtime(rt.handle().clone());
 
     let ctx = merger.get_context();
 

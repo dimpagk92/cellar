@@ -232,19 +232,14 @@ mod tests {
 
     #[test]
     fn test_parse_lsof_connection_localhost_filtered() {
-        let event =
-            parse_lsof_connection("127.0.0.1:3000->127.0.0.1:54321", 1000, None, None);
+        let event = parse_lsof_connection("127.0.0.1:3000->127.0.0.1:54321", 1000, None, None);
         assert!(event.is_none());
     }
 
     #[test]
     fn test_parse_lsof_connection_no_fake_http() {
-        let event = parse_lsof_connection(
-            "192.168.1.100:54321->93.184.216.34:80",
-            1000,
-            None,
-            None,
-        );
+        let event =
+            parse_lsof_connection("192.168.1.100:54321->93.184.216.34:80", 1000, None, None);
         assert!(event.is_some());
         let e = event.unwrap();
         // Service is "http" (from port), but no fabricated HTTP method/status

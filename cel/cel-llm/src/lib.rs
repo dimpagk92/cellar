@@ -65,7 +65,7 @@ impl ChatMessage {
 /// Encode raw bytes as base64.
 pub fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -127,14 +127,8 @@ pub fn strip_code_fences(content: &str) -> &str {
     let s = content.trim();
 
     // Case 1: code fences
-    if let Some(inner) = s
-        .strip_prefix("```json")
-        .or_else(|| s.strip_prefix("```"))
-    {
-        return inner
-            .strip_suffix("```")
-            .unwrap_or(inner)
-            .trim();
+    if let Some(inner) = s.strip_prefix("```json").or_else(|| s.strip_prefix("```")) {
+        return inner.strip_suffix("```").unwrap_or(inner).trim();
     }
 
     // Case 2: already valid JSON start

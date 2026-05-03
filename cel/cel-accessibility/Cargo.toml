@@ -19,3 +19,20 @@ tokio = { workspace = true }
 core-foundation = "0.10"
 core-graphics = "0.24"
 rayon = "1.10"
+
+# macOS-only examples — gated behind a feature so cargo skips them on
+# Linux. Enable via `cargo build --features macos-examples --example …`.
+[features]
+macos-examples = []
+
+[[example]]
+name = "dump_deep"
+required-features = ["macos-examples"]
+
+[[example]]
+name = "dump_page_content"
+required-features = ["macos-examples"]
+
+[[example]]
+name = "dump_text"
+required-features = ["macos-examples"]

@@ -125,6 +125,7 @@ pub fn boot_cortex() -> napi::Result<()> {
     // automatically when a CDP target is bound; this is the fallback for
     // desktop apps.
     let mut cortex = cel_cortex::Cortex::new("mcp-default".into()).with_native_input_unsafe();
+    #[cfg(target_os = "macos")]
     cortex.register_adapter(Box::new(adapter_numbers::NumbersAdapter::new()));
     if let Some((capture, config)) = default_audio_capture() {
         cortex = cortex.with_audio(capture, config);
@@ -272,7 +273,7 @@ pub fn is_cortex_running() -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    state.cortex.as_ref().map_or(false, |c| c.is_running())
+    state.cortex.as_ref().is_some_and(|c| c.is_running())
 }
 
 // ─── Liveness API (Phase 1) ───────────────────────────────────────────────

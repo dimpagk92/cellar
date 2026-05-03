@@ -28,18 +28,46 @@ pub enum MouseButton {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputEvent {
-    MouseMove { x: i32, y: i32 },
-    MouseClick { x: i32, y: i32, button: MouseButton },
-    MouseDown { x: i32, y: i32, button: MouseButton },
-    MouseUp { x: i32, y: i32, button: MouseButton },
-    KeyPress { key: String },
-    KeyDown { key: String },
-    KeyUp { key: String },
-    TypeText { text: String },
-    Scroll { dx: i32, dy: i32 },
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    MouseClick {
+        x: i32,
+        y: i32,
+        button: MouseButton,
+    },
+    MouseDown {
+        x: i32,
+        y: i32,
+        button: MouseButton,
+    },
+    MouseUp {
+        x: i32,
+        y: i32,
+        button: MouseButton,
+    },
+    KeyPress {
+        key: String,
+    },
+    KeyDown {
+        key: String,
+    },
+    KeyUp {
+        key: String,
+    },
+    TypeText {
+        text: String,
+    },
+    Scroll {
+        dx: i32,
+        dy: i32,
+    },
     /// Trackpad gesture observed during recording.
     /// Stored semantically — replay uses keyboard equivalents.
-    Gesture { gesture: GestureEvent },
+    Gesture {
+        gesture: GestureEvent,
+    },
 }
 
 /// A trackpad gesture observed via CGEventTap (macOS) or libinput (Linux).

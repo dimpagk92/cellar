@@ -233,11 +233,12 @@ fn merge_goal_config(
     config_override: Option<serde_json::Value>,
 ) -> cel_goal_runner::GoalConfig {
     let mut config = match config_override {
-        Some(value) => serde_json::from_value::<cel_goal_runner::GoalConfig>(value)
-            .unwrap_or_else(|e| {
+        Some(value) => {
+            serde_json::from_value::<cel_goal_runner::GoalConfig>(value).unwrap_or_else(|e| {
                 tracing::warn!("submitted `config` failed to parse as GoalConfig: {e}");
                 cel_goal_runner::GoalConfig::default()
-            }),
+            })
+        }
         None => cel_goal_runner::GoalConfig::default(),
     };
     config.goal = goal;

@@ -51,21 +51,19 @@ fn read_power_macos() -> Option<PowerState> {
         .lines()
         .find(|l| l.contains("InternalBattery"))
         .and_then(|line| {
-            line.split('%')
-                .next()
-                .and_then(|before_pct| {
-                    before_pct
-                        .chars()
-                        .rev()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect::<String>()
-                        .parse::<f32>()
-                        .ok()
-                        .map(|v| v / 100.0)
-                })
+            line.split('%').next().and_then(|before_pct| {
+                before_pct
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|v| v / 100.0)
+            })
         });
 
     let is_charging = text.contains("charging") && !text.contains("discharging");

@@ -66,14 +66,32 @@ mod tests {
     fn test_confidence_behavior_mapping() {
         let thresholds = ConfidenceThresholds::default();
 
-        assert_eq!(thresholds.behavior_for(0.95), ConfidenceBehavior::ActImmediately);
-        assert_eq!(thresholds.behavior_for(0.9), ConfidenceBehavior::ActImmediately);
+        assert_eq!(
+            thresholds.behavior_for(0.95),
+            ConfidenceBehavior::ActImmediately
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.9),
+            ConfidenceBehavior::ActImmediately
+        );
         assert_eq!(thresholds.behavior_for(0.85), ConfidenceBehavior::ActAndLog);
         assert_eq!(thresholds.behavior_for(0.7), ConfidenceBehavior::ActAndLog);
-        assert_eq!(thresholds.behavior_for(0.6), ConfidenceBehavior::ActCautiously);
-        assert_eq!(thresholds.behavior_for(0.5), ConfidenceBehavior::ActCautiously);
-        assert_eq!(thresholds.behavior_for(0.3), ConfidenceBehavior::PauseAndNotify);
-        assert_eq!(thresholds.behavior_for(0.0), ConfidenceBehavior::PauseAndNotify);
+        assert_eq!(
+            thresholds.behavior_for(0.6),
+            ConfidenceBehavior::ActCautiously
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.5),
+            ConfidenceBehavior::ActCautiously
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.3),
+            ConfidenceBehavior::PauseAndNotify
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.0),
+            ConfidenceBehavior::PauseAndNotify
+        );
     }
 
     #[test]
@@ -81,38 +99,71 @@ mod tests {
         let thresholds = ConfidenceThresholds::default();
 
         // Exactly at boundaries
-        assert_eq!(thresholds.behavior_for(0.9), ConfidenceBehavior::ActImmediately);
+        assert_eq!(
+            thresholds.behavior_for(0.9),
+            ConfidenceBehavior::ActImmediately
+        );
         assert_eq!(thresholds.behavior_for(0.7), ConfidenceBehavior::ActAndLog);
-        assert_eq!(thresholds.behavior_for(0.5), ConfidenceBehavior::ActCautiously);
+        assert_eq!(
+            thresholds.behavior_for(0.5),
+            ConfidenceBehavior::ActCautiously
+        );
 
         // Just below boundaries
-        assert_eq!(thresholds.behavior_for(0.8999), ConfidenceBehavior::ActAndLog);
-        assert_eq!(thresholds.behavior_for(0.6999), ConfidenceBehavior::ActCautiously);
-        assert_eq!(thresholds.behavior_for(0.4999), ConfidenceBehavior::PauseAndNotify);
+        assert_eq!(
+            thresholds.behavior_for(0.8999),
+            ConfidenceBehavior::ActAndLog
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.6999),
+            ConfidenceBehavior::ActCautiously
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.4999),
+            ConfidenceBehavior::PauseAndNotify
+        );
     }
 
     #[test]
     fn test_extreme_values() {
         let thresholds = ConfidenceThresholds::default();
 
-        assert_eq!(thresholds.behavior_for(1.0), ConfidenceBehavior::ActImmediately);
-        assert_eq!(thresholds.behavior_for(0.0), ConfidenceBehavior::PauseAndNotify);
+        assert_eq!(
+            thresholds.behavior_for(1.0),
+            ConfidenceBehavior::ActImmediately
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.0),
+            ConfidenceBehavior::PauseAndNotify
+        );
     }
 
     #[test]
     fn test_negative_confidence() {
         let thresholds = ConfidenceThresholds::default();
         // Negative values should result in PauseAndNotify (lowest tier)
-        assert_eq!(thresholds.behavior_for(-0.1), ConfidenceBehavior::PauseAndNotify);
-        assert_eq!(thresholds.behavior_for(-1.0), ConfidenceBehavior::PauseAndNotify);
+        assert_eq!(
+            thresholds.behavior_for(-0.1),
+            ConfidenceBehavior::PauseAndNotify
+        );
+        assert_eq!(
+            thresholds.behavior_for(-1.0),
+            ConfidenceBehavior::PauseAndNotify
+        );
     }
 
     #[test]
     fn test_over_one_confidence() {
         let thresholds = ConfidenceThresholds::default();
         // Values > 1.0 should still map to ActImmediately
-        assert_eq!(thresholds.behavior_for(1.5), ConfidenceBehavior::ActImmediately);
-        assert_eq!(thresholds.behavior_for(100.0), ConfidenceBehavior::ActImmediately);
+        assert_eq!(
+            thresholds.behavior_for(1.5),
+            ConfidenceBehavior::ActImmediately
+        );
+        assert_eq!(
+            thresholds.behavior_for(100.0),
+            ConfidenceBehavior::ActImmediately
+        );
     }
 
     #[test]
@@ -123,10 +174,19 @@ mod tests {
             act_cautiously: 0.6,
         };
 
-        assert_eq!(thresholds.behavior_for(0.96), ConfidenceBehavior::ActImmediately);
+        assert_eq!(
+            thresholds.behavior_for(0.96),
+            ConfidenceBehavior::ActImmediately
+        );
         assert_eq!(thresholds.behavior_for(0.94), ConfidenceBehavior::ActAndLog);
-        assert_eq!(thresholds.behavior_for(0.79), ConfidenceBehavior::ActCautiously);
-        assert_eq!(thresholds.behavior_for(0.59), ConfidenceBehavior::PauseAndNotify);
+        assert_eq!(
+            thresholds.behavior_for(0.79),
+            ConfidenceBehavior::ActCautiously
+        );
+        assert_eq!(
+            thresholds.behavior_for(0.59),
+            ConfidenceBehavior::PauseAndNotify
+        );
     }
 
     #[test]
@@ -162,7 +222,10 @@ mod tests {
                 rank(&behaviors[i]) >= rank(&behaviors[i - 1]),
                 "Behavior should be monotonically non-decreasing with confidence. \
                  At {}/100: {:?}, at {}/100: {:?}",
-                i - 1, behaviors[i - 1], i, behaviors[i]
+                i - 1,
+                behaviors[i - 1],
+                i,
+                behaviors[i]
             );
         }
     }

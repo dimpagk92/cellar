@@ -3,15 +3,27 @@
 //! Tests the full flow: accessibility → merge → confidence scoring.
 
 use cel_accessibility::{AccessibilityElement, AccessibilityTree, ElementRole};
-use cel_context::{ConfidenceBehavior, ConfidenceThresholds, ContentRole, ContextElement, ContextSource, ElementState, ScreenContext};
+use cel_context::{
+    ConfidenceBehavior, ConfidenceThresholds, ContentRole, ContextElement, ContextSource,
+    ElementState, ScreenContext,
+};
 
 #[test]
 fn test_confidence_thresholds_default() {
     let thresholds = ConfidenceThresholds::default();
-    assert_eq!(thresholds.behavior_for(0.95), ConfidenceBehavior::ActImmediately);
+    assert_eq!(
+        thresholds.behavior_for(0.95),
+        ConfidenceBehavior::ActImmediately
+    );
     assert_eq!(thresholds.behavior_for(0.8), ConfidenceBehavior::ActAndLog);
-    assert_eq!(thresholds.behavior_for(0.6), ConfidenceBehavior::ActCautiously);
-    assert_eq!(thresholds.behavior_for(0.3), ConfidenceBehavior::PauseAndNotify);
+    assert_eq!(
+        thresholds.behavior_for(0.6),
+        ConfidenceBehavior::ActCautiously
+    );
+    assert_eq!(
+        thresholds.behavior_for(0.3),
+        ConfidenceBehavior::PauseAndNotify
+    );
 }
 
 #[test]
@@ -22,7 +34,12 @@ fn test_context_element_serialization() {
         description: None,
         element_type: "button".into(),
         value: None,
-        bounds: Some(cel_context::Bounds { x: 100, y: 200, width: 80, height: 30 }),
+        bounds: Some(cel_context::Bounds {
+            x: 100,
+            y: 200,
+            width: 80,
+            height: 30,
+        }),
         state: cel_context::ElementState::default(),
         parent_id: None,
         actions: vec![],
@@ -100,7 +117,7 @@ fn test_screen_context_serialization() {
 #[test]
 fn test_context_source_variants() {
     // Verify all source variants exist and are distinct
-    let sources = vec![
+    let sources = [
         ContextSource::AccessibilityTree,
         ContextSource::NativeApi,
         ContextSource::Vision,
@@ -126,10 +143,16 @@ fn get_confidence_for(element: AccessibilityElement) -> f64 {
         fn get_tree(&self) -> Result<AccessibilityElement, cel_accessibility::AccessibilityError> {
             Ok(self.0.clone())
         }
-        fn find_elements(&self, _: Option<&ElementRole>, _: Option<&str>) -> Result<Vec<AccessibilityElement>, cel_accessibility::AccessibilityError> {
+        fn find_elements(
+            &self,
+            _: Option<&ElementRole>,
+            _: Option<&str>,
+        ) -> Result<Vec<AccessibilityElement>, cel_accessibility::AccessibilityError> {
             Ok(vec![])
         }
-        fn focused_element(&self) -> Result<Option<AccessibilityElement>, cel_accessibility::AccessibilityError> {
+        fn focused_element(
+            &self,
+        ) -> Result<Option<AccessibilityElement>, cel_accessibility::AccessibilityError> {
             Ok(None)
         }
     }
@@ -181,43 +204,104 @@ fn test_confidence_bare_minimum_element() {
     // Let's use a visible element with no label/bounds to test base.
     let elem2 = make_element(ElementRole::Group, None, None, true, false, vec![]);
     let conf2 = get_confidence_for(elem2);
-    assert!((conf2 - 0.60).abs() < 0.01, "Bare minimum should be 0.60, got {}", conf2);
+    assert!(
+        (conf2 - 0.60).abs() < 0.01,
+        "Bare minimum should be 0.60, got {}",
+        conf2
+    );
 }
 
 #[test]
 fn test_confidence_with_label() {
     let elem = make_element(ElementRole::Group, Some("Hello"), None, true, false, vec![]);
     let conf = get_confidence_for(elem);
-    assert!((conf - 0.70).abs() < 0.01, "With label should be 0.70, got {}", conf);
+    assert!(
+        (conf - 0.70).abs() < 0.01,
+        "With label should be 0.70, got {}",
+        conf
+    );
 }
 
 #[test]
 fn test_confidence_with_label_and_bounds() {
-    let bounds = cel_accessibility::Bounds { x: 0, y: 0, width: 100, height: 50 };
-    let elem = make_element(ElementRole::Group, Some("Hello"), Some(bounds), true, false, vec![]);
+    let bounds = cel_accessibility::Bounds {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 50,
+    };
+    let elem = make_element(
+        ElementRole::Group,
+        Some("Hello"),
+        Some(bounds),
+        true,
+        false,
+        vec![],
+    );
     let conf = get_confidence_for(elem);
-    assert!((conf - 0.80).abs() < 0.01, "With label+bounds should be 0.80, got {}", conf);
+    assert!(
+        (conf - 0.80).abs() < 0.01,
+        "With label+bounds should be 0.80, got {}",
+        conf
+    );
 }
 
 #[test]
 fn test_confidence_with_label_bounds_visible_enabled() {
-    let bounds = cel_accessibility::Bounds { x: 0, y: 0, width: 100, height: 50 };
-    let elem = make_element(ElementRole::Group, Some("Hello"), Some(bounds), true, true, vec![]);
+    let bounds = cel_accessibility::Bounds {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 50,
+    };
+    let elem = make_element(
+        ElementRole::Group,
+        Some("Hello"),
+        Some(bounds),
+        true,
+        true,
+        vec![],
+    );
     let conf = get_confidence_for(elem);
-    assert!((conf - 0.85).abs() < 0.01, "With label+bounds+state should be 0.85, got {}", conf);
+    assert!(
+        (conf - 0.85).abs() < 0.01,
+        "With label+bounds+state should be 0.85, got {}",
+        conf
+    );
 }
 
 #[test]
 fn test_confidence_actionable_type() {
-    let bounds = cel_accessibility::Bounds { x: 0, y: 0, width: 100, height: 50 };
-    let elem = make_element(ElementRole::Button, Some("Create Account"), Some(bounds), true, true, vec![]);
+    let bounds = cel_accessibility::Bounds {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 50,
+    };
+    let elem = make_element(
+        ElementRole::Button,
+        Some("Create Account"),
+        Some(bounds),
+        true,
+        true,
+        vec![],
+    );
     let conf = get_confidence_for(elem);
-    assert!((conf - 0.90).abs() < 0.01, "Actionable should be 0.90, got {}", conf);
+    assert!(
+        (conf - 0.90).abs() < 0.01,
+        "Actionable should be 0.90, got {}",
+        conf
+    );
 }
 
 #[test]
 fn test_confidence_with_actions() {
-    let bounds = cel_accessibility::Bounds { x: 0, y: 0, width: 100, height: 50 };
+    let bounds = cel_accessibility::Bounds {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 50,
+    };
     let elem = make_element(
         ElementRole::Button,
         Some("Create Account"),
@@ -229,7 +313,11 @@ fn test_confidence_with_actions() {
     let conf = get_confidence_for(elem);
     // 0.60 + 0.10 (label) + 0.10 (bounds) + 0.05 (visible+enabled) + 0.05 (actionable) + 0.05 (actions)
     // = 0.95 raw, capped at 0.95 by score_element_confidence()
-    assert!((conf - 0.95).abs() < 0.01, "Fully loaded should be ~0.95 (capped), got {}", conf);
+    assert!(
+        (conf - 0.95).abs() < 0.01,
+        "Fully loaded should be ~0.95 (capped), got {}",
+        conf
+    );
 }
 
 // --- Phase 6.2: State bit parsing tests ---
@@ -269,41 +357,63 @@ fn test_state_bit_selected() {
 fn test_state_bit_expandable_and_expanded() {
     // Bit 9 = EXPANDABLE, Bit 10 = EXPANDED
     let state = parse_state_bits((1 << 9) | (1 << 10));
-    assert_eq!(state.expanded, Some(true), "Bits 9+10 should map to expanded=Some(true)");
+    assert_eq!(
+        state.expanded,
+        Some(true),
+        "Bits 9+10 should map to expanded=Some(true)"
+    );
 }
 
 #[test]
 fn test_state_bit_expandable_but_collapsed() {
     // Bit 9 = EXPANDABLE only (no bit 10)
     let state = parse_state_bits(1 << 9);
-    assert_eq!(state.expanded, Some(false), "Bit 9 only should map to expanded=Some(false)");
+    assert_eq!(
+        state.expanded,
+        Some(false),
+        "Bit 9 only should map to expanded=Some(false)"
+    );
 }
 
 #[test]
 fn test_state_bit_not_expandable() {
     // Neither bit 9 nor bit 10
     let state = parse_state_bits(0);
-    assert_eq!(state.expanded, None, "No expandable bit should map to expanded=None");
+    assert_eq!(
+        state.expanded, None,
+        "No expandable bit should map to expanded=None"
+    );
 }
 
 #[test]
 fn test_state_bit_checkable_and_checked() {
     // Bit 41 = CHECKABLE (in second u32, bit 9), Bit 4 = CHECKED
     let state = parse_state_bits((1u64 << 41) | (1 << 4));
-    assert_eq!(state.checked, Some(true), "Bits 41+4 should map to checked=Some(true)");
+    assert_eq!(
+        state.checked,
+        Some(true),
+        "Bits 41+4 should map to checked=Some(true)"
+    );
 }
 
 #[test]
 fn test_state_bit_checkable_but_unchecked() {
     // Bit 41 only
     let state = parse_state_bits(1u64 << 41);
-    assert_eq!(state.checked, Some(false), "Bit 41 only should map to checked=Some(false)");
+    assert_eq!(
+        state.checked,
+        Some(false),
+        "Bit 41 only should map to checked=Some(false)"
+    );
 }
 
 #[test]
 fn test_state_bit_not_checkable() {
     let state = parse_state_bits(0);
-    assert_eq!(state.checked, None, "No checkable bit should map to checked=None");
+    assert_eq!(
+        state.checked, None,
+        "No checkable bit should map to checked=None"
+    );
 }
 
 #[test]
@@ -334,9 +444,9 @@ fn test_state_bits_combined() {
 /// This mirrors the logic in linux.rs get_state() for testability.
 fn parse_state_bits(bits: u64) -> ElementState {
     ElementState {
-        focused:  bits & (1 << 12) != 0,
-        enabled:  bits & (1 << 8) != 0,
-        visible:  bits & (1 << 30) != 0,
+        focused: bits & (1 << 12) != 0,
+        enabled: bits & (1 << 8) != 0,
+        visible: bits & (1 << 30) != 0,
         selected: bits & (1 << 23) != 0,
         expanded: if bits & (1 << 9) != 0 {
             Some(bits & (1 << 10) != 0)

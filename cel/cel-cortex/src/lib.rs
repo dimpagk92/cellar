@@ -53,8 +53,8 @@ pub use cortex::{Cortex, CortexError, TargetValidation};
 pub use manager::CortexManager;
 pub use memory::{Memory, MemoryEntry, MemoryError, MemoryLenses};
 pub use model::{
-    Anomaly, AnomalyType, DiffSummary, ElementStability, ErrorState,
-    FocusedElement, FreshnessAssessment, FreshnessState, LoadingState, MentalModel, PerceptionDiff,
+    Anomaly, AnomalyType, DiffSummary, ElementStability, ErrorState, FocusedElement,
+    FreshnessAssessment, FreshnessState, LoadingState, MentalModel, PerceptionDiff,
     SemanticInsight, SourceSummary, StalenessCause, TaskPhase, TemporalFlags,
 };
 pub use process_driver::ProcessDriver;

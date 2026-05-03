@@ -13,7 +13,7 @@
   "dependencies": {
     "@cellar/agent": "workspace:*",
     "@dpagk/cellar-mcp": "workspace:*",
-    "commander": "^12.1.0"
+    "commander": "^14.0.3"
   },
   "devDependencies": { "typescript": "^6.0.3" }
 }

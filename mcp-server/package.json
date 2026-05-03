@@ -45,12 +45,12 @@
     "prepack": "pnpm build",
     "build": "pnpm --filter @cellar/agent build && pnpm --filter @cellar/adapter-browser build && tsc && pnpm bundle",
     "bundle": "node esbuild.config.mjs",
-    "test": "node ../tests/cortex/mcp-protocol.mjs",
+    "test:integration": "node ../tests/cortex/mcp-protocol.mjs",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@dpagk/cellar-napi": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {

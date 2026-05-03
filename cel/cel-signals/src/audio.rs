@@ -108,7 +108,10 @@ mod tests {
 
     #[test]
     fn test_audio_state_serialization() {
-        let state = AudioState { volume: 0.75, is_muted: false };
+        let state = AudioState {
+            volume: 0.75,
+            is_muted: false,
+        };
         let json = serde_json::to_string(&state).unwrap();
         let back: AudioState = serde_json::from_str(&json).unwrap();
         assert!((back.volume - 0.75).abs() < 0.01);

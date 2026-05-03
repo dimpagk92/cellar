@@ -25,21 +25,19 @@ pub fn detect_anomalies_from_events(events: &[CelEvent], expected_app: &str) -> 
                     element_ids: vec![],
                 });
             }
-            CelEvent::AppActivated { app_name } => {
-                if let Some(name) = app_name {
-                    if name != expected_app {
-                        anomalies.push(Anomaly {
-                            anomaly_type: AnomalyType::AppSwitch,
-                            title: Some(name.clone()),
-                            description: format!(
-                                "App switched to \"{}\" (expected \"{}\")",
-                                name, expected_app
-                            ),
-                            timestamp: now,
-                            element_ids: vec![],
-                        });
-                    }
-                }
+            CelEvent::AppActivated {
+                app_name: Some(name),
+            } if name != expected_app => {
+                anomalies.push(Anomaly {
+                    anomaly_type: AnomalyType::AppSwitch,
+                    title: Some(name.clone()),
+                    description: format!(
+                        "App switched to \"{}\" (expected \"{}\")",
+                        name, expected_app
+                    ),
+                    timestamp: now,
+                    element_ids: vec![],
+                });
             }
             _ => {}
         }

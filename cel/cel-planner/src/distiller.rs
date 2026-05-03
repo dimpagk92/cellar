@@ -9,33 +9,75 @@ use std::collections::HashSet;
 
 /// Actionable element types (can be clicked/interacted with).
 const ACTIONABLE_TYPES: &[&str] = &[
-    "button", "input", "select", "textarea", "a", "link",
-    "checkbox", "radio_button", "combobox", "slider",
-    "tab", "menu_item",
+    "button",
+    "input",
+    "select",
+    "textarea",
+    "a",
+    "link",
+    "checkbox",
+    "radio_button",
+    "combobox",
+    "slider",
+    "tab",
+    "menu_item",
 ];
 
 /// Generic action labels that get deprioritized when repeated.
 const GENERIC_ACTION_LABELS: &[&str] = &[
-    "open", "close", "cancel", "ok", "more", "menu", "next", "back",
-    "learn more", "details", "view", "edit", "delete", "remove", "select",
-    "continue", "submit", "save", "apply", "retry", "dismiss",
+    "open",
+    "close",
+    "cancel",
+    "ok",
+    "more",
+    "menu",
+    "next",
+    "back",
+    "learn more",
+    "details",
+    "view",
+    "edit",
+    "delete",
+    "remove",
+    "select",
+    "continue",
+    "submit",
+    "save",
+    "apply",
+    "retry",
+    "dismiss",
 ];
 
 /// Chrome/UI noise patterns to deprioritize.
 const CHROME_HINT_KEYWORDS: &[&str] = &[
-    "header", "nav", "navbar", "toolbar", "menu", "sidebar", "breadcrumb",
-    "footer", "legal", "cookie", "consent", "account", "profile", "help",
-    "support", "social", "share", "newsletter", "chat", "intercom",
+    "header",
+    "nav",
+    "navbar",
+    "toolbar",
+    "menu",
+    "sidebar",
+    "breadcrumb",
+    "footer",
+    "legal",
+    "cookie",
+    "consent",
+    "account",
+    "profile",
+    "help",
+    "support",
+    "social",
+    "share",
+    "newsletter",
+    "chat",
+    "intercom",
 ];
 
 /// Stop words filtered from goal keywords.
 const STOP_WORDS: &[&str] = &[
-    "the", "a", "an", "is", "are", "was", "were", "be", "been",
-    "and", "or", "but", "in", "on", "at", "to", "for", "of",
-    "with", "from", "by", "as", "it", "do", "not", "this", "that",
-    "my", "me", "i", "you", "we", "can", "will", "just", "any",
-    "all", "each", "find", "search", "open", "read", "get", "show",
-    "tell", "what", "how", "please",
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "and", "or", "but", "in", "on",
+    "at", "to", "for", "of", "with", "from", "by", "as", "it", "do", "not", "this", "that", "my",
+    "me", "i", "you", "we", "can", "will", "just", "any", "all", "each", "find", "search", "open",
+    "read", "get", "show", "tell", "what", "how", "please",
 ];
 
 fn is_actionable(element_type: &str) -> bool {
@@ -84,13 +126,22 @@ fn extract_quoted_phrases(goal: &str) -> Vec<String> {
 /// Check if the goal is an extraction/reading goal.
 fn is_extraction_goal(goal: &str) -> bool {
     let lower = goal.to_lowercase();
-    lower.contains("extract") || lower.contains("read") || lower.contains("what is")
-        || lower.contains("how many") || lower.contains("find") || lower.contains("list")
+    lower.contains("extract")
+        || lower.contains("read")
+        || lower.contains("what is")
+        || lower.contains("how many")
+        || lower.contains("find")
+        || lower.contains("list")
         || lower.contains("get the")
 }
 
 /// Score a single element's relevance to the goal.
-fn score_element(el: &ContextElement, keywords: &[String], quoted_phrases: &[String], is_extract: bool) -> f64 {
+fn score_element(
+    el: &ContextElement,
+    keywords: &[String],
+    quoted_phrases: &[String],
+    is_extract: bool,
+) -> f64 {
     let mut score: f64 = 0.0;
     let label = el.label.as_deref().unwrap_or("").to_lowercase();
     let value = el.value.as_deref().unwrap_or("").to_lowercase();
@@ -132,15 +183,25 @@ fn score_element(el: &ContextElement, keywords: &[String], quoted_phrases: &[Str
     }
 
     // Actionable boost
-    if is_actionable(&el.element_type) { score += 1.0; }
-    if el.state.visible && el.state.enabled { score += 0.5; }
-    if !el.actions.is_empty() { score += 0.5; }
+    if is_actionable(&el.element_type) {
+        score += 1.0;
+    }
+    if el.state.visible && el.state.enabled {
+        score += 0.5;
+    }
+    if !el.actions.is_empty() {
+        score += 0.5;
+    }
 
     // Content length
     let label_len = el.label.as_ref().map(|l| l.len()).unwrap_or(0);
-    if label_len > 30 { score += 2.0; }
-    else if label_len > 15 { score += 1.0; }
-    else if label_len <= 5 && is_actionable(&el.element_type) { score -= 1.0; }
+    if label_len > 30 {
+        score += 2.0;
+    } else if label_len > 15 {
+        score += 1.0;
+    } else if label_len <= 5 && is_actionable(&el.element_type) {
+        score -= 1.0;
+    }
 
     // Generic action label deprioritization
     if is_generic_label(&label) && is_actionable(&el.element_type) {
@@ -148,7 +209,11 @@ fn score_element(el: &ContextElement, keywords: &[String], quoted_phrases: &[Str
     }
 
     // Chrome noise deprioritization
-    let props_hint = el.properties.get("css_selector").map(|s| s.as_str()).unwrap_or("");
+    let props_hint = el
+        .properties
+        .get("css_selector")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     for kw in CHROME_HINT_KEYWORDS {
         if props_hint.contains(kw) {
             score -= 4.0;
@@ -171,7 +236,9 @@ pub fn distill_for_goal(
 
     if keywords.is_empty() && quoted.is_empty() {
         // No keywords — return actionable elements
-        return context.elements.iter()
+        return context
+            .elements
+            .iter()
             .filter(|el| is_actionable(&el.element_type) || el.id == "page-text")
             .take(max_elements)
             .cloned()
@@ -179,7 +246,9 @@ pub fn distill_for_goal(
     }
 
     // Score all elements
-    let mut scored: Vec<(f64, &ContextElement)> = context.elements.iter()
+    let mut scored: Vec<(f64, &ContextElement)> = context
+        .elements
+        .iter()
         .map(|el| (score_element(el, &keywords, &quoted, is_extract), el))
         .collect();
 
@@ -187,7 +256,8 @@ pub fn distill_for_goal(
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     // Take top elements, ensuring page-text is included
-    let mut result: Vec<ContextElement> = scored.iter()
+    let mut result: Vec<ContextElement> = scored
+        .iter()
         .filter(|(s, _)| *s > 0.0)
         .take(max_elements)
         .map(|(_, el)| (*el).clone())

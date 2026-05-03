@@ -53,7 +53,11 @@ fn live_desktop_produces_valid_context() {
 
         // If bounds exist, they should be non-negative dimensions
         if let Some(ref b) = elem.bounds {
-            assert!(b.width > 0 || b.height > 0, "Element {} has zero-area bounds", elem.id);
+            assert!(
+                b.width > 0 || b.height > 0,
+                "Element {} has zero-area bounds",
+                elem.id
+            );
         }
     }
 

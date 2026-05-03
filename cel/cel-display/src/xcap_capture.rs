@@ -8,6 +8,12 @@ pub struct XcapCapture {
     primary_height: u32,
 }
 
+impl Default for XcapCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl XcapCapture {
     pub fn new() -> Self {
         Self {

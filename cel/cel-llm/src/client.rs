@@ -86,6 +86,9 @@ struct AnthropicResponseContent {
     text: Option<String>,
 }
 
+type MockFn =
+    std::sync::Arc<dyn Fn(Vec<ChatMessage>, u32) -> Result<String, LlmError> + Send + Sync>;
+
 /// Reusable LLM client that speaks both the OpenAI-compatible chat completions
 /// protocol and the Anthropic Messages API.
 pub struct LlmClient {
@@ -95,7 +98,7 @@ pub struct LlmClient {
     model: String,
     /// When set, `chat()` calls this function instead of making an HTTP request.
     /// Used by tests to inject deterministic responses without a real LLM endpoint.
-    mock_fn: Option<std::sync::Arc<dyn Fn(Vec<ChatMessage>, u32) -> Result<String, LlmError> + Send + Sync>>,
+    mock_fn: Option<MockFn>,
 }
 
 impl LlmClient {
@@ -191,7 +194,10 @@ impl LlmClient {
             };
             match result {
                 Ok(response) => return Ok(response),
-                Err(LlmError::HttpError { status: 429, ref body }) => {
+                Err(LlmError::HttpError {
+                    status: 429,
+                    ref body,
+                }) => {
                     tracing::warn!(
                         "Rate limited (429), retry {}/3 after {}s: {}",
                         attempt + 1,
@@ -240,9 +246,15 @@ impl LlmClient {
             response_format: if is_reasoning {
                 None // reasoning models don't support response_format
             } else {
-                Some(ResponseFormat { r#type: "json_object".to_string() })
+                Some(ResponseFormat {
+                    r#type: "json_object".to_string(),
+                })
             },
-            temperature: if is_reasoning { None } else { self.config.temperature },
+            temperature: if is_reasoning {
+                None
+            } else {
+                self.config.temperature
+            },
         };
 
         let api_key = self.config.api_key.as_deref().unwrap_or("");
@@ -495,10 +507,7 @@ fn parse_data_url(url: &str) -> (String, String) {
     // Format: data:image/png;base64,<data>
     if let Some(rest) = url.strip_prefix("data:") {
         if let Some((header, data)) = rest.split_once(',') {
-            let media_type = header
-                .strip_suffix(";base64")
-                .unwrap_or(header)
-                .to_string();
+            let media_type = header.strip_suffix(";base64").unwrap_or(header).to_string();
             return (media_type, data.to_string());
         }
     }

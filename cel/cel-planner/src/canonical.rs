@@ -53,9 +53,7 @@ pub enum NextMove {
         extracted_data: serde_json::Value,
     },
     /// Give up — goal can't be completed given the state.
-    Fail {
-        reason: String,
-    },
+    Fail { reason: String },
 }
 
 /// Snapshot of what tools / channels the runtime has wired up this
@@ -399,8 +397,12 @@ mod tests {
             message: "selector returned null".into(),
             recoverable: true,
         };
-        assert!(serde_json::to_string(&ok).unwrap().contains("\"status\":\"ok\""));
-        assert!(serde_json::to_string(&err).unwrap().contains("\"status\":\"err\""));
+        assert!(serde_json::to_string(&ok)
+            .unwrap()
+            .contains("\"status\":\"ok\""));
+        assert!(serde_json::to_string(&err)
+            .unwrap()
+            .contains("\"status\":\"err\""));
     }
 
     #[test]

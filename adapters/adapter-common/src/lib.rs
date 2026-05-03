@@ -84,7 +84,10 @@ mod tests {
 
     #[test]
     fn test_adapter_error_display() {
-        assert_eq!(AdapterError::AppNotFound.to_string(), "App not running or not found");
+        assert_eq!(
+            AdapterError::AppNotFound.to_string(),
+            "App not running or not found"
+        );
         assert_eq!(AdapterError::ConnectionLost.to_string(), "Connection lost");
         assert_eq!(
             AdapterError::Unavailable("no COM".into()).to_string(),

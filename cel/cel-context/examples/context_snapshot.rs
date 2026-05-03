@@ -36,7 +36,9 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("[warn] Vision not configured: {}", e);
-                eprintln!("[hint] Set CEL_LLM_PROVIDER, CEL_LLM_API_KEY env vars for vision fallback");
+                eprintln!(
+                    "[hint] Set CEL_LLM_PROVIDER, CEL_LLM_API_KEY env vars for vision fallback"
+                );
             }
         }
     }
@@ -48,30 +50,80 @@ fn main() {
         println!("{}", serde_json::to_string_pretty(&ctx).unwrap());
     } else {
         println!("=== Screen Context Snapshot ===");
-        println!("App:       {}", if ctx.app.is_empty() { "(unknown)" } else { &ctx.app });
-        println!("Window:    {}", if ctx.window.is_empty() { "(unknown)" } else { &ctx.window });
+        println!(
+            "App:       {}",
+            if ctx.app.is_empty() {
+                "(unknown)"
+            } else {
+                &ctx.app
+            }
+        );
+        println!(
+            "Window:    {}",
+            if ctx.window.is_empty() {
+                "(unknown)"
+            } else {
+                &ctx.window
+            }
+        );
         println!("Timestamp: {} ms", ctx.timestamp_ms);
         println!("Elements:  {}", ctx.elements.len());
         println!("Network:   {} events", ctx.network_events.len());
         println!();
 
         // Summary by source
-        let a11y_count = ctx.elements.iter().filter(|e| e.source == cel_context::ContextSource::AccessibilityTree).count();
-        let vision_count = ctx.elements.iter().filter(|e| e.source == cel_context::ContextSource::Vision).count();
-        let native_count = ctx.elements.iter().filter(|e| e.source == cel_context::ContextSource::NativeApi).count();
-        println!("Sources: {} a11y, {} vision, {} native", a11y_count, vision_count, native_count);
+        let a11y_count = ctx
+            .elements
+            .iter()
+            .filter(|e| e.source == cel_context::ContextSource::AccessibilityTree)
+            .count();
+        let vision_count = ctx
+            .elements
+            .iter()
+            .filter(|e| e.source == cel_context::ContextSource::Vision)
+            .count();
+        let native_count = ctx
+            .elements
+            .iter()
+            .filter(|e| e.source == cel_context::ContextSource::NativeApi)
+            .count();
+        println!(
+            "Sources: {} a11y, {} vision, {} native",
+            a11y_count, vision_count, native_count
+        );
 
         // Vision fallback indication
-        let actionable_count = ctx.elements.iter()
+        let actionable_count = ctx
+            .elements
+            .iter()
             .filter(|e| e.source == cel_context::ContextSource::AccessibilityTree)
-            .filter(|e| matches!(e.element_type.as_str(),
-                "button" | "input" | "link" | "checkbox" | "radio_button" |
-                "combobox" | "menu_item" | "tab_item" | "slider" | "list_item" | "tree_item"))
+            .filter(|e| {
+                matches!(
+                    e.element_type.as_str(),
+                    "button"
+                        | "input"
+                        | "link"
+                        | "checkbox"
+                        | "radio_button"
+                        | "combobox"
+                        | "menu_item"
+                        | "tab_item"
+                        | "slider"
+                        | "list_item"
+                        | "tree_item"
+                )
+            })
             .count();
         if vision_count > 0 {
-            println!("Vision fallback: YES ({} a11y actionable < 5 threshold)", actionable_count);
+            println!(
+                "Vision fallback: YES ({} a11y actionable < 5 threshold)",
+                actionable_count
+            );
         } else {
-            println!("Vision fallback: NO ({} a11y actionable >= 5 threshold)", actionable_count);
+            println!(
+                "Vision fallback: NO ({} a11y actionable >= 5 threshold)",
+                actionable_count
+            );
         }
         println!();
 
@@ -86,10 +138,18 @@ fn main() {
             let state_str = {
                 let s = &elem.state;
                 let mut flags = Vec::new();
-                if s.focused { flags.push("focused"); }
-                if s.enabled { flags.push("enabled"); }
-                if s.visible { flags.push("visible"); }
-                if s.selected { flags.push("selected"); }
+                if s.focused {
+                    flags.push("focused");
+                }
+                if s.enabled {
+                    flags.push("enabled");
+                }
+                if s.visible {
+                    flags.push("visible");
+                }
+                if s.selected {
+                    flags.push("selected");
+                }
                 match s.expanded {
                     Some(true) => flags.push("expanded"),
                     Some(false) => flags.push("collapsed"),
@@ -106,10 +166,14 @@ fn main() {
                 Some(p) => format!(" ^{}", truncate(p, 12)),
                 None => String::new(),
             };
-            let desc_str = elem.description.as_deref()
+            let desc_str = elem
+                .description
+                .as_deref()
                 .map(|d| format!(" desc={}", truncate(d, 15)))
                 .unwrap_or_default();
-            let value_str = elem.value.as_deref()
+            let value_str = elem
+                .value
+                .as_deref()
                 .map(|v| format!(" val={}", truncate(v, 15)))
                 .unwrap_or_default();
             let actions_str = if elem.actions.is_empty() {
@@ -134,7 +198,10 @@ fn main() {
         }
 
         if ctx.elements.len() > max_display {
-            println!("  ... and {} more elements", ctx.elements.len() - max_display);
+            println!(
+                "  ... and {} more elements",
+                ctx.elements.len() - max_display
+            );
         }
 
         if !ctx.network_events.is_empty() {
@@ -143,9 +210,16 @@ fn main() {
             for evt in ctx.network_events.iter().take(10) {
                 let service = evt.service.as_deref().unwrap_or("?");
                 let process = evt.process_name.as_deref().unwrap_or("?");
-                println!("  {} {}:{} -> {}:{} [{}] ({})",
-                    evt.protocol, evt.local_addr, evt.local_port,
-                    evt.remote_addr, evt.remote_port, evt.state, service);
+                println!(
+                    "  {} {}:{} -> {}:{} [{}] ({})",
+                    evt.protocol,
+                    evt.local_addr,
+                    evt.local_port,
+                    evt.remote_addr,
+                    evt.remote_port,
+                    evt.state,
+                    service
+                );
                 println!("    process: {}", process);
             }
         }
@@ -154,7 +228,10 @@ fn main() {
             println!();
             println!("HTTP events:");
             for evt in ctx.http_events.iter().take(10) {
-                let status = evt.status_code.map(|s| s.to_string()).unwrap_or_else(|| "-".into());
+                let status = evt
+                    .status_code
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".into());
                 println!("  {} {} [{}]", evt.method, evt.url, status);
             }
         }

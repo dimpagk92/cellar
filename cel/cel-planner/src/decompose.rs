@@ -6,7 +6,6 @@
 ///
 /// The LLM can add, skip, or reorder milestones during execution.
 /// They're guidance, not gates.
-
 use serde::{Deserialize, Serialize};
 
 /// A single milestone from the decomposition.
@@ -123,7 +122,13 @@ pub fn format_milestones_for_prompt(milestones: &[Milestone]) -> String {
 
     let mut out = String::from("\n\nMILESTONES for this goal:\n");
     for (i, m) in milestones.iter().enumerate() {
-        out.push_str(&format!("{}. {} — {} (~{} steps)\n", i + 1, m.label, m.description, m.step_budget));
+        out.push_str(&format!(
+            "{}. {} — {} (~{} steps)\n",
+            i + 1,
+            m.label,
+            m.description,
+            m.step_budget
+        ));
     }
     out.push_str("When you reach a milestone, set progress to \"milestone:<label>\".\n");
     out
@@ -166,8 +171,16 @@ mod tests {
     #[test]
     fn test_format_milestones() {
         let milestones = vec![
-            Milestone { label: "search".into(), description: "Fill search form".into(), step_budget: 5 },
-            Milestone { label: "select".into(), description: "Pick best option".into(), step_budget: 10 },
+            Milestone {
+                label: "search".into(),
+                description: "Fill search form".into(),
+                step_budget: 5,
+            },
+            Milestone {
+                label: "select".into(),
+                description: "Pick best option".into(),
+                step_budget: 10,
+            },
         ];
         let formatted = format_milestones_for_prompt(&milestones);
         assert!(formatted.contains("1. search"));

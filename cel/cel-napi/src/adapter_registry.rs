@@ -21,15 +21,9 @@ fn adapters() -> &'static tokio::sync::Mutex<HashMap<String, Box<dyn Adapter>>> 
 // ── Factory: create adapter by name ────────────────────────────────────────
 
 fn create_adapter(name: &str) -> napi::Result<Box<dyn Adapter>> {
-    match name {
-        // Future: "excel" => Ok(Box::new(excel_adapter::ExcelAdapter::new())),
-        // Future: "sap-gui" => Ok(Box::new(sap_gui_adapter::SapGuiAdapter::new())),
-        // Future: "bloomberg" => Ok(Box::new(bloomberg_adapter::BloombergAdapter::new())),
-        // Future: "metatrader" => Ok(Box::new(metatrader_adapter::MetaTraderAdapter::new())),
-        _ => Err(napi::Error::from_reason(format!(
-            "Unknown adapter: \"{name}\". Available: excel, sap-gui, bloomberg, metatrader"
-        ))),
-    }
+    Err(napi::Error::from_reason(format!(
+        "Unknown adapter: \"{name}\". Available: excel, sap-gui, bloomberg, metatrader"
+    )))
 }
 
 // ── NAPI exports ───────────────────────────────────────────────────────────

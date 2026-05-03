@@ -90,7 +90,7 @@ jobs:
           copy target\${{ matrix.target }}\release\cel_napi.dll cel\cel-napi\${{ matrix.artifact }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: napi-${{ matrix.target }}
           path: cel/cel-napi/${{ matrix.artifact }}

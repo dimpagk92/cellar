@@ -48,7 +48,7 @@ pub fn router(state: ServerState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/goals", post(submit_goal))
-        .route("/v1/jobs/:id", get(get_job))
+        .route("/v1/jobs/{id}", get(get_job))
         .with_state(state)
 }
 

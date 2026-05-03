@@ -144,9 +144,7 @@ fn list_windows_xdotool() -> Option<Vec<WindowState>> {
             .output()
             .ok();
         let title = match name_output {
-            Some(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => String::new(),
         };
 
@@ -156,12 +154,10 @@ fn list_windows_xdotool() -> Option<Vec<WindowState>> {
             .output()
             .ok();
         let pid: u32 = match pid_output {
-            Some(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0)
-            }
+            Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0),
             _ => 0,
         };
 
@@ -195,13 +191,13 @@ fn list_windows_xdotool() -> Option<Vec<WindowState>> {
 
 #[cfg(target_os = "macos")]
 fn list_windows_macos() -> Vec<WindowState> {
+    use core_foundation::array::CFArray;
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::CFDictionary;
     use core_graphics::display::{
         kCGNullWindowID, kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly,
         CGWindowListCopyWindowInfo,
     };
-    use core_foundation::array::CFArray;
-    use core_foundation::base::TCFType;
-    use core_foundation::dictionary::CFDictionary;
 
     let options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
     let window_list = unsafe { CGWindowListCopyWindowInfo(options, kCGNullWindowID) };
@@ -220,9 +216,7 @@ fn list_windows_macos() -> Vec<WindowState> {
         if ptr.is_null() {
             continue;
         }
-        let dict: CFDictionary = unsafe {
-            CFDictionary::wrap_under_get_rule(ptr as *const _)
-        };
+        let dict: CFDictionary = unsafe { CFDictionary::wrap_under_get_rule(ptr as *const _) };
 
         let app_name = get_dict_string(&dict, "kCGWindowOwnerName").unwrap_or_default();
         let title = get_dict_string(&dict, "kCGWindowName").unwrap_or_default();
@@ -231,8 +225,8 @@ fn list_windows_macos() -> Vec<WindowState> {
         let on_screen = get_dict_i32(&dict, "kCGWindowIsOnscreen").unwrap_or(0) != 0;
 
         // Get bounds from kCGWindowBounds dictionary
-        let (x, y, width, height) = get_dict_bounds(&dict, "kCGWindowBounds")
-            .unwrap_or((0, 0, 0, 0));
+        let (x, y, width, height) =
+            get_dict_bounds(&dict, "kCGWindowBounds").unwrap_or((0, 0, 0, 0));
 
         // Skip windows with no name and no meaningful bounds (menu bar items, system UI)
         if app_name.is_empty() && title.is_empty() {
@@ -259,10 +253,7 @@ fn list_windows_macos() -> Vec<WindowState> {
 }
 
 #[cfg(target_os = "macos")]
-fn get_dict_string(
-    dict: &core_foundation::dictionary::CFDictionary,
-    key: &str,
-) -> Option<String> {
+fn get_dict_string(dict: &core_foundation::dictionary::CFDictionary, key: &str) -> Option<String> {
     use core_foundation::base::TCFType;
     use core_foundation::string::CFString;
 
@@ -279,17 +270,18 @@ fn get_dict_string(
             CFString::wrap_under_get_rule(cf_ref as core_foundation::string::CFStringRef)
         };
         let result = s.to_string();
-        if result.is_empty() { None } else { Some(result) }
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     } else {
         None
     }
 }
 
 #[cfg(target_os = "macos")]
-fn get_dict_i32(
-    dict: &core_foundation::dictionary::CFDictionary,
-    key: &str,
-) -> Option<i32> {
+fn get_dict_i32(dict: &core_foundation::dictionary::CFDictionary, key: &str) -> Option<i32> {
     use core_foundation::base::TCFType;
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
@@ -328,9 +320,8 @@ fn get_dict_bounds(
         return None;
     }
 
-    let bounds_dict: CFDictionary = unsafe {
-        CFDictionary::wrap_under_get_rule(cf_ref as *const _)
-    };
+    let bounds_dict: CFDictionary =
+        unsafe { CFDictionary::wrap_under_get_rule(cf_ref as *const _) };
 
     let x = get_dict_i32(&bounds_dict, "X").unwrap_or(0);
     let y = get_dict_i32(&bounds_dict, "Y").unwrap_or(0);

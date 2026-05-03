@@ -8,7 +8,6 @@
 /// - Empty context recovery (retry on sparse/empty screens)
 /// - Loop detection (repeat, ping-pong, stale context)
 /// - Step budget awareness (passed to prompt)
-
 use async_trait::async_trait;
 use cel_context::ScreenContext;
 
@@ -71,10 +70,7 @@ impl Planner {
     /// `cel_goal_runner::CanonicalGoalRunner::run` instead. The body is
     /// preserved verbatim but with loop detection stripped.
     #[deprecated(note = "use cel_goal_runner::CanonicalGoalRunner::run")]
-    pub async fn run(
-        &self,
-        backend: &dyn PlannerBackend,
-    ) -> Result<PlannerEvent, PlannerError> {
+    pub async fn run(&self, backend: &dyn PlannerBackend) -> Result<PlannerEvent, PlannerError> {
         let mut history = StepHistory::new();
         let mut loop_warning: Option<String> = None;
         let mut tentative_plan: Vec<PlannedStep> = Vec::new();
@@ -82,9 +78,7 @@ impl Planner {
 
         for step_index in 0..self.config.max_steps {
             // 1. OBSERVE — get context with empty-context recovery
-            let context = self
-                .get_context_with_retry(backend, step_index)
-                .await?;
+            let context = self.get_context_with_retry(backend, step_index).await?;
 
             // 2. PLAN — try tentative cache first, otherwise call LLM
             let step = if let Some(cached) = tentative_plan.first() {
@@ -95,12 +89,35 @@ impl Planner {
                     s
                 } else {
                     // Context diverged — discard plan and re-plan
-                    tracing::info!(step = step_index, "Context diverged — clearing tentative plan");
+                    tracing::info!(
+                        step = step_index,
+                        "Context diverged — clearing tentative plan"
+                    );
                     tentative_plan.clear();
-                    self.plan_step(&system, &context, &crate::signals::CortexSignals::default(), "", &history, step_index, &loop_warning, backend).await?
+                    self.plan_step(
+                        &system,
+                        &context,
+                        &crate::signals::CortexSignals::default(),
+                        "",
+                        &history,
+                        step_index,
+                        &loop_warning,
+                        backend,
+                    )
+                    .await?
                 }
             } else {
-                self.plan_step(&system, &context, &crate::signals::CortexSignals::default(), "", &history, step_index, &loop_warning, backend).await?
+                self.plan_step(
+                    &system,
+                    &context,
+                    &crate::signals::CortexSignals::default(),
+                    "",
+                    &history,
+                    step_index,
+                    &loop_warning,
+                    backend,
+                )
+                .await?
             };
 
             backend.on_event(PlannerEvent::StepPlanned {
@@ -177,8 +194,7 @@ impl Planner {
             // Loop detection is no longer this loop's concern — the
             // canonical runner surfaces stuck steps via the 3-strike
             // retry rule (see CanonicalGoalRunner).
-            {
-            }
+            {}
 
             // Brief pause to let the UI settle
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -196,6 +212,7 @@ impl Planner {
     /// `&CortexSignals::default()` from callers that don't track them.
     /// `recent_memory` — pre-rendered "## Recent runs" block from the
     /// runner's cross-goal memory (Phase 3B). Pass `""` to skip.
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan_step(
         &self,
         system: &str,
@@ -213,11 +230,17 @@ impl Planner {
             loop_warning: loop_warning.as_deref(),
             context_detail: self.config.context_detail,
             cortex_signals: Some(signals),
-            recent_memory: if recent_memory.is_empty() { None } else { Some(recent_memory) },
+            recent_memory: if recent_memory.is_empty() {
+                None
+            } else {
+                Some(recent_memory)
+            },
             ..Default::default()
         };
         let result = prompt::build_user_prompt(&self.config.goal, context, history, &opts);
-        let mut step = self.call_llm_with_retries(system, &result.text, step_index, backend).await?;
+        let mut step = self
+            .call_llm_with_retries(system, &result.text, step_index, backend)
+            .await?;
         // Resolve numbered indices back to real element IDs for the entire step.
         // The Rust goal-runner executes primary + additional actions directly, so
         // all targets must be grounded before the step leaves the planner.
@@ -239,6 +262,7 @@ impl Planner {
     /// No retry logic (vision is already expensive — a parse failure
     /// falls back to the non-vision path on the next step via normal
     /// runner gating).
+    #[allow(clippy::too_many_arguments)]
     pub async fn plan_step_with_vision(
         &self,
         system: &str,
@@ -256,7 +280,11 @@ impl Planner {
             loop_warning: loop_warning.as_deref(),
             context_detail: self.config.context_detail,
             cortex_signals: Some(signals),
-            recent_memory: if recent_memory.is_empty() { None } else { Some(recent_memory) },
+            recent_memory: if recent_memory.is_empty() {
+                None
+            } else {
+                Some(recent_memory)
+            },
             ..Default::default()
         };
         let mut result = prompt::build_user_prompt(&self.config.goal, context, history, &opts);
@@ -272,7 +300,13 @@ impl Planner {
 
         let raw = self
             .llm
-            .complete_with_image(system, image_data_url, &result.text, self.config.max_tokens, None)
+            .complete_with_image(
+                system,
+                image_data_url,
+                &result.text,
+                self.config.max_tokens,
+                None,
+            )
             .await?;
 
         let cleaned = cel_llm::strip_code_fences(&raw);
@@ -297,20 +331,22 @@ impl Planner {
     fn context_matches_expectation(&self, step: &PlannedStep, context: &ScreenContext) -> bool {
         // If the step targets a specific element, check it exists and is interactable
         match &step.action {
-            PlannedAction::Click { target_id }
-            | PlannedAction::AxAction { target_id, .. } => {
+            PlannedAction::Click { target_id } | PlannedAction::AxAction { target_id, .. } => {
                 context
                     .elements
                     .iter()
                     .any(|el| el.id == *target_id && el.state.enabled && el.state.visible)
             }
-            PlannedAction::Type { target_id: Some(target_id), .. } => {
-                context
-                    .elements
-                    .iter()
-                    .any(|el| el.id == *target_id && el.state.enabled && el.state.visible)
-            }
-            PlannedAction::Type { target_id: None, .. } => true,
+            PlannedAction::Type {
+                target_id: Some(target_id),
+                ..
+            } => context
+                .elements
+                .iter()
+                .any(|el| el.id == *target_id && el.state.enabled && el.state.visible),
+            PlannedAction::Type {
+                target_id: None, ..
+            } => true,
             // Non-targeted actions (key, scroll, wait) are always compatible
             _ => true,
         }
@@ -354,11 +390,7 @@ impl Planner {
         unreachable!() // Loop always returns on last retry
     }
 
-    fn validate_grounding(
-        &self,
-        step: &PlannedStep,
-        context: &ScreenContext,
-    ) -> Option<String> {
+    fn validate_grounding(&self, step: &PlannedStep, context: &ScreenContext) -> Option<String> {
         validate_grounding(step, context)
     }
 }
@@ -389,7 +421,10 @@ pub fn validate_grounding(step: &PlannedStep, context: &ScreenContext) -> Option
                 ));
             }
         }
-        PlannedAction::Type { target_id: Some(target_id), .. } => {
+        PlannedAction::Type {
+            target_id: Some(target_id),
+            ..
+        } => {
             let exists = context.elements.iter().any(|el| el.id == *target_id);
             if !exists {
                 let available: Vec<_> = context
@@ -405,17 +440,19 @@ pub fn validate_grounding(step: &PlannedStep, context: &ScreenContext) -> Option
                 ));
             }
         }
-        PlannedAction::Type { target_id: None, .. } => {
+        PlannedAction::Type {
+            target_id: None, ..
+        } => {
             // No target_id means type into focused element — no grounding check needed
         }
-        PlannedAction::Drag { from_target_id, to_target_id } => {
+        PlannedAction::Drag {
+            from_target_id,
+            to_target_id,
+        } => {
             for tid in [from_target_id, to_target_id] {
                 let exists = context.elements.iter().any(|el| el.id == *tid);
                 if !exists {
-                    return Some(format!(
-                        "Drag target '{}' not found in context",
-                        tid,
-                    ));
+                    return Some(format!("Drag target '{}' not found in context", tid,));
                 }
             }
         }
@@ -428,10 +465,7 @@ pub fn validate_grounding(step: &PlannedStep, context: &ScreenContext) -> Option
             }
             for eid in evidence_ids {
                 if !context.elements.iter().any(|el| el.id == *eid) {
-                    return Some(format!(
-                        "Evidence element '{}' not found in context",
-                        eid
-                    ));
+                    return Some(format!("Evidence element '{}' not found in context", eid));
                 }
             }
         }
@@ -445,11 +479,7 @@ pub fn find_blocking_error(context: &ScreenContext) -> Option<String> {
     for event in &context.http_events {
         if let Some(code) = event.status_code {
             if code >= 400 {
-                return Some(format!(
-                    "HTTP {} on {}",
-                    code,
-                    truncate_str(&event.url, 50)
-                ));
+                return Some(format!("HTTP {} on {}", code, truncate_str(&event.url, 50)));
             }
         }
     }
@@ -468,7 +498,6 @@ pub fn find_blocking_error(context: &ScreenContext) -> Option<String> {
 }
 
 impl Planner {
-
     /// Call the LLM with retry logic for parse failures.
     async fn call_llm_with_retries(
         &self,
@@ -482,7 +511,8 @@ impl Planner {
         for attempt in 0..self.config.max_retries {
             // Use temperature 0 on retries for deterministic output
             let raw = if attempt > 0 {
-                self.llm.with_temperature(0.0)
+                self.llm
+                    .with_temperature(0.0)
                     .complete(system_prompt, user_prompt, self.config.max_tokens)
                     .await?
             } else {
@@ -494,17 +524,16 @@ impl Planner {
             let cleaned = cel_llm::strip_code_fences(&raw);
 
             // Try direct parse first, then try to extract JSON from mixed content
-            let parse_result = serde_json::from_str::<PlannedStep>(cleaned)
-                .or_else(|_| {
-                    // Try to find a JSON object within the response
-                    if let Some(start) = cleaned.find('{') {
-                        if let Some(end) = cleaned.rfind('}') {
-                            let json_slice = &cleaned[start..=end];
-                            return serde_json::from_str::<PlannedStep>(json_slice);
-                        }
+            let parse_result = serde_json::from_str::<PlannedStep>(cleaned).or_else(|_| {
+                // Try to find a JSON object within the response
+                if let Some(start) = cleaned.find('{') {
+                    if let Some(end) = cleaned.rfind('}') {
+                        let json_slice = &cleaned[start..=end];
+                        return serde_json::from_str::<PlannedStep>(json_slice);
                     }
-                    serde_json::from_str::<PlannedStep>(cleaned) // return original error
-                });
+                }
+                serde_json::from_str::<PlannedStep>(cleaned) // return original error
+            });
 
             match parse_result {
                 Ok(step) => return Ok(step),
@@ -632,14 +661,18 @@ mod tests {
     #[test]
     fn test_grounding_accepts_valid_click() {
         let ctx = make_context(vec![make_element("btn1", "button", "Submit")]);
-        let step = make_step(PlannedAction::Click { target_id: "btn1".into() });
+        let step = make_step(PlannedAction::Click {
+            target_id: "btn1".into(),
+        });
         assert!(validate_grounding(&step, &ctx).is_none());
     }
 
     #[test]
     fn test_grounding_rejects_missing_click_target() {
         let ctx = make_context(vec![make_element("btn1", "button", "Submit")]);
-        let step = make_step(PlannedAction::Click { target_id: "nonexistent".into() });
+        let step = make_step(PlannedAction::Click {
+            target_id: "nonexistent".into(),
+        });
         let result = validate_grounding(&step, &ctx);
         assert!(result.is_some());
         assert!(result.unwrap().contains("not found in context"));
@@ -690,9 +723,7 @@ mod tests {
 
     #[test]
     fn test_grounding_rejects_done_with_error_element() {
-        let ctx = make_context(vec![
-            make_element("err", "text", "Error: Login failed"),
-        ]);
+        let ctx = make_context(vec![make_element("err", "text", "Error: Login failed")]);
         let step = make_step(PlannedAction::Done {
             summary: "Logged in".into(),
             evidence_ids: vec![],
@@ -707,13 +738,16 @@ mod tests {
         let ctx = make_context(vec![]);
         // Key, scroll, wait don't need target validation
         assert!(validate_grounding(
-            &make_step(PlannedAction::Key { key: "Enter".into() }),
+            &make_step(PlannedAction::Key {
+                key: "Enter".into()
+            }),
             &ctx,
-        ).is_none());
-        assert!(validate_grounding(
-            &make_step(PlannedAction::Scroll { dx: 0, dy: -3 }),
-            &ctx,
-        ).is_none());
+        )
+        .is_none());
+        assert!(
+            validate_grounding(&make_step(PlannedAction::Scroll { dx: 0, dy: -3 }), &ctx,)
+                .is_none()
+        );
     }
 
     // --- Blocking error detection ---
@@ -738,9 +772,7 @@ mod tests {
 
     #[test]
     fn test_find_blocking_error_label() {
-        let ctx = make_context(vec![
-            make_element("err", "div", "Access Denied"),
-        ]);
+        let ctx = make_context(vec![make_element("err", "div", "Access Denied")]);
         let result = find_blocking_error(&ctx);
         assert!(result.is_some());
         assert!(result.unwrap().contains("Access Denied"));
@@ -748,9 +780,7 @@ mod tests {
 
     #[test]
     fn test_no_blocking_error_on_clean_context() {
-        let mut ctx = make_context(vec![
-            make_element("btn", "button", "Submit"),
-        ]);
+        let mut ctx = make_context(vec![make_element("btn", "button", "Submit")]);
         ctx.http_events = vec![HttpEvent {
             url: "https://api.example.com/data".into(),
             method: "GET".into(),

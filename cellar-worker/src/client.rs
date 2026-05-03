@@ -4,9 +4,7 @@
 //! this client to dispatch goals to a worker. Kept in the same crate as the
 //! server so the wire types stay in lockstep.
 
-use crate::protocol::{
-    HealthResponse, JobDetails, SubmitGoalRequest, SubmitGoalResponse,
-};
+use crate::protocol::{HealthResponse, JobDetails, SubmitGoalRequest, SubmitGoalResponse};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {

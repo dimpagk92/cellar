@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 /// Which execution backend a goal run should target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RuntimeBackend {
     /// Run in the current process (today's default).
+    #[default]
     Local,
     /// Send goals to a remote `cellar-worker` over HTTP.
     Remote {
@@ -25,12 +27,6 @@ pub enum RuntimeBackend {
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<String>,
     },
-}
-
-impl Default for RuntimeBackend {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl RuntimeBackend {
@@ -92,7 +88,9 @@ fn from_env() -> Option<RuntimeBackend> {
 
 fn from_config_file() -> Option<RuntimeBackend> {
     let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home).join(".cellar").join("config.toml");
+    let path = std::path::PathBuf::from(home)
+        .join(".cellar")
+        .join("config.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     let file: ConfigFile = toml::from_str(&content).ok()?;
     let runtime = file.runtime?;

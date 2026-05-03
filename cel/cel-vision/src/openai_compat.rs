@@ -195,12 +195,7 @@ impl VisionProvider for OpenAICompatProvider {
 
         let answer = self
             .client
-            .complete_with_images(
-                system,
-                &[&before_url, &after_url],
-                question,
-                1024,
-            )
+            .complete_with_images(system, &[&before_url, &after_url], question, 1024)
             .await?;
 
         Ok(answer)

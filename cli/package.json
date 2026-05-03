@@ -15,5 +15,5 @@
     "@dpagk/cellar-mcp": "workspace:*",
     "commander": "^14.0.3"
   },
-  "devDependencies": { "typescript": "^5.5.0" }
+  "devDependencies": { "typescript": "^6.0.3" }
 }

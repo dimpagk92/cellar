@@ -41,4 +41,6 @@ napi = { version = "3", features = ["async", "serde-json"] }
 napi-derive = "3"
 
 [build-dependencies]
+# napi-build has no v3 release yet — v2 is runtime-compatible with napi v3.
+# Bump to v3 when it ships on crates.io.
 napi-build = "2"

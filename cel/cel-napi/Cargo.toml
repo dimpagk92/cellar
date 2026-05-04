@@ -37,8 +37,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
 
 # napi-rs bindings
-napi = { version = "2", features = ["async", "serde-json"] }
-napi-derive = "2"
+napi = { version = "3", features = ["async", "serde-json"] }
+napi-derive = "3"
 
 [build-dependencies]
 napi-build = "2"

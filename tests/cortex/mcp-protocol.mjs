@@ -117,6 +117,43 @@ async function main() {
     assert(toolNames.includes("cel_perceive"), "cel_perceive tool available");
     assert(toolNames.includes("cel_see"), "cel_see tool available");
 
+    // 2a. List prompts (works regardless of cel-napi availability)
+    console.log("\n2a. List prompts");
+    const promptsResp = await server.send("prompts/list", {});
+    const promptNames = (promptsResp.result?.prompts ?? []).map((p) => p.name);
+    const expectedPrompts = [
+      "cellar/setup-task",
+      "cellar/inspect-app",
+      "cellar/debug-hung-action",
+      "cellar/extract-table",
+      "cellar/run-numbers-write",
+    ];
+    for (const name of expectedPrompts) {
+      assert(promptNames.includes(name), `${name} prompt available`);
+    }
+
+    // 2b. Get one prompt with args, one without
+    console.log("\n2b. prompts/get cellar/setup-task with args");
+    const setupGet = await server.send("prompts/get", {
+      name: "cellar/setup-task",
+      arguments: { goal: "test goal — open Calculator and type 2+2" },
+    });
+    assert(
+      Array.isArray(setupGet.result?.messages) && setupGet.result.messages.length > 0,
+      "setup-task returned messages",
+    );
+    assert(
+      setupGet.result?.messages?.[0]?.content?.text?.includes("test goal"),
+      "setup-task interpolated goal arg",
+    );
+
+    console.log("\n2c. prompts/get cellar/inspect-app (no args)");
+    const inspectGet = await server.send("prompts/get", { name: "cellar/inspect-app" });
+    assert(
+      Array.isArray(inspectGet.result?.messages) && inspectGet.result.messages.length > 0,
+      "inspect-app returned messages",
+    );
+
     // 3. cel_perceive start
     console.log("\n3. cel_perceive start");
     const startResp = await server.callTool("cel_perceive", {

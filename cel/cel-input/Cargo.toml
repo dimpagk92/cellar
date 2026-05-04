@@ -11,4 +11,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-enigo = { version = "0.5", features = ["serde"] }
+enigo = { version = "0.6", features = ["serde"] }

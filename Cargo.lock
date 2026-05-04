@@ -528,7 +528,7 @@ name = "cel-accessibility"
 version = "0.1.0"
 dependencies = [
  "core-foundation 0.10.1",
- "core-graphics 0.24.0",
+ "core-graphics",
  "rayon",
  "serde",
  "serde_json",
@@ -731,7 +731,7 @@ version = "0.1.0"
 dependencies = [
  "cel-input",
  "core-foundation 0.10.1",
- "core-graphics 0.24.0",
+ "core-graphics",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -906,19 +906,6 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
-
-[[package]]
-name = "core-graphics"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa95a34622365fa5bbf40b20b75dba8dfa8c94c734aea8ac9a5ca38af14316f1"
-dependencies = [
- "bitflags 2.11.0",
- "core-foundation 0.10.1",
- "core-graphics-types",
- "foreign-types 0.5.0",
- "libc",
-]
 
 [[package]]
 name = "core-graphics"
@@ -1189,7 +1176,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71744ff36f35a4276e8827add8102d0e792378c574fd93cb4e1c8e0505f96b7c"
 dependencies = [
  "core-foundation 0.10.1",
- "core-graphics 0.25.0",
+ "core-graphics",
  "foreign-types-shared 0.3.1",
  "libc",
  "log",

@@ -5,6 +5,7 @@ import { celSeeSchema, handleCelSee } from "./tools/cel-see.js";
 import { celActSchema, handleCelAct } from "./tools/cel-act.js";
 import { celThinkSchema, handleCelThink } from "./tools/cel-think.js";
 import { celPerceiveSchema, handleCelPerceive } from "./tools/cel-perceive.js";
+import { registerPrompts } from "./prompts.js";
 
 type CdpTargetLike = {
   app_name?: string;
@@ -322,6 +323,8 @@ export function createCelMcpServer(cel?: Cel): McpServer {
     },
     degraded ? stubHandler : async (args) => handleCelPerceive(instance, args),
   );
+
+  registerPrompts(server);
 
   return server;
 }

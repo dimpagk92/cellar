@@ -55,6 +55,8 @@ CEL uses four tools organized by intent:
 | **cel_think** | Optional built-in planning, memory, autonomous execution | 17 modes |
 | **cel_perceive** | Always-on perception (Cortex) | 7 modes |
 
+Plus 5 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`).
+
 ---
 
 ## cel_see — Read the Screen
@@ -373,6 +375,32 @@ Use `cel_perceive` for multi-step tasks where continuous awareness matters. Use 
 ```json
 { "mode": "stop" }
 ```
+
+---
+
+## Prompts — Reusable Quick-Start Templates
+
+In addition to tools, the CEL server exposes the third MCP primitive: **prompts**. These are static templates the host surfaces to the user as quick-start commands (e.g. `/cellar/setup-task` in Claude Code) so they don't need to remember tool names or compose long instructions.
+
+Prompts are returned regardless of cel-napi availability — they're static templates that don't touch the native module, so they work in schema-only mode too.
+
+| Prompt | Arguments | What it does |
+|--------|-----------|--------------|
+| `cellar/setup-task` | `goal` (required) | Boots Cortex with the goal and walks the host through the recommended perceive → see → act → feed loop |
+| `cellar/inspect-app` | none | Identifies the focused app + its accessibility surface (windows, focused element, monitor scale_factor) |
+| `cellar/debug-hung-action` | `action` (optional) | Diagnoses why an action didn't land — reads Cortex status, recent diffs, and lists common causes |
+| `cellar/extract-table` | `app_hint` (optional) | Pulls a structured table from the screen, with branches for AX-friendly apps, Numbers, and browser DOM |
+| `cellar/run-numbers-write` | `sheet` (optional), `cells` (required JSON) | Writes cells deterministically into Numbers via the structured app-truth path (`write_cells`) |
+
+### How hosts surface them
+
+In Claude Code: type `/` and prompts appear as commands you can pick.
+In MCP Inspector: the **Prompts** tab lists them with their arguments.
+Programmatically: send `prompts/list` for the catalog and `prompts/get` to materialize one with arguments.
+
+### Adding more
+
+Prompts live in [`mcp-server/src/prompts.ts`](../mcp-server/src/prompts.ts). To add one, append a `PromptDefinition` to the `PROMPTS` array — the registration loop wires it up automatically.
 
 ---
 

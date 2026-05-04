@@ -123,7 +123,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Download all NAPI artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: napi-*
           path: cel/cel-napi

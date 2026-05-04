@@ -7,8 +7,14 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
-      dev-dependencies:
+      # Group only minor + patch dev-deps so we can rubber-stamp them.
+      # Major bumps fall through to individual PRs — they tend to break
+      # things (e.g. vitest 4 dropped CommonJS, which blocked the whole
+      # group from merging in PR #16). Splitting forces us to migrate
+      # one major at a time without holding up safe patches.
+      dev-dependencies-minor:
         dependency-type: "development"
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: "cargo"
     directory: "/"

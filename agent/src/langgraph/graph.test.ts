@@ -9,7 +9,38 @@ import type {
   DoneVerdict,
   NextMove,
   PerceptionFrame,
+  PlanningView,
 } from "./index.js";
+
+function makeStubPlanningView(goal: string): PlanningView {
+  return {
+    goal,
+    budget: {
+      max_tokens: 8000,
+      max_elements: 80,
+      max_memories: 8,
+      max_adapter_facts: 12,
+    },
+    screen: { active_app: "TestApp" },
+    elements: [],
+    adapter_facts: [],
+    capabilities: [],
+    run_progress: { steps_used: 0, max_steps: 80 },
+    memories: [],
+    knowledge: [],
+    recent_events: [],
+    blockers: [],
+    anomalies: [],
+    evidence: [],
+    omitted_counts: {
+      elements: 0,
+      memories: 0,
+      knowledge: 0,
+      adapter_facts: 0,
+      recent_events: 0,
+    },
+  };
+}
 
 describe("createCellarGraph", () => {
   it("loops through perceive, plan, execute, and verify_done", async () => {
@@ -53,6 +84,9 @@ describe("createCellarGraph", () => {
           status: "ok",
           data: { clicked: true },
         };
+      },
+      async buildPlanningView(goal) {
+        return makeStubPlanningView(goal);
       },
     };
 

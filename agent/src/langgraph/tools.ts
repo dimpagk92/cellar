@@ -1,10 +1,13 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
-import { compressContext } from "../context-compressor.js";
-import { serializeContextForLLM } from "../context-serializer.js";
 import type { PageContent } from "../types.js";
-import type { CanonicalAction, CanonicalStep, PerceptionFrame } from "./canonical.js";
+import type {
+  CanonicalAction,
+  CanonicalStep,
+  PerceptionFrame,
+  PlanningView,
+} from "./canonical.js";
 import type { CellarLangGraphDriver } from "./driver.js";
 import { evaluateDraftAnswer, inferGoalContract } from "./goal-contract.js";
 
@@ -107,7 +110,14 @@ export function createCortexTools(options: CreateCortexToolsOptions) {
     const activeAdapters = Array.isArray(model?.activeAdapters)
       ? model.activeAdapters.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    const rendered = renderPerception(frame, maxContextChars);
+    // PR1c: render the SAME PlanningView the canonical Rust planner uses,
+    // built by the cortex selector. The TS-side compressContext +
+    // serializeContextForLLM fork is gone; both surfaces converge here.
+    const view = await options.driver.buildPlanningView(options.goal ?? "", {
+      perception: frame.perception,
+      caps: frame.caps,
+    });
+    const rendered = renderPlanningView(view, maxContextChars);
     const pageContent = await options.driver.getPageContent?.() ?? null;
     session.lastFrame = frame;
     session.lastIndexMap = rendered.indexMap;
@@ -211,14 +221,82 @@ export function createCortexTools(options: CreateCortexToolsOptions) {
   };
 }
 
-function renderPerception(frame: PerceptionFrame, maxContextChars: number) {
-  const compressed = compressContext(frame.perception).context;
-  const serialized = serializeContextForLLM(compressed);
+/**
+ * Render a `PlanningView` into the see-tool output shape (text + numeric
+ * index map + element count).
+ *
+ * Numeric indices (1-based) are assigned in the view's element order so
+ * the LLM can reference elements by short ids. The act() tool converts
+ * those numeric ids back to real element ids via the returned indexMap.
+ *
+ * Replaces the legacy `renderPerception` (which ran TS-side compression).
+ * Selection, budget enforcement, and capability folding all live in the
+ * cortex now — this function is presentation only.
+ */
+function renderPlanningView(view: PlanningView, maxContextChars: number) {
+  const indexMap = new Map<number, string>();
+  const lines: string[] = [];
+
+  lines.push(`APP: ${view.screen.active_app || "<none>"}`);
+  if (view.screen.window) lines.push(`WINDOW: ${view.screen.window}`);
+  if (view.screen.url) lines.push(`URL: ${view.screen.url}`);
+  if (view.screen.summary) lines.push(`SUMMARY: ${view.screen.summary}`);
+  lines.push("");
+  lines.push("ELEMENTS (use the leading number as target_id in the next act):");
+
+  view.elements.forEach((el, i) => {
+    const idx = i + 1;
+    indexMap.set(idx, el.id);
+    const label = el.label ? ` ${JSON.stringify(el.label)}` : "";
+    const value =
+      el.value !== null && el.value !== undefined && el.value.length > 0
+        ? ` value=${JSON.stringify(el.value)}`
+        : "";
+    const flags: string[] = [];
+    if (el.state.focused) flags.push("focused");
+    if (el.state.selected) flags.push("selected");
+    if (el.state.checked) flags.push("checked");
+    if (el.state.expanded) flags.push("expanded");
+    if (!el.state.enabled) flags.push("disabled");
+    const flagStr = flags.length > 0 ? ` [${flags.join(",")}]` : "";
+    lines.push(
+      `  ${idx}. [${el.element_type}]${label}${value}${flagStr}`,
+    );
+  });
+
+  if (view.elements.length === 0) {
+    lines.push("  (no elements selected by the planning view)");
+  }
+
+  if (view.omitted_counts.elements > 0) {
+    lines.push(
+      `  … ${view.omitted_counts.elements} more elements omitted to fit the planning budget.`,
+    );
+  }
+
+  if (view.blockers.length > 0) {
+    lines.push("");
+    lines.push("BLOCKERS:");
+    for (const b of view.blockers) {
+      const ref = b.element_id ? ` (element ${b.element_id})` : "";
+      lines.push(`  - [${b.kind}] ${b.description}${ref}`);
+    }
+  }
+
+  if (view.adapter_facts.length > 0) {
+    lines.push("");
+    lines.push("ADAPTER FACTS:");
+    for (const f of view.adapter_facts) {
+      lines.push(
+        `  - [${f.adapter}/${f.kind}] ${JSON.stringify(f.payload)}`,
+      );
+    }
+  }
 
   return {
-    text: truncate(serialized.text, maxContextChars),
-    indexMap: serialized.indexMap,
-    elementCount: serialized.elementCount,
+    text: truncate(lines.join("\n"), maxContextChars),
+    indexMap,
+    elementCount: view.elements.length,
   };
 }
 

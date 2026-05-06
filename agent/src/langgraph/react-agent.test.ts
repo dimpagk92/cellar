@@ -1,7 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createCellarReactAgent, extractFinalAgentText } from "./react-agent.js";
-import type { CellarLangGraphDriver, PerceptionFrame } from "./index.js";
+import type {
+  CellarLangGraphDriver,
+  PerceptionFrame,
+  PlanningView,
+} from "./index.js";
+
+function makeStubPlanningView(goal: string): PlanningView {
+  return {
+    goal,
+    budget: {
+      max_tokens: 8000,
+      max_elements: 80,
+      max_memories: 8,
+      max_adapter_facts: 12,
+    },
+    screen: { active_app: "TestApp" },
+    elements: [],
+    adapter_facts: [],
+    capabilities: [],
+    run_progress: { steps_used: 0, max_steps: 80 },
+    memories: [],
+    knowledge: [],
+    recent_events: [],
+    blockers: [],
+    anomalies: [],
+    evidence: [],
+    omitted_counts: {
+      elements: 0,
+      memories: 0,
+      knowledge: 0,
+      adapter_facts: 0,
+      recent_events: 0,
+    },
+  };
+}
 
 describe("createCellarReactAgent", () => {
   it("runs the LangGraph agent through see, act, and final answer", async () => {
@@ -79,9 +113,11 @@ describe("createCellarReactAgent", () => {
       data: { clicked: true },
     }));
 
+    const buildPlanningView = vi.fn(async (goal: string) => makeStubPlanningView(goal));
     const driver: CellarLangGraphDriver = {
       perceive,
       executeStep,
+      buildPlanningView,
     };
 
     const { agent, session } = createCellarReactAgent({

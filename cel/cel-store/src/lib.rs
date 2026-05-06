@@ -8,11 +8,17 @@
 //! - **memory.rs** — Working memory, observations, knowledge with FTS5
 //! - **filesystem.rs** — Screenshot storage, JSONL run transcripts
 
+pub mod cortex_memory;
 mod filesystem;
 mod memory;
 pub mod pgvector;
 mod schema;
 
+pub use cortex_memory::{
+    decay_score, insert_memory, list_memories, migrate_cortex_memories, now_unix_secs,
+    prune_memories, search_memory, touch_memory, CortexMemory, MemoryKind, NewCortexMemory,
+    DEFAULT_HALF_LIFE_DAYS,
+};
 pub use filesystem::FsStore;
 pub use memory::{EvictionConfig, EvictionResult, Observation, ObservationPriority, WorkingMemory};
 pub use schema::{CelStore, KnowledgeFact, RunRecord, StepRecord};

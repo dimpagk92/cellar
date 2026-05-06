@@ -25,6 +25,7 @@ axum = "0.8"
 
 # CEL runtime — for real goal execution on the worker host.
 cel-goal-runner = { workspace = true }
+cel-contracts = { workspace = true }
 cel-planner = { workspace = true }
 cel-llm = { workspace = true }
 cel-cortex = { workspace = true }

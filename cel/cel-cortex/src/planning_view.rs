@@ -4,22 +4,24 @@
 //! `MentalModel` (and underlying `ScreenContext`) can be 60K+ tokens of raw
 //! perception. The planner doesn't need that. This builder produces a
 //! `PlanningView` with the goal-relevant slice — current screen + selected
-//! elements + capabilities + run progress — and tracks what was dropped.
+//! elements + capabilities + run progress + (PR3) memory-aware hydration —
+//! and tracks what was dropped.
 //!
-//! In PR1a this is **deterministic only**:
-//!   - Score elements by goal-keyword + quoted-phrase + actionable-type
-//!     heuristics, drop the lowest-scoring to fit `budget.max_elements`.
-//!   - Memory / knowledge / event refs stay empty (populated by PR3).
+//! Element selection is deterministic (goal-keyword + quoted-phrase +
+//! actionable-type heuristics).
 //!
-//! Later PRs add a memory-aware path on top of this same builder; the
-//! deterministic selector becomes the fallback when LLM-based selection is
-//! unavailable or times out.
+//! Memory selection (PR3) is also deterministic: the builder pulls
+//! workflow-scoped memories from `cortex_memories`, scores each by keyword
+//! overlap with the goal × exponential decay against `last_accessed_at`,
+//! and takes the top-N within `budget.max_memories`. No LLM call. PR4 may
+//! add an LLM-based selector on top, but the deterministic path is the
+//! fallback (and the default).
 
 use std::collections::HashSet;
 
 use cel_context::{ContextElement, ScreenContext};
 use cel_contracts::{
-    CapabilityRef, OmittedCounts, PlanningBudget, PlanningElement, PlanningElementState,
+    CapabilityRef, MemoryRef, OmittedCounts, PlanningBudget, PlanningElement, PlanningElementState,
     PlanningScreen, PlanningView, RunProgress, RuntimeCaps,
 };
 
@@ -32,18 +34,37 @@ pub struct PlanningViewInputs<'a> {
     pub budget: &'a PlanningBudget,
     pub perception: &'a ScreenContext,
     pub caps: &'a RuntimeCaps,
+    /// PR3: when set together with `workflow_id`, the builder hydrates
+    /// goal-relevant memories from this SQLite store into `view.memories`.
+    /// Defaults to `None` — view's `memories` stays empty (preserves PR1a
+    /// behaviour for callers that haven't opted in).
+    pub memory_db_path: Option<&'a str>,
+    /// PR3: required alongside `memory_db_path`. Memory selection is
+    /// strictly workflow-scoped — the same workflow_id used for writes
+    /// (via `RunLimits.workflow_id_for_memory` or `cel_perceive start
+    /// { enable_memory, workflow_id }`).
+    pub workflow_id: Option<&'a str>,
 }
 
-/// Build a budgeted `PlanningView` from current cortex perception + caps.
+/// Build a budgeted `PlanningView` from current cortex perception + caps,
+/// optionally hydrating workflow-scoped memories.
 ///
-/// Deterministic — no LLM calls, no memory lookups (those land in PR3).
-/// Selects the goal-relevant elements, folds runtime capabilities into the
-/// view, fills `run_progress`, tracks omitted counts.
+/// Selection is fully deterministic. No LLM calls. Memory hydration only
+/// fires when both `memory_db_path` and `workflow_id` are set — privacy-
+/// preserving default. Failure to open the store is logged at WARN and
+/// the builder returns an empty memory list rather than failing the view.
 pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
     let total_elements = inputs.perception.elements.len() as u32;
     let elements = select_elements(inputs.perception, inputs.goal, inputs.budget.max_elements);
     let kept_elements = elements.len() as u32;
     let omitted_elements = total_elements.saturating_sub(kept_elements);
+
+    let memory_selection = match (inputs.memory_db_path, inputs.workflow_id) {
+        (Some(db), Some(wf)) => select_memories(db, wf, inputs.goal, inputs.budget.max_memories),
+        _ => MemorySelection::default(),
+    };
+
+    let selection_rationale = build_rationale(elements.len(), &memory_selection, omitted_elements);
 
     PlanningView {
         goal: inputs.goal.to_string(),
@@ -57,15 +78,16 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
         elements,
         adapter_facts: vec![],
         capabilities: caps_to_capabilities(inputs.caps),
-        memories: vec![],
+        memories: memory_selection.kept,
         knowledge: vec![],
         recent_events: vec![],
         blockers: vec![],
         anomalies: vec![],
         evidence: vec![],
-        selection_rationale: None,
+        selection_rationale,
         omitted_counts: OmittedCounts {
             elements: omitted_elements,
+            memories: memory_selection.omitted,
             ..Default::default()
         },
         run_progress: RunProgress {
@@ -73,6 +95,263 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
             max_steps: inputs.caps.max_steps,
         },
     }
+}
+
+// ─── Memory selection (PR3, deterministic) ──────────────────────────────────
+
+/// Result of memory selection — kept memories plus omitted count for the
+/// `omitted_counts` field on the view.
+#[derive(Debug, Default)]
+struct MemorySelection {
+    kept: Vec<MemoryRef>,
+    omitted: u32,
+    /// Set when the store opened cleanly but the workflow is empty —
+    /// distinct from a store-open failure (which is logged at WARN).
+    workflow_empty: bool,
+}
+
+/// Select goal-relevant memories from the SQLite store.
+///
+/// Algorithm:
+/// 1. Open `CelStore` at `db_path`. Failure → log + return empty.
+/// 2. Pull recent memories for `workflow_id` (top 200 by `created_at`).
+/// 3. Score each: `score = keyword_overlap(goal, summary+content) × decay`.
+/// 4. Sort by score descending.
+/// 5. Take up to `max_memories` whose score > 0.
+/// 6. Hydrate to `MemoryRef`s, build the omitted count.
+///
+/// Decay uses `last_accessed_at` (touched memories ride longer).
+fn select_memories(
+    db_path: &str,
+    workflow_id: &str,
+    goal: &str,
+    max_memories: u32,
+) -> MemorySelection {
+    let max = max_memories as usize;
+    if max == 0 {
+        return MemorySelection::default();
+    }
+
+    let store = match cel_store::CelStore::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                db_path,
+                error = %e,
+                "PR3 planning_view: cortex_memories store open failed; skipping memory hydration",
+            );
+            return MemorySelection::default();
+        }
+    };
+
+    // Pull a generous candidate window so the in-Rust scorer can see the
+    // most-recent ~200. Prevents pathological cases where a very old but
+    // highly goal-relevant memory dominates the catalog.
+    let candidates = match store.list_cortex_memories(workflow_id, None, 200) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                workflow_id,
+                error = %e,
+                "PR3 planning_view: list_cortex_memories failed; skipping memory hydration",
+            );
+            return MemorySelection::default();
+        }
+    };
+
+    if candidates.is_empty() {
+        return MemorySelection {
+            workflow_empty: true,
+            ..MemorySelection::default()
+        };
+    }
+
+    let total = candidates.len() as u32;
+    let keywords = extract_keywords(goal);
+    let quoted = extract_quoted_phrases(goal);
+    let now = cel_store::cortex_memory::now_unix_secs();
+
+    let mut scored: Vec<(f64, cel_store::cortex_memory::CortexMemory)> = candidates
+        .into_iter()
+        .map(|m| (score_memory(&m, &keywords, &quoted, now), m))
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let kept: Vec<MemoryRef> = scored
+        .iter()
+        .filter(|(s, _)| *s > 0.0)
+        .take(max)
+        .map(|(_, m)| compress_memory(m))
+        .collect();
+
+    let omitted = total.saturating_sub(kept.len() as u32);
+    MemorySelection {
+        kept,
+        omitted,
+        workflow_empty: false,
+    }
+}
+
+/// Score a memory's relevance to the goal at the given moment.
+///
+/// `score = base × decay`, where `base` reflects keyword + quoted-phrase
+/// overlap, and `decay = exp(-ln(2) × age_days / 90)` against
+/// `last_accessed_at`. Memories with no overlap score 0 (filtered out
+/// even if very recent — the selector is goal-relevance-first).
+fn score_memory(
+    memory: &cel_store::cortex_memory::CortexMemory,
+    keywords: &[String],
+    quoted: &[String],
+    now_secs: i64,
+) -> f64 {
+    let summary = memory.summary.as_deref().unwrap_or("").to_lowercase();
+    let content_str = serde_json::to_string(&memory.content)
+        .unwrap_or_default()
+        .to_lowercase();
+    let tags_blob = memory.tags.join(" ").to_lowercase();
+    let haystack = format!("{summary} {content_str} {tags_blob}");
+
+    let mut base: f64 = 0.0;
+
+    for kw in keywords {
+        if haystack.contains(kw.as_str()) {
+            base += 2.0;
+            // Bonus if keyword hits the curated summary specifically —
+            // summaries are caller-written one-liners; matches there are
+            // higher-signal than incidental hits inside JSON content.
+            if summary.contains(kw.as_str()) {
+                base += 1.0;
+            }
+        }
+    }
+
+    for phrase in quoted {
+        if haystack.contains(phrase.as_str()) {
+            base += 30.0;
+        }
+    }
+
+    // Kind-based prior: failures are mildly more useful than outcomes
+    // when the goal looks similar to past failed attempts. Small bias.
+    if base > 0.0
+        && matches!(
+            memory.kind,
+            cel_store::cortex_memory::MemoryKind::Failure
+                | cel_store::cortex_memory::MemoryKind::Preference
+        )
+    {
+        base *= 1.15;
+    }
+
+    if base == 0.0 {
+        return 0.0;
+    }
+
+    let decay = cel_store::cortex_memory::decay_score(memory.last_accessed_at, now_secs);
+    base * decay
+}
+
+fn compress_memory(memory: &cel_store::cortex_memory::CortexMemory) -> MemoryRef {
+    let summary = memory
+        .summary
+        .clone()
+        .unwrap_or_else(|| short_content_preview(&memory.content));
+    MemoryRef {
+        id: memory.id,
+        kind: memory.kind.as_str().to_string(),
+        summary,
+        content: memory.content.clone(),
+        created_at: Some(unix_to_iso(memory.created_at)),
+    }
+}
+
+fn short_content_preview(content: &serde_json::Value) -> String {
+    let s = serde_json::to_string(content).unwrap_or_default();
+    if s.len() <= 80 {
+        s
+    } else {
+        format!("{}…", &s[..80])
+    }
+}
+
+fn unix_to_iso(secs: i64) -> String {
+    // Best-effort ISO-8601 without pulling chrono. Same approach as the
+    // canonical-runner outcome auto-write.
+    let days = secs / 86_400;
+    let remaining = secs % 86_400;
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    let seconds = remaining % 60;
+    let (year, month, day) = unix_days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
+fn unix_days_to_ymd(days_from_epoch: i64) -> (i64, u32, u32) {
+    let mut days = days_from_epoch;
+    let mut year: i64 = 1970;
+    loop {
+        let dy = if is_leap(year) { 366 } else { 365 };
+        if days >= dy {
+            days -= dy;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+    let months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month: u32 = 1;
+    for &dm in &months {
+        let dm_actual = if month == 2 && is_leap(year) { 29 } else { dm };
+        if days >= dm_actual {
+            days -= dm_actual;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+    (year, month, (days + 1) as u32)
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn build_rationale(
+    kept_elements: usize,
+    memory_selection: &MemorySelection,
+    omitted_elements: u32,
+) -> Option<String> {
+    if memory_selection.kept.is_empty()
+        && memory_selection.omitted == 0
+        && !memory_selection.workflow_empty
+    {
+        // Pure perception-only build (PR1 behaviour). Don't synthesise a
+        // misleading rationale — leave the field absent so callers don't
+        // think memory selection happened when it didn't.
+        return None;
+    }
+    let mut parts = Vec::with_capacity(3);
+    parts.push(format!(
+        "Selected {} element(s) from {} candidate(s).",
+        kept_elements,
+        kept_elements as u32 + omitted_elements
+    ));
+    if memory_selection.workflow_empty {
+        parts.push("No prior memories for this workflow.".into());
+    } else {
+        parts.push(format!(
+            "Hydrated {} workflow memor{} (dropped {} below the goal-relevance + decay threshold).",
+            memory_selection.kept.len(),
+            if memory_selection.kept.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            memory_selection.omitted,
+        ));
+    }
+    Some(parts.join(" "))
 }
 
 // ─── Capabilities folding ────────────────────────────────────────────────────
@@ -419,6 +698,8 @@ mod tests {
             budget: &budget,
             perception: &perception,
             caps: &caps,
+            memory_db_path: None,
+            workflow_id: None,
         });
         assert_eq!(view.elements.len(), 30);
         assert_eq!(view.omitted_counts.elements, 170);
@@ -444,6 +725,8 @@ mod tests {
             budget: &budget,
             perception: &perception,
             caps: &caps,
+            memory_db_path: None,
+            workflow_id: None,
         });
 
         let ids: Vec<&str> = view.elements.iter().map(|e| e.id.as_str()).collect();
@@ -470,6 +753,8 @@ mod tests {
             budget: &budget,
             perception: &perception,
             caps: &caps,
+            memory_db_path: None,
+            workflow_id: None,
         });
 
         assert_eq!(view.run_progress.steps_used, 13);
@@ -491,6 +776,8 @@ mod tests {
             budget: &budget,
             perception: &perception,
             caps: &caps,
+            memory_db_path: None,
+            workflow_id: None,
         });
         assert_eq!(view.elements.len(), 0);
         assert_eq!(view.omitted_counts.elements, 0);
@@ -515,7 +802,275 @@ mod tests {
             budget: &budget,
             perception: &perception,
             caps: &caps,
+            memory_db_path: None,
+            workflow_id: None,
         });
         assert!(view.elements.iter().all(|e| e.id != "hidden"));
+    }
+
+    // ─── PR3: memory-aware hydration ─────────────────────────────────────────
+
+    fn pr3_temp_db(label: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!("cel_pr3_{label}_{nanos}.db"));
+        path.to_string_lossy().into_owned()
+    }
+
+    fn seed_memory(
+        store: &cel_store::CelStore,
+        workflow: &str,
+        kind: cel_store::cortex_memory::MemoryKind,
+        summary: &str,
+        content: serde_json::Value,
+    ) -> i64 {
+        store
+            .insert_cortex_memory(&cel_store::cortex_memory::NewCortexMemory {
+                workflow_id: workflow.into(),
+                kind,
+                content,
+                summary: Some(summary.into()),
+                tags: vec![],
+                source_ref: None,
+                embedding: None,
+            })
+            .expect("insert")
+    }
+
+    #[test]
+    fn pr3_view_stays_empty_when_memory_inputs_missing() {
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: None,
+            workflow_id: None,
+        });
+        assert!(view.memories.is_empty());
+        assert_eq!(view.omitted_counts.memories, 0);
+        assert!(view.selection_rationale.is_none());
+    }
+
+    #[test]
+    fn pr3_relevant_memory_outranks_irrelevant_one() {
+        let db_path = pr3_temp_db("rank");
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        seed_memory(
+            &store,
+            "test-pr3",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "Submitted invoice via Concur successfully",
+            serde_json::json!({"goal": "submit invoice"}),
+        );
+        seed_memory(
+            &store,
+            "test-pr3",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "Read morning headlines from Hacker News",
+            serde_json::json!({"goal": "read news"}),
+        );
+        drop(store);
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "submit invoice in Concur",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: Some(&db_path),
+            workflow_id: Some("test-pr3"),
+        });
+
+        assert!(
+            !view.memories.is_empty(),
+            "expected at least one hydrated memory; got 0"
+        );
+        // The submit-invoice memory must rank first.
+        assert!(
+            view.memories[0]
+                .summary
+                .to_lowercase()
+                .contains("submitted invoice"),
+            "expected submit-invoice memory first; got {:?}",
+            view.memories[0].summary
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn pr3_budget_caps_memory_count_and_records_omitted() {
+        let db_path = pr3_temp_db("budget");
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        // Seed 5 memories all referencing the goal keyword "form" so each
+        // scores > 0.
+        for i in 0..5 {
+            seed_memory(
+                &store,
+                "wf",
+                cel_store::cortex_memory::MemoryKind::Outcome,
+                &format!("Submitted form attempt {i}"),
+                serde_json::json!({"i": i}),
+            );
+        }
+        drop(store);
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget {
+            max_memories: 2,
+            ..PlanningBudget::default()
+        };
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "fill out form",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: Some(&db_path),
+            workflow_id: Some("wf"),
+        });
+
+        assert_eq!(view.memories.len(), 2);
+        assert_eq!(view.omitted_counts.memories, 3);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn pr3_workflow_with_no_memories_returns_empty_with_rationale() {
+        let db_path = pr3_temp_db("empty_workflow");
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        // Seed only OTHER workflow's memories — should not surface here.
+        seed_memory(
+            &store,
+            "other-wf",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "did something",
+            serde_json::json!({}),
+        );
+        drop(store);
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: Some(&db_path),
+            workflow_id: Some("the-empty-workflow"),
+        });
+
+        assert!(view.memories.is_empty());
+        assert_eq!(view.omitted_counts.memories, 0);
+        let rationale = view.selection_rationale.expect("expected rationale");
+        assert!(
+            rationale.contains("No prior memories"),
+            "expected empty-workflow rationale; got {rationale}"
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn pr3_irrelevant_memories_score_zero_and_are_dropped() {
+        let db_path = pr3_temp_db("irrelevant");
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        // Fully off-topic memories with no goal-keyword overlap.
+        seed_memory(
+            &store,
+            "wf",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "Watered the plants in the kitchen",
+            serde_json::json!({"plants": "many"}),
+        );
+        seed_memory(
+            &store,
+            "wf",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "Rebooted the router after midnight",
+            serde_json::json!({"router": "fixed"}),
+        );
+        drop(store);
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "submit invoice in Concur",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: Some(&db_path),
+            workflow_id: Some("wf"),
+        });
+
+        // Both candidates score 0 → both omitted, none kept.
+        assert_eq!(view.memories.len(), 0);
+        assert_eq!(view.omitted_counts.memories, 2);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn pr3_store_open_failure_returns_empty_view_no_error() {
+        // Invalid SQLite path — open will fail. The builder should log
+        // and return an empty memory list, NOT panic or surface the error.
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: Some("/dev/null/does-not-exist/bad.db"),
+            workflow_id: Some("wf"),
+        });
+        assert!(view.memories.is_empty());
+    }
+
+    #[test]
+    fn pr3_quoted_phrase_in_goal_boosts_matching_memory() {
+        let db_path = pr3_temp_db("quoted");
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        // Two memories — one matches the quoted phrase exactly.
+        seed_memory(
+            &store,
+            "wf",
+            cel_store::cortex_memory::MemoryKind::Prior,
+            "Concur uses two-step submit",
+            serde_json::json!({"app": "Concur"}),
+        );
+        seed_memory(
+            &store,
+            "wf",
+            cel_store::cortex_memory::MemoryKind::Prior,
+            "Some unrelated submit notes",
+            serde_json::json!({}),
+        );
+        drop(store);
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "submit \"two-step submit\" form",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_db_path: Some(&db_path),
+            workflow_id: Some("wf"),
+        });
+
+        assert!(view.memories[0].summary.contains("two-step"));
+        let _ = std::fs::remove_file(&db_path);
     }
 }

@@ -8,6 +8,7 @@ description = "CEL Planner — LLM-driven goal decomposition and step planning"
 [dependencies]
 cel-llm = { workspace = true }
 cel-context = { workspace = true }
+cel-contracts = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

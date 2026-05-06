@@ -24,7 +24,7 @@ use cel_context::{CelEvent, ContextMerger, ContextWatchdog, ScreenContext};
 #[cfg(target_os = "macos")]
 use cel_input::InputError;
 use cel_input::{create_controller, MouseButton};
-use cel_planner::PlannedAction;
+use cel_contracts::PlannedAction;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1824,7 +1824,7 @@ impl Cortex {
         app: &str,
         sheet: Option<&str>,
         table: Option<&str>,
-        writes: &[cel_planner::CellWrite],
+        writes: &[cel_contracts::CellWrite],
         verify: bool,
     ) -> crate::adapter::ActionResult {
         use crate::adapter::ActionResult;

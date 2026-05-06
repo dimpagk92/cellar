@@ -174,6 +174,8 @@ fn spawn_real_execution(
             timeout_ms: config.timeout_ms,
             max_step_retries: 3,
             terminal_app: None,
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
 
         // Canonical path: LLM produces a Plan upfront, CortexStepExecutor

@@ -161,6 +161,64 @@ export const celThinkSchema = z.discriminatedUnion("mode", [
     knowledge_retention_days: z.number().default(365),
   }),
 
+  // --- cortex memory (PR2): explicit, workflow-scoped, opt-in ---
+  z.object({
+    mode: z.literal("store_memory"),
+    workflow_id: z
+      .string()
+      .describe(
+        "Workflow this memory belongs to. Required — there is no global memory scope in v1. " +
+          "Memories are only surfaced for the same workflow.",
+      ),
+    kind: z
+      .enum(["outcome", "prior", "failure", "preference"])
+      .describe(
+        "Memory kind: " +
+          "'outcome' (what happened — replayable action + result), " +
+          "'prior' (a generalisation), " +
+          "'failure' (something to avoid + workaround), " +
+          "'preference' (user preference informing future planning).",
+      ),
+    content: z
+      .unknown()
+      .describe(
+        "Structured payload — shape depends on `kind`. Free-form JSON; the cortex selector reads " +
+          "from `summary` for the catalog and from `content` for hydration.",
+      ),
+    summary: z
+      .string()
+      .optional()
+      .describe("One-line summary the selector uses to decide whether to hydrate this memory."),
+    tags: z.array(z.string()).optional().describe("Optional tags for retrieval."),
+    source_ref: z
+      .string()
+      .optional()
+      .describe("Optional back-reference (transcript span id, checkpoint id, adapter fact id)."),
+  }),
+  z.object({
+    mode: z.literal("search_memory"),
+    workflow_id: z.string().describe("Workflow scope — memories outside this workflow are not searched."),
+    query: z
+      .string()
+      .describe("Free-text query. Case-insensitive substring match over summary + content (v1)."),
+    limit: z
+      .number()
+      .default(20)
+      .describe("Max number of results, most-recent-first. Default 20."),
+  }),
+  z.object({
+    mode: z.literal("prune_memory"),
+    threshold: z
+      .number()
+      .default(0.01)
+      .describe(
+        "Decay-score threshold (0.0..1.0). Memories below this are deleted. " +
+          "Default 0.01 cuts at ~20 months given the 90-day half-life. " +
+          "0.5 cuts at ~3 months; 0.125 cuts at ~9 months. " +
+          "Pass 0.0 for a no-op.",
+      ),
+  }),
+
   // --- run_goal: autonomous goal execution via the canonical agent ---
   // Only budget limits are tunable — `enable_vision`, `self_heal`,
   // `decompose`, `enable_notebook`, `workflow_name`, etc. are no longer
@@ -318,6 +376,28 @@ export async function handleCelThink(cel: Cel, args: Input) {
           args.knowledge_retention_days,
         );
         return textResult(result);
+      }
+
+      case "store_memory": {
+        const id = cel.cortexMemoryInsert({
+          workflow_id: args.workflow_id,
+          kind: args.kind,
+          content: args.content,
+          summary: args.summary,
+          tags: args.tags,
+          source_ref: args.source_ref,
+        });
+        return textResult({ id });
+      }
+
+      case "search_memory": {
+        const memories = cel.cortexMemorySearch(args.workflow_id, args.query, args.limit);
+        return textResult({ memories, count: memories.length });
+      }
+
+      case "prune_memory": {
+        const deleted = cel.cortexMemoryPrune(args.threshold);
+        return textResult({ deleted });
       }
 
       case "run_goal": {

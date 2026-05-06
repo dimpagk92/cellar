@@ -279,6 +279,24 @@ pub struct RunLimits {
     /// `None` = no phase-gate enforcement (legacy behaviour).
     #[serde(default)]
     pub terminal_app: Option<String>,
+
+    /// PR2 opt-in: when set together with `memory_db_path`, the canonical
+    /// runner writes a final outcome memory under this `workflow_id`
+    /// after the run terminates (success or failure). Defaults to `None`
+    /// — no memory writes happen if the caller doesn't ask for them.
+    ///
+    /// Mirrors the `cel_perceive start { enable_memory, workflow_id }`
+    /// opt-in for sessions; here it's at the runner level so any caller
+    /// of `CanonicalGoalRunner::run` (CLI, MCP, eval harness, worker
+    /// daemon) can opt in independently.
+    #[serde(default)]
+    pub workflow_id_for_memory: Option<String>,
+
+    /// PR2 opt-in: SQLite path the canonical runner uses to write the
+    /// final outcome memory. Required alongside `workflow_id_for_memory`
+    /// for the auto-write to fire. Typically `~/.cellar/cel-store.db`.
+    #[serde(default)]
+    pub memory_db_path: Option<String>,
 }
 
 impl Default for RunLimits {
@@ -288,6 +306,8 @@ impl Default for RunLimits {
             timeout_ms: 900_000,
             max_step_retries: 3,
             terminal_app: None,
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         }
     }
 }

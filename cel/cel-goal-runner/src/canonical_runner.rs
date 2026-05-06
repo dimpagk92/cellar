@@ -113,13 +113,24 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
     }
 
     /// Run `goal` to completion or structured failure.
+    ///
+    /// Thin outer wrapper: runs the loop, then writes a final outcome
+    /// memory if the caller opted in via
+    /// `RunLimits.workflow_id_for_memory` + `RunLimits.memory_db_path`
+    /// (PR2). Both must be set; either alone is a no-op.
     pub async fn run(&self, goal: &str, limits: RunLimits) -> GoalOutcome {
+        let start = Instant::now();
+        let outcome = self.run_inner(goal, &limits, start).await;
+        write_outcome_memory_if_enabled(&limits, goal, &outcome, start.elapsed());
+        outcome
+    }
+
+    async fn run_inner(&self, goal: &str, limits: &RunLimits, start: Instant) -> GoalOutcome {
         info!(
             goal,
             max_steps = limits.max_steps,
             "Canonical runner started"
         );
-        let start = Instant::now();
         let mut history: Vec<AttemptRecord> = Vec::new();
         let mut shared_memory = serde_json::json!({});
         let mut steps_used: u32 = 0;
@@ -163,7 +174,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             // the planner to pivot to the terminal app. Second ignore
             // escalates to runner auto-dispatching activate_app.
             if let Some(record) =
-                phase_gate_check(&limits, steps_used, &history, &perception, phase_gate_fires)
+                phase_gate_check(limits, steps_used, &history, &perception, phase_gate_fires)
             {
                 phase_gate_fires += 1;
                 warn!(
@@ -566,6 +577,162 @@ fn budget_exhausted(kind: &str, last_purpose: &str, steps_used: u32) -> GoalOutc
         failing_step: "<budget>".into(),
         attempts: vec![format!("{kind} budget exhausted after {steps_used} steps")],
     })
+}
+
+/// PR2: write a final outcome memory to `cortex_memories` if the caller
+/// opted in. No-op when `workflow_id_for_memory` or `memory_db_path` is
+/// `None`. Failure to write is logged at WARN — never propagates back to
+/// the caller. The runner's primary contract is "report the run
+/// outcome"; memory persistence is an opt-in side effect.
+fn write_outcome_memory_if_enabled(
+    limits: &RunLimits,
+    goal: &str,
+    outcome: &GoalOutcome,
+    duration: std::time::Duration,
+) {
+    let (workflow_id, db_path) = match (
+        limits.workflow_id_for_memory.as_deref(),
+        limits.memory_db_path.as_deref(),
+    ) {
+        (Some(w), Some(p)) => (w, p),
+        _ => return,
+    };
+
+    let store = match cel_store::CelStore::open(db_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                db_path,
+                error = %e,
+                "PR2 outcome memory: failed to open store; skipping write",
+            );
+            return;
+        }
+    };
+
+    let (kind, summary, content) = match outcome {
+        GoalOutcome::Succeeded {
+            summary,
+            extracted_data,
+        } => {
+            let summary_text = if summary.is_empty() {
+                format!("Completed: {goal}")
+            } else {
+                summary.clone()
+            };
+            let payload = serde_json::json!({
+                "kind": "outcome",
+                "goal": goal,
+                "status": "succeeded",
+                "summary": summary,
+                "extracted_data": extracted_data,
+                "duration_ms": duration.as_millis() as u64,
+                "ts": chrono_iso_now(),
+            });
+            (
+                cel_store::cortex_memory::MemoryKind::Outcome,
+                summary_text,
+                payload,
+            )
+        }
+        GoalOutcome::Failed(report) => {
+            let summary_text = format!(
+                "Did not complete: {} (failing step: {})",
+                goal, report.failing_step
+            );
+            let payload = serde_json::json!({
+                "kind": "failure",
+                "goal": goal,
+                "status": "failed",
+                "failing_sub_goal": report.failing_sub_goal,
+                "failing_step": report.failing_step,
+                "attempts": report.attempts,
+                "duration_ms": duration.as_millis() as u64,
+                "ts": chrono_iso_now(),
+            });
+            (
+                cel_store::cortex_memory::MemoryKind::Failure,
+                summary_text,
+                payload,
+            )
+        }
+    };
+
+    let new_memory = cel_store::cortex_memory::NewCortexMemory {
+        workflow_id: workflow_id.to_string(),
+        kind,
+        content,
+        summary: Some(summary),
+        tags: vec!["canonical_runner".into()],
+        source_ref: Some(format!(
+            "canonical_runner:duration_ms={}",
+            duration.as_millis()
+        )),
+        embedding: None,
+    };
+
+    match store.insert_cortex_memory(&new_memory) {
+        Ok(id) => tracing::info!(
+            workflow_id,
+            memory_id = id,
+            "PR2 outcome memory: wrote final-outcome memory for canonical run"
+        ),
+        Err(e) => tracing::warn!(
+            workflow_id,
+            error = %e,
+            "PR2 outcome memory: insert failed; outcome itself was unaffected",
+        ),
+    }
+}
+
+/// ISO-8601 timestamp without pulling in chrono. Format: YYYY-MM-DDTHH:MM:SSZ.
+fn chrono_iso_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs / 86_400;
+    let remaining = secs % 86_400;
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    let seconds = remaining % 60;
+    let (year, month, day) = unix_days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
+/// Convert unix-epoch days to (year, month, day). Naive Gregorian, valid
+/// 1970..2100. Used only for memory record timestamps; precision needs are
+/// "human-readable later" not scientific.
+fn unix_days_to_ymd(days_from_epoch: i64) -> (i64, u32, u32) {
+    // Days since 1970-01-01.
+    let mut days = days_from_epoch;
+    let mut year: i64 = 1970;
+    loop {
+        let dy = if is_leap(year) { 366 } else { 365 };
+        if days >= dy {
+            days -= dy;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+    let months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month: u32 = 1;
+    for &dm in &months {
+        let dm_actual = if month == 2 && is_leap(year) { 29 } else { dm };
+        if days >= dm_actual {
+            days -= dm_actual;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+    (year, month, (days + 1) as u32)
+}
+
+fn is_leap(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Decide whether the phase gate should fire this turn.
@@ -1156,6 +1323,8 @@ mod tests {
             timeout_ms: 60_000,
             max_step_retries: 3,
             terminal_app: Some("Numbers".into()),
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
         let history: Vec<AttemptRecord> = vec![];
         let got = phase_gate_check(&limits, 40, &history, &empty_perception("Google Chrome"), 0);
@@ -1169,6 +1338,8 @@ mod tests {
             timeout_ms: 60_000,
             max_step_retries: 3,
             terminal_app: Some("Numbers".into()),
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
         let history: Vec<AttemptRecord> = vec![];
         let got = phase_gate_check(&limits, 50, &history, &empty_perception("Google Chrome"), 0);
@@ -1188,6 +1359,8 @@ mod tests {
             timeout_ms: 60_000,
             max_step_retries: 3,
             terminal_app: Some("Numbers".into()),
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
         let history: Vec<AttemptRecord> = vec![];
         // frontmost reports full macOS name; target is shorter —
@@ -1203,6 +1376,8 @@ mod tests {
             timeout_ms: 60_000,
             max_step_retries: 3,
             terminal_app: Some("Numbers".into()),
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
         let history = vec![AttemptRecord {
             step_purpose: "already landed".into(),
@@ -1228,6 +1403,8 @@ mod tests {
             timeout_ms: 60_000,
             max_step_retries: 3,
             terminal_app: Some("Numbers".into()),
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
         // First fire at 50%: prior_fires=0
         assert!(
@@ -1258,6 +1435,8 @@ mod tests {
             timeout_ms: 60_000,
             max_step_retries: 3,
             terminal_app: None,
+            workflow_id_for_memory: None,
+            memory_db_path: None,
         };
         assert!(phase_gate_check(&limits, 80, &[], &empty_perception("Chrome"), 0).is_none());
     }
@@ -1293,6 +1472,8 @@ mod tests {
                     timeout_ms: 30_000,
                     max_step_retries: 3,
                     terminal_app: None,
+                    workflow_id_for_memory: None,
+                    memory_db_path: None,
                 },
             )
             .await;
@@ -1318,5 +1499,117 @@ mod tests {
         let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
         let outcome = runner.run("x", RunLimits::default()).await;
         assert!(matches!(outcome, GoalOutcome::Succeeded { .. }));
+    }
+
+    // ─── PR2: outcome auto-write ─────────────────────────────────────────────
+
+    fn pr2_temp_db(label: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!("cel_pr2_{label}_{nanos}.db"));
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn pr2_outcome_auto_write_on_succeeded_when_opted_in() {
+        let db_path = pr2_temp_db("succeeded");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "did the thing".into(),
+            extracted_data: serde_json::json!({"value": 42}),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("test-pr2-success".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let outcome = runner.run("test goal", limits).await;
+        assert!(matches!(outcome, GoalOutcome::Succeeded { .. }));
+
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        let memories = store
+            .list_cortex_memories("test-pr2-success", None, 10)
+            .expect("list memories");
+        assert_eq!(memories.len(), 1, "exactly one outcome memory expected");
+        assert_eq!(
+            memories[0].kind,
+            cel_store::cortex_memory::MemoryKind::Outcome
+        );
+        assert!(memories[0]
+            .summary
+            .as_deref()
+            .map(|s| s.contains("did the thing"))
+            .unwrap_or(false));
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn pr2_outcome_auto_write_on_failed_writes_failure_kind() {
+        let db_path = pr2_temp_db("failed");
+        let planner = ScriptedPlanner::new(vec![NextMove::Fail {
+            reason: "could not finish".into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("test-pr2-failure".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let outcome = runner.run("test goal", limits).await;
+        assert!(matches!(outcome, GoalOutcome::Failed(_)));
+
+        let store = cel_store::CelStore::open(&db_path).expect("open store");
+        let memories = store
+            .list_cortex_memories("test-pr2-failure", None, 10)
+            .expect("list memories");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].kind,
+            cel_store::cortex_memory::MemoryKind::Failure
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn pr2_outcome_no_write_when_workflow_id_missing() {
+        // Privacy-safe default: even with memory_db_path set, no write
+        // happens without workflow_id_for_memory.
+        let db_path = pr2_temp_db("no_workflow");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "ok".into(),
+            extracted_data: serde_json::Value::Null,
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: None,
+            memory_db_path: Some(db_path.clone()),
+        };
+        let outcome = runner.run("g", limits).await;
+        assert!(matches!(outcome, GoalOutcome::Succeeded { .. }));
+
+        if std::path::Path::new(&db_path).exists() {
+            let store = cel_store::CelStore::open(&db_path).expect("open store");
+            assert_eq!(
+                store
+                    .list_cortex_memories("anything", None, 10)
+                    .unwrap()
+                    .len(),
+                0
+            );
+            let _ = std::fs::remove_file(&db_path);
+        }
     }
 }

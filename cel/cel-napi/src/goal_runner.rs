@@ -90,6 +90,8 @@ async fn run_local_canonical(config: CanonicalJsConfig) -> napi::Result<String> 
         timeout_ms: config.timeout_ms,
         max_step_retries: 3,
         terminal_app: None,
+        workflow_id_for_memory: None,
+        memory_db_path: None,
     };
     let outcome = runner.run(&config.goal, limits).await;
     serde_json::to_string(&render_outcome_for_js(&outcome))

@@ -110,6 +110,46 @@ export interface PerceptionFrame {
   caps: RuntimeCaps;
 }
 
+// ─── Cortex memory (PR2) ─────────────────────────────────────────────────────
+//
+// Mirrors `cel_store::cortex_memory`. Durable, workflow-scoped memory
+// the cortex selector can hydrate into a PlanningView. Writes are opt-in;
+// the `cel_think store_memory` MCP mode and the canonical-runner outcome
+// auto-write path are the two callers in PR2.
+
+/** Discriminator for the structured `content` payload. */
+export type MemoryKind = "outcome" | "prior" | "failure" | "preference";
+
+/** A single cortex memory record as stored. */
+export interface CortexMemory {
+  id: number;
+  workflow_id: string;
+  kind: MemoryKind;
+  content: unknown;
+  summary?: string | null;
+  tags?: string[];
+  source_ref?: string | null;
+  /** Unix epoch seconds when the memory was first written. */
+  created_at: number;
+  /** Unix epoch seconds when the memory was last hydrated by the selector. */
+  last_accessed_at: number;
+}
+
+/**
+ * Insert payload — caller-supplied fields. Server fills `id`, `created_at`,
+ * `last_accessed_at`. `embedding` is reserved for the PR3 vector pre-filter
+ * and may be `null` until the embedder lands.
+ */
+export interface NewCortexMemory {
+  workflow_id: string;
+  kind: MemoryKind;
+  content: unknown;
+  summary?: string;
+  tags?: string[];
+  source_ref?: string;
+  embedding?: number[] | null;
+}
+
 // ─── PlanningView (PR1a contract) ────────────────────────────────────────────
 //
 // Mirrors `cel_contracts::PlanningView`. The cortex builds it; planners

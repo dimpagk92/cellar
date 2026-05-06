@@ -14,12 +14,10 @@
 use napi_derive::napi;
 use std::sync::Arc;
 
+use cel_contracts::{AttemptRecord, GoalOutcome, PlanProducer, RunLimits, RuntimeCaps, Step};
 use cel_goal_runner::{
     resolve_runtime_backend, CanonicalGoalRunner, CortexStepExecutor, GoalConfig, RuntimeBackend,
     StepExecutor,
-};
-use cel_contracts::{
-    AttemptRecord, GoalOutcome, PlanProducer, RunLimits, RuntimeCaps, Step,
 };
 use cel_planner::LlmPlanProducer;
 use cellar_worker::{SubmitGoalRequest, WorkerClient};

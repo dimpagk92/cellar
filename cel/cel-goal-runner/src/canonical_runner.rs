@@ -48,11 +48,11 @@ use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
 use cel_context::ScreenContext;
-use cel_cortex::Cortex;
 use cel_contracts::{
     AttemptRecord, FailureReport, GoalOutcome, NextMove, PlanProducer, PlannedAction, RunLimits,
     RuntimeCaps, Step, StepResult,
 };
+use cel_cortex::Cortex;
 
 use crate::outcome::ActionRecord;
 

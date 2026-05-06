@@ -41,6 +41,7 @@ pub mod differ;
 pub mod manager;
 pub mod memory;
 pub mod model;
+pub mod planning_view;
 pub mod process_driver;
 pub mod skeleton;
 
@@ -57,4 +58,5 @@ pub use model::{
     FreshnessAssessment, FreshnessState, LoadingState, MentalModel, PerceptionDiff,
     SemanticInsight, SourceSummary, StalenessCause, TaskPhase, TemporalFlags,
 };
+pub use planning_view::{build_planning_view, PlanningViewInputs};
 pub use process_driver::ProcessDriver;

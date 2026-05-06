@@ -12,6 +12,7 @@
 pub mod actions;
 pub mod canonical;
 pub mod producer;
+pub mod view;
 
 pub use actions::{CellWrite, PlannedAction};
 pub use canonical::{
@@ -19,3 +20,8 @@ pub use canonical::{
     StepResult,
 };
 pub use producer::{DoneVerdict, PlanProducer};
+pub use view::{
+    AdapterFactRef, AnomalyRef, Blocker, CapabilityRef, EventRef, EvidenceRef, KnowledgeRef,
+    MemoryRef, OmittedCounts, PlanningBudget, PlanningElement, PlanningElementState,
+    PlanningScreen, PlanningView, RunProgress,
+};

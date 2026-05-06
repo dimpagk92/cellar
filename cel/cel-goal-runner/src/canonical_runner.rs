@@ -49,10 +49,10 @@ use tracing::{debug, info, warn};
 
 use cel_context::ScreenContext;
 use cel_contracts::{
-    AttemptRecord, FailureReport, GoalOutcome, NextMove, PlanProducer, PlannedAction, RunLimits,
-    RuntimeCaps, Step, StepResult,
+    AttemptRecord, FailureReport, GoalOutcome, NextMove, PlanProducer, PlannedAction,
+    PlanningBudget, RunLimits, RuntimeCaps, Step, StepResult,
 };
-use cel_cortex::Cortex;
+use cel_cortex::{build_planning_view, Cortex, PlanningViewInputs};
 
 use crate::outcome::ActionRecord;
 
@@ -147,6 +147,17 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             caps.steps_used = steps_used;
             caps.max_steps = limits.max_steps;
 
+            // Build the budgeted planning view from this turn's perception +
+            // caps. Replaces the raw `&ScreenContext` + `&RuntimeCaps` pair
+            // the planner used to receive directly.
+            let planning_budget = PlanningBudget::default();
+            let view = build_planning_view(&PlanningViewInputs {
+                goal,
+                budget: &planning_budget,
+                perception: &perception,
+                caps: &caps,
+            });
+
             // Phase gate: past the budget midpoint with no terminal-
             // app work yet → inject a synthetic history record telling
             // the planner to pivot to the terminal app. Second ignore
@@ -202,14 +213,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
 
             let next = match self
                 .planner
-                .decide_next(
-                    goal,
-                    &history,
-                    &shared_memory,
-                    &perception,
-                    screenshot.as_deref(),
-                    &caps,
-                )
+                .decide_next(goal, &history, &shared_memory, &view, screenshot.as_deref())
                 .await
             {
                 Ok(nm) => nm,
@@ -247,13 +251,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                     // more work or emits Fail with an honest reason.
                     let verdict = self
                         .planner
-                        .verify_done(
-                            goal,
-                            &summary,
-                            &shared_memory,
-                            &perception,
-                            screenshot.as_deref(),
-                        )
+                        .verify_done(goal, &summary, &shared_memory, &view, screenshot.as_deref())
                         .await;
                     match verdict {
                         Ok(v) if v.verified => {
@@ -974,9 +972,8 @@ mod tests {
             _goal: &str,
             _history: &[AttemptRecord],
             _shared: &serde_json::Value,
-            _perception: &ScreenContext,
+            _view: &cel_contracts::PlanningView,
             _shot: Option<&[u8]>,
-            _caps: &RuntimeCaps,
         ) -> Result<NextMove, String> {
             let mut g = self.moves.lock().unwrap();
             if g.len() > 1 {

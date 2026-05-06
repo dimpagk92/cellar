@@ -9,31 +9,41 @@
 //! Codex, in-house) can implement it as a peer.
 
 use async_trait::async_trait;
-use cel_context::ScreenContext;
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{AttemptRecord, NextMove, RuntimeCaps};
+use crate::canonical::{AttemptRecord, NextMove};
+use crate::view::PlanningView;
 
 /// Decides the next thing the agent should do.
 ///
 /// Called by the canonical runner once per turn. Implementations must
 /// be safe to call repeatedly from async contexts.
+///
+/// **PR1a contract change**: takes `&PlanningView` instead of the legacy
+/// `&ScreenContext` + `&RuntimeCaps` pair. The view is built by the
+/// cortex-side planning-view builder and folds together perception,
+/// adapter facts, capabilities, and run progress in one budgeted shape.
+/// Planners are now pure consumers of this contract — they no longer own
+/// context selection logic.
 #[async_trait]
 pub trait PlanProducer: Send + Sync {
     /// Return the next move.
     ///
     /// Inputs:
     /// * `goal` — the original natural-language goal (unchanged across turns).
-    /// * `history` — every step that has run, oldest first. Contains
-    ///   the planner's own prior intents plus what actually happened
+    /// * `history` — every step that has run, oldest first. Contains the
+    ///   planner's own prior intents plus what actually happened
     ///   (success/error + any extracted data).
-    /// * `shared_memory` — free-form JSON bag of extracted data the
-    ///   runner has accumulated (e.g. prices scraped from a page).
-    /// * `perception` — fresh accessibility-tree snapshot.
-    /// * `screenshot_png` — optional PNG bytes of the current screen
-    ///   for vision-capable models. `None` on headless / no-capture
-    ///   environments; planners should still produce a reasonable
-    ///   answer from perception alone in that case.
+    /// * `shared_memory` — free-form JSON bag of extracted data the runner
+    ///   has accumulated (e.g. prices scraped from a page).
+    /// * `view` — the budgeted `PlanningView` built by `cel-cortex` from
+    ///   the current `MentalModel`. Includes the goal-relevant elements,
+    ///   adapter facts, capabilities, run progress, and (in later PRs)
+    ///   selected memories / knowledge / events.
+    /// * `screenshot_png` — optional PNG bytes of the current screen for
+    ///   vision-capable models. `None` on headless / no-capture
+    ///   environments; planners should still produce a reasonable answer
+    ///   from the view alone.
     ///
     /// On success, returns one of:
     /// * `NextMove::Batch { purpose, steps }` — run these steps in
@@ -50,28 +60,27 @@ pub trait PlanProducer: Send + Sync {
         goal: &str,
         history: &[AttemptRecord],
         shared_memory: &serde_json::Value,
-        perception: &ScreenContext,
+        view: &PlanningView,
         screenshot_png: Option<&[u8]>,
-        caps: &RuntimeCaps,
     ) -> Result<NextMove, String>;
 
-    /// Validate a `Done` claim against fresh perception + screenshot.
+    /// Validate a `Done` claim against the latest planning view + screenshot.
     ///
-    /// When the planner emits `NextMove::Done { summary, .. }`, the
-    /// runner calls this once with the current state before accepting
-    /// the terminal. A `verified = false` verdict rejects the Done —
-    /// the runner records it as a failed attempt (so the planner sees
-    /// it in history) and loops again.
+    /// When the planner emits `NextMove::Done { summary, .. }`, the runner
+    /// calls this once with the current state before accepting the
+    /// terminal. A `verified = false` verdict rejects the Done — the
+    /// runner records it as a failed attempt (so the planner sees it in
+    /// history) and loops again.
     ///
     /// Default implementation accepts any Done (`verified = true`).
-    /// Concrete producers (e.g. an LLM-backed one) override this to
-    /// make a cheap grader call against the goal.
+    /// Concrete producers (e.g. an LLM-backed one) override this to make
+    /// a cheap grader call against the goal.
     async fn verify_done(
         &self,
         _goal: &str,
         _summary: &str,
         _shared_memory: &serde_json::Value,
-        _perception: &ScreenContext,
+        _view: &PlanningView,
         _screenshot_png: Option<&[u8]>,
     ) -> Result<DoneVerdict, String> {
         Ok(DoneVerdict {

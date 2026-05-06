@@ -14,7 +14,10 @@
 use napi_derive::napi;
 use std::sync::Arc;
 
-use cel_contracts::{AttemptRecord, GoalOutcome, PlanProducer, RunLimits, RuntimeCaps, Step};
+use cel_contracts::{
+    AttemptRecord, GoalOutcome, PlanProducer, PlanningBudget, RunLimits, RuntimeCaps, Step,
+};
+use cel_cortex::{build_planning_view, PlanningViewInputs};
 use cel_goal_runner::{
     resolve_runtime_backend, CanonicalGoalRunner, CortexStepExecutor, GoalConfig, RuntimeBackend,
     StepExecutor,
@@ -210,14 +213,22 @@ pub async fn canonical_decide_next(
         .map_err(|e| napi::Error::from_reason(format!("Invalid perception JSON: {e}")))?;
     let screenshot = parse_screenshot_base64(screenshot_base64)?;
     let caps: RuntimeCaps = parse_json_or_default(&caps_json)?;
+    // Build the view inline so the JS surface stays the same in PR1a.
+    // PR1b will replace these N-API helpers with view-native variants.
+    let budget = PlanningBudget::default();
+    let view = build_planning_view(&PlanningViewInputs {
+        goal: &goal,
+        budget: &budget,
+        perception: &perception,
+        caps: &caps,
+    });
     let next = planner
         .decide_next(
             &goal,
             &history,
             &shared_memory,
-            &perception,
+            &view,
             screenshot.as_deref(),
-            &caps,
         )
         .await
         .map_err(napi::Error::from_reason)?;
@@ -244,12 +255,22 @@ pub async fn canonical_verify_done(
     let perception: cel_context::ScreenContext = serde_json::from_str(&perception_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid perception JSON: {e}")))?;
     let screenshot = parse_screenshot_base64(screenshot_base64)?;
+    // verify_done's view doesn't need budget-tight elements — empty caps
+    // is fine for the grader path (no capability prompting in verify).
+    let budget = PlanningBudget::default();
+    let caps = RuntimeCaps::default();
+    let view = build_planning_view(&PlanningViewInputs {
+        goal: &goal,
+        budget: &budget,
+        perception: &perception,
+        caps: &caps,
+    });
     let verdict = planner
         .verify_done(
             &goal,
             &summary,
             &shared_memory,
-            &perception,
+            &view,
             screenshot.as_deref(),
         )
         .await

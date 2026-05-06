@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cel_context::ScreenContext;
+use cel_contracts::PlanningView;
 use cel_llm::{ChatMessage, LlmClient, LlmError};
 
-use crate::canonical::{AttemptRecord, NextMove, RuntimeCaps};
+use crate::canonical::{AttemptRecord, NextMove};
 
 /// System prompt — reactive, not upfront.
 ///
@@ -246,11 +246,10 @@ impl crate::canonical_plan_producer::PlanProducer for LlmPlanProducer {
         goal: &str,
         history: &[AttemptRecord],
         shared_memory: &serde_json::Value,
-        perception: &ScreenContext,
+        view: &PlanningView,
         screenshot_png: Option<&[u8]>,
-        caps: &RuntimeCaps,
     ) -> Result<NextMove, String> {
-        let user = build_user_prompt(goal, history, shared_memory, perception, caps);
+        let user = build_user_prompt(goal, history, shared_memory, view);
         let raw = if let Some(png) = screenshot_png {
             let data_url = format!("data:image/png;base64,{}", cel_llm::base64_encode(png));
             self.client
@@ -282,10 +281,10 @@ impl crate::canonical_plan_producer::PlanProducer for LlmPlanProducer {
         goal: &str,
         summary: &str,
         shared_memory: &serde_json::Value,
-        perception: &ScreenContext,
+        view: &PlanningView,
         screenshot_png: Option<&[u8]>,
     ) -> Result<crate::canonical_plan_producer::DoneVerdict, String> {
-        let user = build_verify_done_user_prompt(goal, summary, shared_memory, perception);
+        let user = build_verify_done_user_prompt(goal, summary, shared_memory, view);
         let raw = if let Some(png) = screenshot_png {
             let data_url = format!("data:image/png;base64,{}", cel_llm::base64_encode(png));
             self.client
@@ -349,7 +348,7 @@ fn build_verify_done_user_prompt(
     goal: &str,
     summary: &str,
     shared_memory: &serde_json::Value,
-    perception: &ScreenContext,
+    view: &PlanningView,
 ) -> String {
     let mut out = String::new();
     out.push_str("## Goal\n");
@@ -361,8 +360,8 @@ fn build_verify_done_user_prompt(
         &serde_json::to_string(shared_memory).unwrap_or_else(|_| "{}".into()),
         1500,
     ));
-    out.push_str("\n\n## Current perception (first ~40 elements)\n");
-    for el in perception.elements.iter().take(40) {
+    out.push_str("\n\n## Current perception (selected elements)\n");
+    for el in view.elements.iter().take(40) {
         let label = el.label.clone().unwrap_or_default();
         let value = el.value.clone().unwrap_or_default();
         let line = format!(
@@ -432,8 +431,7 @@ pub fn build_user_prompt(
     goal: &str,
     history: &[AttemptRecord],
     shared_memory: &serde_json::Value,
-    perception: &ScreenContext,
-    caps: &RuntimeCaps,
+    view: &PlanningView,
 ) -> String {
     let mut out = String::with_capacity(4096);
     out.push_str("## Goal\n");
@@ -445,11 +443,13 @@ pub fn build_user_prompt(
     // of "the planner emits ax_action when only CDP is bound, or
     // switches to Safari when the CDP target is Chrome". Keep this
     // short and declarative.
+    let cdp_cap = view.capabilities.iter().find(|c| c.id == "cdp_bound");
+    let native_cap = view.capabilities.iter().find(|c| c.id == "native_input");
     out.push_str("\n## Runtime capabilities\n");
-    if caps.cdp_bound {
-        let browser = caps.cdp_browser.as_deref().unwrap_or("Chrome");
+    if let Some(cap) = cdp_cap {
+        let browser = cap.detail.as_deref().unwrap_or("Chrome");
         out.push_str(&format!("  - CDP-controlled browser: {}\n", browser));
-        if let Some(url) = &caps.cdp_url {
+        if let Some(url) = &view.screen.url {
             out.push_str(&format!("  - Current page: {}\n", url));
         }
         out.push_str(
@@ -461,7 +461,7 @@ pub fn build_user_prompt(
     } else {
         out.push_str("  - No CDP-controlled browser bound. Skip `cdp_eval` and `navigate`.\n");
     }
-    if caps.native_input {
+    if native_cap.is_some() {
         out.push_str("  - Native input (keyboard / mouse / AX / activate_app) enabled.\n");
     } else {
         out.push_str(
@@ -471,14 +471,16 @@ pub fn build_user_prompt(
         );
     }
 
-    if caps.max_steps > 0 {
-        let remaining = caps.max_steps.saturating_sub(caps.steps_used);
-        let pct_used = (caps.steps_used as f32 / caps.max_steps as f32 * 100.0).round() as u32;
+    let progress = &view.run_progress;
+    if progress.max_steps > 0 {
+        let remaining = progress.steps_remaining();
+        let pct_used =
+            (progress.steps_used as f32 / progress.max_steps as f32 * 100.0).round() as u32;
         out.push_str(&format!(
             "\n## Step budget\n  - Used {} / {} ({}%). Remaining: {}.\n",
-            caps.steps_used, caps.max_steps, pct_used, remaining
+            progress.steps_used, progress.max_steps, pct_used, remaining
         ));
-        if remaining <= caps.max_steps / 4 {
+        if remaining <= progress.max_steps / 4 {
             // Last 25% of budget — hard stop on new gathering.
             out.push_str(
                 "  - You are in the FINAL QUARTER of the budget. STOP starting\n    \
@@ -488,7 +490,7 @@ pub fn build_user_prompt(
                    if partial. Running out of steps without a terminal is a\n    \
                    worse outcome than a partial Done.\n",
             );
-        } else if remaining <= caps.max_steps / 2 {
+        } else if remaining <= progress.max_steps / 2 {
             // Midpoint — pivot away from exploration.
             out.push_str(
                 "  - You are past the midpoint. Start folding gathered data into\n    \
@@ -605,21 +607,18 @@ pub fn build_user_prompt(
     }
 
     out.push_str("\n## Live perception\n");
-    let app = if perception.app.is_empty() {
+    let app = if view.screen.active_app.is_empty() {
         "<none>"
     } else {
-        &perception.app
+        view.screen.active_app.as_str()
     };
-    out.push_str(&format!("APP: {}\nWINDOW: {}\n", app, perception.window));
-    out.push_str("Interactive elements (top 50):\n");
+    out.push_str(&format!("APP: {}\nWINDOW: {}\n", app, view.screen.window));
+    if let Some(summary) = &view.screen.summary {
+        out.push_str(&format!("SUMMARY: {}\n", summary));
+    }
+    out.push_str("Selected elements:\n");
     let mut shown = 0;
-    for el in perception.elements.iter() {
-        if shown >= 50 {
-            break;
-        }
-        if !el.state.visible || !el.state.enabled {
-            continue;
-        }
+    for el in view.elements.iter() {
         let label = el.label.as_deref().unwrap_or("");
         let value = el.value.as_deref().unwrap_or("");
         out.push_str(&format!(
@@ -629,7 +628,29 @@ pub fn build_user_prompt(
         shown += 1;
     }
     if shown == 0 {
-        out.push_str("  (no interactive elements surfaced)\n");
+        out.push_str("  (no elements selected by the planning view)\n");
+    }
+    if view.omitted_counts.elements > 0 {
+        out.push_str(&format!(
+            "  … {} more elements omitted to fit the planning budget. Re-perceive if you need them.\n",
+            view.omitted_counts.elements
+        ));
+    }
+    if !view.blockers.is_empty() {
+        out.push_str("\n## Blockers\n");
+        for b in &view.blockers {
+            out.push_str(&format!("  - [{}] {}", b.kind, b.description));
+            if let Some(eid) = &b.element_id {
+                out.push_str(&format!(" (element {})", eid));
+            }
+            out.push('\n');
+        }
+    }
+    if !view.adapter_facts.is_empty() {
+        out.push_str("\n## Adapter facts\n");
+        for f in &view.adapter_facts {
+            out.push_str(&format!("  - [{}/{}] {}\n", f.adapter, f.kind, f.payload));
+        }
     }
 
     out.push_str("\nReturn the next move (batch / done / fail) as JSON now.");
@@ -798,8 +819,7 @@ mod tests {
             "do the thing",
             std::slice::from_ref(&rec),
             &serde_json::json!({}),
-            &empty_perception(),
-            &RuntimeCaps::default(),
+            &empty_view(),
         );
         assert!(out.contains("error=\""));
         assert!(
@@ -808,24 +828,77 @@ mod tests {
         );
     }
 
-    fn empty_perception() -> ScreenContext {
-        ScreenContext {
-            app: String::new(),
-            window: String::new(),
+    fn empty_view() -> PlanningView {
+        PlanningView {
+            goal: String::new(),
+            budget: cel_contracts::PlanningBudget::default(),
+            screen: cel_contracts::PlanningScreen::default(),
             elements: vec![],
-            network_events: vec![],
-            http_events: vec![],
-            timestamp_ms: 0,
-            screen_width: None,
-            screen_height: None,
-            clipboard: None,
-            window_list: vec![],
-            audio: None,
-            power: None,
-            running_apps: vec![],
-            recent_files: vec![],
-            transcripts: vec![],
+            adapter_facts: vec![],
+            capabilities: vec![],
+            memories: vec![],
+            knowledge: vec![],
+            recent_events: vec![],
+            blockers: vec![],
+            anomalies: vec![],
+            evidence: vec![],
+            selection_rationale: None,
+            omitted_counts: cel_contracts::OmittedCounts::default(),
+            run_progress: cel_contracts::RunProgress::default(),
         }
+    }
+
+    #[test]
+    fn prompt_renders_view_capabilities_and_run_progress() {
+        let mut view = empty_view();
+        view.capabilities.push(cel_contracts::CapabilityRef {
+            id: "cdp_bound".into(),
+            detail: Some("Google Chrome".into()),
+        });
+        view.capabilities.push(cel_contracts::CapabilityRef {
+            id: "native_input".into(),
+            detail: None,
+        });
+        view.screen.url = Some("https://example.com".into());
+        view.run_progress = cel_contracts::RunProgress {
+            steps_used: 7,
+            max_steps: 80,
+        };
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(out.contains("CDP-controlled browser: Google Chrome"));
+        assert!(out.contains("https://example.com"));
+        assert!(out.contains("Native input"));
+        assert!(out.contains("Used 7 / 80"));
+    }
+
+    #[test]
+    fn prompt_signals_omitted_elements_so_planner_knows_view_was_compressed() {
+        let mut view = empty_view();
+        view.omitted_counts.elements = 431;
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(
+            out.contains("431 more elements omitted"),
+            "prompt must surface omitted-count so the planner knows the view is compressed"
+        );
+    }
+
+    #[test]
+    fn prompt_renders_blockers_and_adapter_facts() {
+        let mut view = empty_view();
+        view.blockers.push(cel_contracts::Blocker {
+            kind: "consent_wall".into(),
+            description: "Cookie banner blocks page".into(),
+            element_id: Some("dom:cookie-accept".into()),
+        });
+        view.adapter_facts.push(cel_contracts::AdapterFactRef {
+            adapter: "numbers".into(),
+            kind: "table".into(),
+            payload: serde_json::json!({"sheet":"Sheet 1","rows":12,"cols":8}),
+        });
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(out.contains("[consent_wall]"));
+        assert!(out.contains("dom:cookie-accept"));
+        assert!(out.contains("[numbers/table]"));
     }
 
     #[test]

@@ -53,7 +53,7 @@ CEL uses four tools organized by intent:
 | **cel_see** | Read screen state | 14 modes |
 | **cel_act** | Execute actions | native input, CDP, and deterministic app actions |
 | **cel_think** | Optional built-in planning, memory, autonomous execution | 17 modes |
-| **cel_perceive** | Always-on perception (Cortex) | 7 modes |
+| **cel_perceive** | Always-on perception (Cortex) | 8 modes |
 
 Plus 5 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`).
 
@@ -342,6 +342,7 @@ Use `cel_perceive` for multi-step tasks where continuous awareness matters. Use 
 | `checkpoint` | `summary` | Summarize completed work and reset action history. Use between phases of multi-step tasks. |
 | `configure` | `goal?`, `enable_suggestions?` | Update goal or suggestion settings mid-session. |
 | `status` | — | Cortex health — confidence score, uptime, cycle count, element counts, temporal state. |
+| `plan_view` | `goal`, `budget?` | Build a budgeted `PlanningView` — the same compact context that the canonical Rust planner consumes. Standalone (no perception session needed); boots the cortex on demand. Use this when the host wants to plan with the same selected context that the in-tree planner sees. See [Planning view](#planning-view). |
 | `stop` | — | Shutdown the Cortex and get a summary. |
 
 ### Examples
@@ -375,6 +376,30 @@ Use `cel_perceive` for multi-step tasks where continuous awareness matters. Use 
 ```json
 { "mode": "stop" }
 ```
+
+### Planning view
+
+`mode: "plan_view"` returns the same `PlanningView` the canonical Rust planner consumes — current screen + goal-relevant elements + active capabilities + run progress, compressed to fit a budget. The cortex builds it via the deterministic selector; future PRs add memory-aware selection.
+
+**Build a planning view (defaults):**
+
+```json
+{ "mode": "plan_view", "goal": "Submit this invoice" }
+```
+
+**Override the budget for a wider context window:**
+
+```json
+{
+  "mode": "plan_view",
+  "goal": "Submit this invoice",
+  "budget": { "max_tokens": 16000, "max_elements": 200 }
+}
+```
+
+The response is a serialized `PlanningView` with `screen`, `elements`, `capabilities`, `run_progress`, `omitted_counts`, plus typed-but-empty `memories` / `knowledge` / `events` / `blockers` / `anomalies` / `evidence` (populated by later PRs). The `omitted_counts.elements` field tells you how many elements were dropped to fit budget — a non-zero value means the view is compressed and the host can request a larger budget if needed.
+
+**Why a separate mode rather than `read` with a flag?** `read` returns the full `MentalModel` (everything the cortex knows). `plan_view` returns a budgeted projection meant for an LLM prompt. They're different shapes for different consumers; keeping them as sibling modes avoids one tool branching across two response types.
 
 ---
 

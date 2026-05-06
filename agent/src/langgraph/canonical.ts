@@ -110,6 +110,125 @@ export interface PerceptionFrame {
   caps: RuntimeCaps;
 }
 
+// ─── PlanningView (PR1a contract) ────────────────────────────────────────────
+//
+// Mirrors `cel_contracts::PlanningView`. The cortex builds it; planners
+// consume it. Lets every planner runtime — canonical Rust, LangGraph,
+// future external — speak the same compact context contract.
+
+export interface PlanningBudget {
+  max_tokens: number;
+  max_elements: number;
+  max_memories: number;
+  max_adapter_facts: number;
+}
+
+export interface PlanningScreen {
+  active_app: string;
+  window?: string;
+  summary?: string | null;
+  url?: string | null;
+}
+
+export interface PlanningElementState {
+  focused: boolean;
+  selected: boolean;
+  enabled: boolean;
+  checked: boolean;
+  expanded: boolean;
+}
+
+export interface PlanningElement {
+  id: string;
+  element_type: string;
+  label?: string | null;
+  value?: string | null;
+  state: PlanningElementState;
+  clickable?: boolean;
+  settable?: boolean;
+}
+
+export interface RunProgress {
+  steps_used: number;
+  max_steps: number;
+}
+
+export interface CapabilityRef {
+  id: string;
+  detail?: string | null;
+}
+
+export interface MemoryRef {
+  id: number;
+  kind: string;
+  summary: string;
+  content: unknown;
+  created_at?: string | null;
+}
+
+export interface KnowledgeRef {
+  id: number;
+  source: string;
+  content: string;
+  tags?: string[];
+}
+
+export interface AdapterFactRef {
+  adapter: string;
+  kind: string;
+  payload: unknown;
+}
+
+export interface EventRef {
+  id: string;
+  kind: string;
+  summary: string;
+  at?: string | null;
+}
+
+export interface EvidenceRef {
+  source: string;
+  id: string;
+  summary: string;
+}
+
+export interface AnomalyRef {
+  kind: string;
+  description: string;
+}
+
+export interface Blocker {
+  kind: string;
+  description: string;
+  element_id?: string | null;
+}
+
+export interface OmittedCounts {
+  elements: number;
+  memories: number;
+  knowledge: number;
+  adapter_facts: number;
+  recent_events: number;
+}
+
+export interface PlanningView {
+  goal: string;
+  budget: PlanningBudget;
+  screen: PlanningScreen;
+  elements: PlanningElement[];
+  adapter_facts: AdapterFactRef[];
+  capabilities: CapabilityRef[];
+  run_progress: RunProgress;
+  memories: MemoryRef[];
+  knowledge: KnowledgeRef[];
+  recent_events: EventRef[];
+  blockers: Blocker[];
+  anomalies: AnomalyRef[];
+  evidence: EvidenceRef[];
+  selection_rationale?: string | null;
+  omitted_counts: OmittedCounts;
+}
+
 export interface ReviewDecision {
   approved: boolean;
   edited_step?: CanonicalStep;

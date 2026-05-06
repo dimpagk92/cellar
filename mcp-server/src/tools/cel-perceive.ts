@@ -62,6 +62,27 @@ export const celPerceiveSchema = z.discriminatedUnion("mode", [
     ),
   }),
   z.object({ mode: z.literal("status") }),
+  z.object({
+    mode: z.literal("plan_view"),
+    goal: z.string().describe(
+      "Natural-language goal the planning view should be built around. The cortex selector " +
+      "uses this to score elements by relevance and to fold goal-relevant memories / knowledge / " +
+      "events (when those land in PR3). Be specific.",
+    ),
+    budget: z
+      .object({
+        max_tokens: z.number().optional(),
+        max_elements: z.number().optional(),
+        max_memories: z.number().optional(),
+        max_adapter_facts: z.number().optional(),
+      })
+      .optional()
+      .describe(
+        "Optional ceilings the cortex selector enforces — most-relevant items first, drop the rest. " +
+        "When omitted, defaults sized to keep prompts under common LLM context windows. Override " +
+        "per-call when your model has a larger context window or you're running a token-tight harness.",
+      ),
+  }),
 ]);
 
 type Input = z.infer<typeof celPerceiveSchema>;
@@ -432,6 +453,25 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           pendingAnomalies: model?.anomalyQueue?.length ?? 0,
           temporal: model?.temporal,
         });
+      }
+
+      case "plan_view": {
+        // Standalone — does not require a perception session, but does
+        // require a booted cortex (boot it on demand if needed).
+        if (!cel.isCortexRunning()) {
+          cel.bootCortex();
+        }
+        const view = await cel.canonicalBuildPlanningView(args.goal, {
+          budget: args.budget
+            ? {
+                max_tokens: args.budget.max_tokens ?? 8000,
+                max_elements: args.budget.max_elements ?? 80,
+                max_memories: args.budget.max_memories ?? 8,
+                max_adapter_facts: args.budget.max_adapter_facts ?? 12,
+              }
+            : undefined,
+        });
+        return textResult(view);
       }
     }
   } catch (err) {

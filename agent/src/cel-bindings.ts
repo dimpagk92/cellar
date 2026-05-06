@@ -34,6 +34,8 @@ import type {
   DoneVerdict,
   NextMove,
   PerceptionFrame,
+  PlanningBudget,
+  PlanningView,
   RuntimeCaps,
 } from "./langgraph/canonical.js";
 
@@ -221,19 +223,29 @@ export interface CelNative {
   cortexRefreshNow(timeoutMs?: number): Promise<number>;
   runGoalRust(configJson: string): Promise<string>;
   canonicalPerceive(captureScreenshot?: boolean): Promise<string>;
-  canonicalDecideNext(
+  /**
+   * Build a budgeted PlanningView via the cortex-side selector.
+   * Stateful when perceptionJson + capsJson are omitted (uses booted cortex);
+   * stateless when both are provided. budgetJson is optional.
+   */
+  canonicalBuildPlanningView(
     goal: string,
+    budgetJson?: string | null,
+    perceptionJson?: string | null,
+    capsJson?: string | null,
+  ): Promise<string>;
+  /** PR1b: signature changed to take view JSON instead of perception+caps. */
+  canonicalDecideNext(
+    viewJson: string,
     historyJson: string,
     sharedMemoryJson: string,
-    perceptionJson: string,
     screenshotBase64?: string | null,
-    capsJson?: string,
   ): Promise<string>;
+  /** PR1b: signature changed to take view JSON instead of perception. */
   canonicalVerifyDone(
-    goal: string,
+    viewJson: string,
     summary: string,
     sharedMemoryJson: string,
-    perceptionJson: string,
     screenshotBase64?: string | null,
   ): Promise<string>;
   canonicalExecuteStep(stepJson: string): Promise<string>;
@@ -1151,36 +1163,84 @@ export class Cel implements
     return JSON.parse(await this.native.canonicalPerceive(captureScreenshot));
   }
 
-  /** Ask the Rust canonical planner for the next move. */
-  async canonicalDecideNext(
+  /**
+   * Build a budgeted PlanningView via the cortex-side deterministic
+   * selector. Two modes:
+   *
+   *  - **Stateful** (default): both `perception` and `caps` are `undefined`.
+   *    Uses the booted Cortex internally to read fresh perception + caps,
+   *    then builds the view. Errors if the cortex isn't running.
+   *
+   *  - **Stateless**: caller supplies both `perception` and `caps`. Skips
+   *    the cortex; useful for the eval harness, replay tooling, or any
+   *    caller that already has a perception snapshot.
+   *
+   * `budget` is optional; defaults sized to keep prompts under common
+   * LLM context windows.
+   */
+  async canonicalBuildPlanningView(
     goal: string,
+    options: {
+      budget?: PlanningBudget;
+      perception?: ScreenContext;
+      caps?: RuntimeCaps;
+    } = {},
+  ): Promise<PlanningView> {
+    if (!this.native) {
+      throw new Error("Native CEL module not available");
+    }
+    const { budget, perception, caps } = options;
+    if ((perception && !caps) || (!perception && caps)) {
+      throw new Error(
+        "canonicalBuildPlanningView: stateless mode requires BOTH perception and caps (or pass neither for stateful mode)",
+      );
+    }
+    return JSON.parse(
+      await this.native.canonicalBuildPlanningView(
+        goal,
+        budget ? JSON.stringify(budget) : null,
+        perception ? JSON.stringify(sanitizeContextForRust(perception)) : null,
+        caps ? JSON.stringify(caps) : null,
+      ),
+    );
+  }
+
+  /**
+   * Ask the Rust canonical planner for the next move.
+   *
+   * **PR1b: signature changed.** Now takes a `PlanningView` instead of
+   * raw perception + caps. Build the view first via
+   * `canonicalBuildPlanningView`.
+   */
+  async canonicalDecideNext(
+    view: PlanningView,
     history: AttemptRecord[],
     sharedMemory: unknown,
-    perception: ScreenContext,
     screenshotBase64: string | null,
-    caps: RuntimeCaps,
   ): Promise<NextMove> {
     if (!this.native) {
       throw new Error("Native CEL module not available");
     }
     return JSON.parse(
       await this.native.canonicalDecideNext(
-        goal,
+        JSON.stringify(view),
         JSON.stringify(history),
         JSON.stringify(sharedMemory ?? {}),
-        JSON.stringify(sanitizeContextForRust(perception)),
         screenshotBase64,
-        JSON.stringify(caps ?? {}),
       ),
     );
   }
 
-  /** Validate a Done claim against fresh Rust-side verification rules. */
+  /**
+   * Validate a Done claim against fresh Rust-side verification rules.
+   *
+   * **PR1b: signature changed.** Now takes a `PlanningView` instead of
+   * raw perception. Build the view first via `canonicalBuildPlanningView`.
+   */
   async canonicalVerifyDone(
-    goal: string,
+    view: PlanningView,
     summary: string,
     sharedMemory: unknown,
-    perception: ScreenContext,
     screenshotBase64: string | null,
   ): Promise<DoneVerdict> {
     if (!this.native) {
@@ -1188,10 +1248,9 @@ export class Cel implements
     }
     return JSON.parse(
       await this.native.canonicalVerifyDone(
-        goal,
+        JSON.stringify(view),
         summary,
         JSON.stringify(sharedMemory ?? {}),
-        JSON.stringify(sanitizeContextForRust(perception)),
         screenshotBase64,
       ),
     );

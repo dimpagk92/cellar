@@ -161,12 +161,19 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             // Build the budgeted planning view from this turn's perception +
             // caps. Replaces the raw `&ScreenContext` + `&RuntimeCaps` pair
             // the planner used to receive directly.
+            //
+            // PR3: when the caller opted in to memory writes via
+            // `RunLimits.workflow_id_for_memory` + `RunLimits.memory_db_path`,
+            // also use those for memory READS. The planner sees prior
+            // memories from past runs of the same workflow on every turn.
             let planning_budget = PlanningBudget::default();
             let view = build_planning_view(&PlanningViewInputs {
                 goal,
                 budget: &planning_budget,
                 perception: &perception,
                 caps: &caps,
+                memory_db_path: limits.memory_db_path.as_deref(),
+                workflow_id: limits.workflow_id_for_memory.as_deref(),
             });
 
             // Phase gate: past the budget midpoint with no terminal-

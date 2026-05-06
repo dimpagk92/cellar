@@ -238,6 +238,8 @@ pub async fn canonical_build_planning_view(
                 budget: &budget,
                 perception: &perception,
                 caps: &caps,
+                memory_db_path: None,
+                workflow_id: None,
             })
         }
         (None, None) => {
@@ -255,6 +257,8 @@ pub async fn canonical_build_planning_view(
                 budget: &budget,
                 perception: &perception,
                 caps: &caps,
+                memory_db_path: None,
+                workflow_id: None,
             })
         }
         _ => {

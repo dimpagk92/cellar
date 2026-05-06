@@ -607,6 +607,7 @@ dependencies = [
  "cel-input",
  "cel-network",
  "cel-signals",
+ "cel-store",
  "regex",
  "serde",
  "serde_json",

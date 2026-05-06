@@ -674,6 +674,50 @@ Does not ship:
 - `goal_decomposer` as core Cortex behavior.
 - Hidden adapter-owned planners.
 
+### PR 5: Migrate `langgraph/tools.ts` to PlanningView
+
+Goal: finish the planner-fragmentation cleanup by routing the LangGraph
+`see` tool through the same cortex `PlanningView` the canonical Rust
+runner uses. Deferred from PR1c after a first cut hit a regression in
+`react-agent.test.ts` (the test's mocked `buildPlanningView` returned
+an empty view, which broke `act()`'s indexed-target resolution and
+caused the agent loop to time out).
+
+Ships:
+
+- `langgraph/tools.ts`: `see` tool calls `driver.buildPlanningView` and
+  renders the result (replacing `compressContext` +
+  `serializeContextForLLM` on this path).
+- `renderPlanningView()` helper that produces `{ text, indexMap,
+  elementCount }` from a `PlanningView`, preserving the LLM-facing
+  numeric-index pattern act() relies on.
+- Test fixtures (`react-agent.test.ts`, `graph.test.ts`) updated so
+  their mocked `buildPlanningView` mirrors the perception's elements
+  into the view — this is what the original PR1c attempt missed.
+- `compressContext` / `serializeContextForLLM` may be marked
+  deprecated in `agent/src/index.ts` once tools.ts no longer uses them.
+  External callers retain access for one release cycle.
+
+Does not ship:
+
+- Any new MCP modes.
+- Any change to the canonical Rust runner or its tests.
+
+Why deferred: PR1b's main planner path (`CelLlmPlanner`) already
+converges on the canonical Rust planner via N-API (PR1c convergence
+test proves it). Migrating the LangGraph **tool** surface is a
+correctness improvement, not a blocker — until the regression is
+fully understood, leaving `tools.ts` on the legacy compression path is
+safer than racing a half-fixed migration.
+
+Acceptance:
+
+- `react-agent.test.ts` passes alongside the migration (i.e. fix the
+  test or the interaction the test caught).
+- `pnpm --filter @cellar/agent test` green end-to-end (no excluded
+  files).
+- Cross-backend convergence test still passes.
+
 ---
 
 ## Deferred Enrichers

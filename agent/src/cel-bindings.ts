@@ -31,7 +31,10 @@ import type {
   AttemptRecord,
   CanonicalStep,
   CanonicalStepResult,
+  CortexMemory,
   DoneVerdict,
+  MemoryKind,
+  NewCortexMemory,
   NextMove,
   PerceptionFrame,
   PlanningBudget,
@@ -170,6 +173,23 @@ export interface CelNative {
   addScopedKnowledge(dbPath: string, content: string, source: string, workflowScope: string | null, tags: string | null): number;
   // Eviction / TTL
   runEviction(dbPath: string, runRetentionDays: number, knowledgeRetentionDays: number): string;
+  // Cortex memory (durable, workflow-scoped memory the cortex selector
+  // can hydrate into a PlanningView; PR2 storage layer + explicit tools)
+  cortexMemoryInsert(dbPath: string, payloadJson: string): number;
+  cortexMemoryList(
+    dbPath: string,
+    workflowId: string,
+    kindsJson: string | null,
+    limit: number,
+  ): string;
+  cortexMemorySearch(
+    dbPath: string,
+    workflowId: string,
+    query: string,
+    limit: number,
+  ): string;
+  cortexMemoryTouch(dbPath: string, id: number): string;
+  cortexMemoryPrune(dbPath: string, threshold: number): number;
   // Quick context (app/window only, no tree walk)
   getQuickContext(): string;
   // Blind planner (no screen context, uses device baseline)
@@ -865,6 +885,69 @@ export class Cel implements
   runEviction(runRetentionDays = 90, knowledgeRetentionDays = 365): EvictionResult {
     if (!this.native) return { superseded_observations: 0, old_runs: 0, old_knowledge: 0 };
     return JSON.parse(this.native.runEviction(this.dbPath, runRetentionDays, knowledgeRetentionDays));
+  }
+
+  // --- Cortex memory (PR2) ---
+
+  /**
+   * Insert a new cortex memory record. Workflow-scoped, opt-in. The MCP
+   * `cel_think store_memory` mode and the canonical-runner outcome
+   * auto-write path both call this. Returns the new row id.
+   */
+  cortexMemoryInsert(payload: NewCortexMemory): number {
+    if (!this.native) {
+      throw new Error("Native CEL module not available");
+    }
+    return this.native.cortexMemoryInsert(this.dbPath, JSON.stringify(payload));
+  }
+
+  /**
+   * List cortex memories for a workflow, most-recent-first.
+   * `kinds` filters to one or more memory kinds (`undefined` = any).
+   */
+  cortexMemoryList(
+    workflowId: string,
+    options: { kinds?: MemoryKind[]; limit?: number } = {},
+  ): CortexMemory[] {
+    if (!this.native) return [];
+    const limit = options.limit ?? 50;
+    const kindsJson = options.kinds && options.kinds.length > 0 ? JSON.stringify(options.kinds) : null;
+    return JSON.parse(this.native.cortexMemoryList(this.dbPath, workflowId, kindsJson, limit));
+  }
+
+  /**
+   * Free-text search over cortex memories' summary + content.
+   * Case-insensitive substring match for v1 (PR3 may upgrade to FTS5).
+   */
+  cortexMemorySearch(
+    workflowId: string,
+    query: string,
+    limit = 20,
+  ): CortexMemory[] {
+    if (!this.native) return [];
+    return JSON.parse(this.native.cortexMemorySearch(this.dbPath, workflowId, query, limit));
+  }
+
+  /**
+   * Fetch one cortex memory by id, updating `last_accessed_at` to now.
+   * Returns `null` if the id doesn't exist.
+   */
+  cortexMemoryTouch(id: number): CortexMemory | null {
+    if (!this.native) return null;
+    const raw = this.native.cortexMemoryTouch(this.dbPath, id);
+    return JSON.parse(raw);
+  }
+
+  /**
+   * Prune cortex memories whose decay score falls below `threshold`.
+   * Returns the number of deleted rows.
+   *
+   * Default `0.01` cuts memories not accessed in roughly 20 months
+   * (90-day half-life). Pass a tighter threshold to prune sooner.
+   */
+  cortexMemoryPrune(threshold = 0.01): number {
+    if (!this.native) return 0;
+    return this.native.cortexMemoryPrune(this.dbPath, threshold);
   }
 
   // --- External Context (browser adapter → Rust pipeline) ---

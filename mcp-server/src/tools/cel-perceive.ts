@@ -18,6 +18,17 @@ export const celPerceiveSchema = z.discriminatedUnion("mode", [
       "in the current cortex model. Adds one LLM call per read (latency + cost). Disable for " +
       "passive monitoring or when the host already plans next actions.",
     ),
+    enable_memory: z.boolean().optional().describe(
+      "When true (default false), the session writes a checkpoint memory on every `cel_perceive " +
+      "checkpoint` call and a final outcome memory on `cel_perceive stop`. Requires `workflow_id`. " +
+      "Memories are durable, workflow-scoped, and surface in future sessions via the cortex " +
+      "selector (PR3). Off by default for privacy — opt-in only.",
+    ),
+    workflow_id: z.string().optional().describe(
+      "Required when `enable_memory: true`. Workflow scope for any memory writes — there is no " +
+      "global memory scope in v1. Use a stable, human-readable identifier (e.g. 'concur-expense', " +
+      "'morning-standup-prep') so the cortex selector can recall across sessions.",
+    ),
   }),
   z.object({ mode: z.literal("stop") }),
   z.object({ mode: z.literal("read") }),
@@ -121,6 +132,8 @@ interface SessionState {
   checkpoints: CheckpointEntry[];
   constraints: Constraint[];
   totalReads: number;
+  /** PR2 opt-in: when set, checkpoint + stop write a cortex memory under this workflow_id. */
+  memoryWorkflowId?: string;
 }
 
 let session: SessionState | null = null;
@@ -199,6 +212,13 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
 
         const goal = args.goal;
         const enableSuggestions = args.enable_suggestions ?? true;
+        const enableMemory = args.enable_memory ?? false;
+        if (enableMemory && !args.workflow_id) {
+          return errorResult(
+            "enable_memory: true requires `workflow_id`. There's no global memory scope " +
+              "in v1 — pick a stable identifier (e.g. 'concur-expense') so memories scope correctly.",
+          );
+        }
 
         // Extract constraints from goal via LLM (non-blocking fallback on error)
         const constraints = await extractConstraints(cel, goal);
@@ -212,6 +232,7 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           checkpoints: [],
           constraints,
           totalReads: 0,
+          memoryWorkflowId: enableMemory ? args.workflow_id : undefined,
         };
 
         const model = normalizeCortexModel(cel.readCortexModel());
@@ -233,6 +254,39 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
 
         const successfulActions = session.actionLog.filter((a) => a.landed).length;
         const failedActions = session.actionLog.filter((a) => !a.landed).length;
+        const allConstraintsSatisfied = session.constraints.every((c) => c.satisfied);
+
+        // PR2: opt-in final-outcome memory write. Captures the
+        // workflow-level pass/fail so the selector can later answer
+        // "what happened last time I tried this workflow?"
+        let finalMemoryId: number | undefined;
+        if (session.memoryWorkflowId) {
+          try {
+            finalMemoryId = cel.cortexMemoryInsert({
+              workflow_id: session.memoryWorkflowId,
+              kind: allConstraintsSatisfied ? "outcome" : "failure",
+              content: {
+                kind: allConstraintsSatisfied ? "outcome" : "failure",
+                goal: session.goal,
+                total_actions: session.actionLog.length,
+                successful_actions: successfulActions,
+                failed_actions: failedActions,
+                checkpoints: session.checkpoints.length,
+                duration_ms: Date.now() - session.startTime,
+                constraints_satisfied: allConstraintsSatisfied,
+                ts: new Date().toISOString(),
+              },
+              summary: allConstraintsSatisfied
+                ? `Completed: ${session.goal}`
+                : `Did not complete: ${session.goal}`,
+              source_ref: `perceive:session:${session.startTime}`,
+            });
+          } catch (err) {
+            session.observations.push(
+              `[memory_write_failed] ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
 
         const summary = {
           totalActions: session.actionLog.length,
@@ -243,6 +297,7 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           goal: session.goal,
           observations: session.observations,
           constraints: session.constraints.map((c) => ({ text: c.text, kind: c.kind, satisfied: c.satisfied })),
+          memory_id: finalMemoryId ?? null,
         };
 
         cel.stopCortex();
@@ -419,11 +474,41 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
         };
         session.checkpoints.push(entry);
 
+        // PR2: opt-in cortex memory write. We persist a structured
+        // outcome memory so the next session's selector (PR3) can
+        // surface "what was accomplished by checkpoint N of this
+        // workflow." Caller opted in via `cel_perceive start
+        // { enable_memory: true, workflow_id: "..." }`.
+        let memoryId: number | undefined;
+        if (session.memoryWorkflowId) {
+          try {
+            memoryId = cel.cortexMemoryInsert({
+              workflow_id: session.memoryWorkflowId,
+              kind: "outcome",
+              content: {
+                kind: "outcome",
+                checkpoint_id: entry.id,
+                summary: args.summary,
+                actions: entry.actionsBeforeCheckpoint,
+                ts: new Date(entry.timestamp).toISOString(),
+              },
+              summary: `[checkpoint ${entry.id}] ${args.summary}`,
+              source_ref: `perceive:checkpoint:${entry.id}`,
+            });
+          } catch (err) {
+            // Don't fail the checkpoint just because memory write
+            // failed — log it in the session observations and keep going.
+            session.observations.push(
+              `[memory_write_failed] ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
+
         // Reset rolling state
         session.observations = [`[Checkpoint ${entry.id}] ${args.summary}`];
         session.actionLog = [];
 
-        return textResult({ success: true, checkpoint_id: entry.id });
+        return textResult({ success: true, checkpoint_id: entry.id, memory_id: memoryId ?? null });
       }
 
       case "status": {

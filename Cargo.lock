@@ -784,6 +784,7 @@ dependencies = [
  "axum",
  "cel-accessibility",
  "cel-context",
+ "cel-contracts",
  "cel-cortex",
  "cel-goal-runner",
  "cel-llm",

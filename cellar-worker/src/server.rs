@@ -169,7 +169,7 @@ fn spawn_real_execution(
         store.update_status(&job_id, JobStatus::Running, None, None);
 
         let config = merge_goal_config(goal.clone(), config_override);
-        let limits = cel_planner::RunLimits {
+        let limits = cel_contracts::RunLimits {
             max_steps: config.max_steps,
             timeout_ms: config.timeout_ms,
             max_step_retries: 3,
@@ -210,8 +210,8 @@ fn spawn_real_execution(
 
         // Canonical GoalOutcome → worker JobStatus.
         let (job_status, error) = match &outcome {
-            cel_planner::GoalOutcome::Succeeded { .. } => (JobStatus::Succeeded, None),
-            cel_planner::GoalOutcome::Failed(report) => (
+            cel_contracts::GoalOutcome::Succeeded { .. } => (JobStatus::Succeeded, None),
+            cel_contracts::GoalOutcome::Failed(report) => (
                 JobStatus::Failed,
                 Some(format!(
                     "{}/{}: {}",

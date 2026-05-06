@@ -171,7 +171,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                         );
                         let activate_step = Step {
                             purpose: format!("phase_gate_auto_activate:{term}"),
-                            kind: cel_planner::StepKind::Deterministic,
+                            kind: cel_contracts::StepKind::Deterministic,
                             action: PlannedAction::ActivateApp {
                                 app_name: term.to_string(),
                             },

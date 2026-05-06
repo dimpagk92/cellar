@@ -191,14 +191,96 @@ pub async fn canonical_perceive(capture_screenshot: Option<bool>) -> napi::Resul
     .map_err(|e| napi::Error::from_reason(format!("Snapshot serialization failed: {e}")))
 }
 
+/// Build a budgeted `PlanningView` from current cortex state (or from
+/// caller-provided perception + caps for stateless mode).
+///
+/// **Stateful** (default): `perception_json` and `caps_json` are `None`.
+/// Uses the booted cortex via [`canonical_perceive`] to read fresh
+/// perception + caps, then builds the view. Errors if the cortex isn't
+/// running.
+///
+/// **Stateless**: `perception_json` and `caps_json` are both provided.
+/// Skips the cortex entirely and builds the view from the caller's
+/// inputs. Useful for the eval harness, replay tooling, and any caller
+/// that already has a perception snapshot.
+///
+/// `budget_json` is an optional serialized [`PlanningBudget`]. When
+/// omitted, defaults are used (see `PlanningBudget::default`).
+#[napi]
+pub async fn canonical_build_planning_view(
+    goal: String,
+    budget_json: Option<String>,
+    perception_json: Option<String>,
+    caps_json: Option<String>,
+) -> napi::Result<String> {
+    crate::ensure_tracing_init();
+
+    let budget: PlanningBudget = budget_json
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            serde_json::from_str(s)
+                .map_err(|e| napi::Error::from_reason(format!("Invalid budget JSON: {e}")))
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    let view = match (perception_json, caps_json) {
+        (Some(p_json), Some(c_json)) => {
+            // Stateless path: caller supplies the inputs.
+            let perception: cel_context::ScreenContext = serde_json::from_str(&p_json)
+                .map_err(|e| napi::Error::from_reason(format!("Invalid perception JSON: {e}")))?;
+            let caps: RuntimeCaps = parse_json_or_default(&c_json)?;
+            build_planning_view(&PlanningViewInputs {
+                goal: &goal,
+                budget: &budget,
+                perception: &perception,
+                caps: &caps,
+            })
+        }
+        (None, None) => {
+            // Stateful path: use the booted cortex.
+            let cortex = crate::cortex::get_cortex_handle().ok_or_else(|| {
+                napi::Error::from_reason(
+                    "Cortex not running — call boot_cortex() first or pass perception_json/caps_json for stateless mode",
+                )
+            })?;
+            let executor = CortexStepExecutor::new(cortex);
+            let perception = executor.perceive().await;
+            let caps = executor.capabilities().await;
+            build_planning_view(&PlanningViewInputs {
+                goal: &goal,
+                budget: &budget,
+                perception: &perception,
+                caps: &caps,
+            })
+        }
+        _ => {
+            return Err(napi::Error::from_reason(
+                "Stateless mode requires BOTH perception_json and caps_json (or pass neither for stateful mode)",
+            ));
+        }
+    };
+
+    serde_json::to_string(&view)
+        .map_err(|e| napi::Error::from_reason(format!("PlanningView serialization failed: {e}")))
+}
+
+/// Run the LLM planner's `decide_next` against a `PlanningView`.
+///
+/// Pure planner call — no cortex dependency. Caller is expected to have
+/// built the view via [`canonical_build_planning_view`] (or any other
+/// source that produces a valid `PlanningView` JSON).
+///
+/// **Signature changed in PR1b**: previously took `perception_json` +
+/// `caps_json`. Now takes `view_json`. The cortex/planner separation
+/// at the Rust contract is mirrored on the JS surface.
 #[napi]
 pub async fn canonical_decide_next(
-    goal: String,
+    view_json: String,
     history_json: String,
     shared_memory_json: String,
-    perception_json: String,
     screenshot_base64: Option<String>,
-    caps_json: String,
 ) -> napi::Result<String> {
     crate::ensure_tracing_init();
     let llm_client = cel_llm::create_client().map_err(|e| {
@@ -207,24 +289,14 @@ pub async fn canonical_decide_next(
         ))
     })?;
     let planner = LlmPlanProducer::new(Arc::new(llm_client));
+    let view: cel_contracts::PlanningView = serde_json::from_str(&view_json)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid PlanningView JSON: {e}")))?;
     let history: Vec<AttemptRecord> = parse_json_or_default(&history_json)?;
     let shared_memory: serde_json::Value = parse_json_or_default(&shared_memory_json)?;
-    let perception: cel_context::ScreenContext = serde_json::from_str(&perception_json)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid perception JSON: {e}")))?;
     let screenshot = parse_screenshot_base64(screenshot_base64)?;
-    let caps: RuntimeCaps = parse_json_or_default(&caps_json)?;
-    // Build the view inline so the JS surface stays the same in PR1a.
-    // PR1b will replace these N-API helpers with view-native variants.
-    let budget = PlanningBudget::default();
-    let view = build_planning_view(&PlanningViewInputs {
-        goal: &goal,
-        budget: &budget,
-        perception: &perception,
-        caps: &caps,
-    });
     let next = planner
         .decide_next(
-            &goal,
+            &view.goal,
             &history,
             &shared_memory,
             &view,
@@ -236,12 +308,16 @@ pub async fn canonical_decide_next(
         .map_err(|e| napi::Error::from_reason(format!("NextMove serialization failed: {e}")))
 }
 
+/// Run the LLM planner's `verify_done` against a `PlanningView`.
+///
+/// **Signature changed in PR1b**: previously took `perception_json`. Now
+/// takes `view_json`. Caller builds the view via
+/// [`canonical_build_planning_view`].
 #[napi]
 pub async fn canonical_verify_done(
-    goal: String,
+    view_json: String,
     summary: String,
     shared_memory_json: String,
-    perception_json: String,
     screenshot_base64: Option<String>,
 ) -> napi::Result<String> {
     crate::ensure_tracing_init();
@@ -251,23 +327,13 @@ pub async fn canonical_verify_done(
         ))
     })?;
     let planner = LlmPlanProducer::new(Arc::new(llm_client));
+    let view: cel_contracts::PlanningView = serde_json::from_str(&view_json)
+        .map_err(|e| napi::Error::from_reason(format!("Invalid PlanningView JSON: {e}")))?;
     let shared_memory: serde_json::Value = parse_json_or_default(&shared_memory_json)?;
-    let perception: cel_context::ScreenContext = serde_json::from_str(&perception_json)
-        .map_err(|e| napi::Error::from_reason(format!("Invalid perception JSON: {e}")))?;
     let screenshot = parse_screenshot_base64(screenshot_base64)?;
-    // verify_done's view doesn't need budget-tight elements — empty caps
-    // is fine for the grader path (no capability prompting in verify).
-    let budget = PlanningBudget::default();
-    let caps = RuntimeCaps::default();
-    let view = build_planning_view(&PlanningViewInputs {
-        goal: &goal,
-        budget: &budget,
-        perception: &perception,
-        caps: &caps,
-    });
     let verdict = planner
         .verify_done(
-            &goal,
+            &view.goal,
             &summary,
             &shared_memory,
             &view,

@@ -48,11 +48,11 @@ use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
 use cel_context::ScreenContext;
-use cel_cortex::Cortex;
-use cel_planner::{
+use cel_contracts::{
     AttemptRecord, FailureReport, GoalOutcome, NextMove, PlanProducer, PlannedAction, RunLimits,
     RuntimeCaps, Step, StepResult,
 };
+use cel_cortex::Cortex;
 
 use crate::outcome::ActionRecord;
 
@@ -950,7 +950,7 @@ fn action_args_summary(action: &PlannedAction) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_planner::{Step, StepKind};
+    use cel_contracts::{Step, StepKind};
     use std::sync::atomic::AtomicU32;
 
     /// Scripted planner: returns pre-seeded NextMove values in order.

@@ -585,6 +585,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cel-contracts"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-context",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cel-cortex"
 version = "0.1.0"
 dependencies = [
@@ -593,9 +603,9 @@ dependencies = [
  "cel-audio",
  "cel-cdp",
  "cel-context",
+ "cel-contracts",
  "cel-input",
  "cel-network",
- "cel-planner",
  "cel-signals",
  "regex",
  "serde",
@@ -627,6 +637,7 @@ dependencies = [
  "cel-accessibility",
  "cel-cdp",
  "cel-context",
+ "cel-contracts",
  "cel-cortex",
  "cel-display",
  "cel-input",
@@ -678,6 +689,7 @@ dependencies = [
  "cel-audio",
  "cel-cdp",
  "cel-context",
+ "cel-contracts",
  "cel-cortex",
  "cel-display",
  "cel-goal-runner",
@@ -716,6 +728,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cel-context",
+ "cel-contracts",
  "cel-llm",
  "cel-network",
  "serde",

@@ -9,6 +9,7 @@ members = [
     "cel/cel-vision",
     "cel/cel-network",
     "cel/cel-context",
+    "cel/cel-contracts",
     "cel/cel-store",
     "cel/cel-planner",
     "cel/cel-cdp",
@@ -48,6 +49,7 @@ cel-audio = { path = "cel/cel-audio" }
 cel-vision = { path = "cel/cel-vision" }
 cel-network = { path = "cel/cel-network" }
 cel-context = { path = "cel/cel-context" }
+cel-contracts = { path = "cel/cel-contracts" }
 cel-store = { path = "cel/cel-store" }
 cel-planner = { path = "cel/cel-planner" }
 cel-cortex = { path = "cel/cel-cortex" }

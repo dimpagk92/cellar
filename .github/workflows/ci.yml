@@ -61,6 +61,7 @@ jobs:
               - 'cel/cel-napi/**'
               - 'cel/cel-cortex/**'
               - 'cel/cel-context/**'
+              - 'cel/cel-contracts/**'
               - 'cel/cel-planner/**'
               - 'cel/cel-goal-runner/**'
               - 'cel/cel-store/**'

@@ -1,0 +1,13 @@
+[package]
+name = "cel-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CEL boundary contracts — shared types between Cortex, Planner, and Goal Runner. Pure data types and traits with strictly minimal dependencies (cel-context + serde + async-trait)."
+
+[dependencies]
+cel-context = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }

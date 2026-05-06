@@ -70,7 +70,7 @@ impl CelStore {
     }
 
     /// Current schema version.
-    const SCHEMA_VERSION: u32 = 1;
+    const SCHEMA_VERSION: u32 = 2;
 
     /// Run database migrations with version tracking.
     fn migrate(&self) -> Result<(), StoreError> {
@@ -104,10 +104,71 @@ impl CelStore {
             )?;
         }
 
+        // Version 2: cortex_memories table (durable, workflow-scoped memory).
+        // Additive — existing v1 databases get the new table on next open.
+        if current < 2 {
+            crate::cortex_memory::migrate_cortex_memories(&self.conn)?;
+            self.conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                rusqlite::params![2],
+            )?;
+        }
+
         // Future migrations go here:
-        // if current < 2 { self.migrate_v2()?; ... }
+        // if current < 3 { self.migrate_v3()?; ... }
 
         Ok(())
+    }
+
+    // ─── Cortex memory wrappers ─────────────────────────────────────────────
+    //
+    // Thin pass-through to `cortex_memory::*` so callers (cel-napi, MCP
+    // server) can use one handle for everything in cel-store.
+
+    /// Insert a new cortex memory record. Uses the current wall clock for
+    /// `created_at` / `last_accessed_at`. Returns the new row id.
+    pub fn insert_cortex_memory(
+        &self,
+        m: &crate::cortex_memory::NewCortexMemory,
+    ) -> Result<i64, StoreError> {
+        crate::cortex_memory::insert_memory(&self.conn, m, crate::cortex_memory::now_unix_secs())
+    }
+
+    /// List cortex memories for a workflow, most-recent-first.
+    pub fn list_cortex_memories(
+        &self,
+        workflow_id: &str,
+        kinds: Option<&[crate::cortex_memory::MemoryKind]>,
+        limit: usize,
+    ) -> Result<Vec<crate::cortex_memory::CortexMemory>, StoreError> {
+        crate::cortex_memory::list_memories(&self.conn, workflow_id, kinds, limit)
+    }
+
+    /// Fetch one cortex memory by id, updating `last_accessed_at` to now.
+    pub fn touch_cortex_memory(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::cortex_memory::CortexMemory>, StoreError> {
+        crate::cortex_memory::touch_memory(&self.conn, id, crate::cortex_memory::now_unix_secs())
+    }
+
+    /// Free-text search over cortex memories' summary + content.
+    pub fn search_cortex_memory(
+        &self,
+        workflow_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::cortex_memory::CortexMemory>, StoreError> {
+        crate::cortex_memory::search_memory(&self.conn, workflow_id, query, limit)
+    }
+
+    /// Prune cortex memories whose decay score falls below `threshold`.
+    pub fn prune_cortex_memories(&self, threshold: f64) -> Result<usize, StoreError> {
+        crate::cortex_memory::prune_memories(
+            &self.conn,
+            threshold,
+            crate::cortex_memory::now_unix_secs(),
+        )
     }
 
     /// Version 1: initial schema.

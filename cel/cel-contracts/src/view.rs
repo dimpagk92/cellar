@@ -101,6 +101,26 @@ pub struct PlanningBudget {
     pub max_memories: u32,
     /// Maximum number of `AdapterFactRef` entries.
     pub max_adapter_facts: u32,
+    /// Maximum number of `KnowledgeRef` entries (Tier A1 selector — pulled
+    /// from `knowledge_fts` via FTS5 + bm25 ranking, scoped by workflow).
+    /// `serde(default)` keeps backward compat with v1 callers that don't
+    /// know about this field.
+    #[serde(default = "default_max_knowledge")]
+    pub max_knowledge: u32,
+    /// Maximum number of `EventRef` entries (Tier A2 selector — pulled
+    /// from cortex `observations` table, ordered by priority then
+    /// recency, scoped by workflow). `serde(default)` keeps backward
+    /// compat with pre-A2 callers.
+    #[serde(default = "default_max_recent_events")]
+    pub max_recent_events: u32,
+}
+
+fn default_max_knowledge() -> u32 {
+    8
+}
+
+fn default_max_recent_events() -> u32 {
+    10
 }
 
 impl Default for PlanningBudget {
@@ -112,6 +132,8 @@ impl Default for PlanningBudget {
             max_elements: 80,
             max_memories: 8,
             max_adapter_facts: 12,
+            max_knowledge: 8,
+            max_recent_events: 10,
         }
     }
 }
@@ -382,6 +404,8 @@ mod tests {
                 max_elements: 40,
                 max_memories: 4,
                 max_adapter_facts: 6,
+                max_knowledge: 4,
+                max_recent_events: 5,
             },
             screen: PlanningScreen {
                 active_app: "Browser".into(),

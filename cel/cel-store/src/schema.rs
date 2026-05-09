@@ -69,8 +69,9 @@ impl CelStore {
         Ok(store)
     }
 
-    /// Current schema version.
-    const SCHEMA_VERSION: u32 = 2;
+    /// Current schema version. v3 (WK1) adds the `cortex_memories_fts`
+    /// FTS5 virtual table + sync triggers for keyword-ranked memory recall.
+    const SCHEMA_VERSION: u32 = 3;
 
     /// Run database migrations with version tracking.
     fn migrate(&self) -> Result<(), StoreError> {
@@ -114,8 +115,22 @@ impl CelStore {
             )?;
         }
 
+        // Version 3 (WK1): FTS5 virtual table over cortex_memories +
+        // sync triggers + initial backfill from existing rows. Required
+        // before `search_for_workflow_ranked` (and the planning_view
+        // selector's relevance pre-filter) can match anything. Safe on
+        // fresh installs (no rows to backfill) and on existing v2 stores
+        // (backfill runs once on first v3 open).
+        if current < 3 {
+            crate::cortex_memory::migrate_cortex_memories_fts(&self.conn)?;
+            self.conn.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                rusqlite::params![3],
+            )?;
+        }
+
         // Future migrations go here:
-        // if current < 3 { self.migrate_v3()?; ... }
+        // if current < 4 { self.migrate_v4()?; ... }
 
         Ok(())
     }
@@ -414,6 +429,143 @@ impl CelStore {
             rusqlite::params![run_id],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+}
+
+// WK4: implement the cortex memory store contract on the production
+// SQLite-backed `CelStore`. This is what lets `cel-cortex::planning_view`
+// and `cel-goal-runner::canonical_runner` accept `&dyn CortexMemoryStore`
+// instead of a path-and-reopen pattern.
+//
+// `rusqlite::Connection` is `Send` but **not** `Sync` (interior `RefCell`
+// for the statement cache), so the trait can't be implemented on
+// `CelStore` directly — `&CelStore` wouldn't be `Send`, which fails the
+// auto-trait check on async-fn futures. Wrapping in `std::sync::Mutex`
+// gives `Mutex<CelStore>: Send + Sync` (Mutex is Sync when its T is
+// Send), at the cost of one short critical section per call. Callers
+// open the store once per run and share `&Mutex<CelStore>` (or
+// `Arc<Mutex<CelStore>>` if cloning across owners is needed) — replaces
+// N+1 SQLite opens per run with 1.
+impl crate::cortex_memory::CortexMemoryStore for std::sync::Mutex<CelStore> {
+    fn list_for_workflow(
+        &self,
+        workflow_id: &str,
+        kinds: Option<&[crate::cortex_memory::MemoryKind]>,
+        limit: usize,
+    ) -> Result<Vec<crate::cortex_memory::CortexMemory>, StoreError> {
+        let guard = self.lock().expect("CelStore Mutex poisoned");
+        guard.list_cortex_memories(workflow_id, kinds, limit)
+    }
+
+    fn insert_memory(
+        &self,
+        memory: &crate::cortex_memory::NewCortexMemory,
+    ) -> Result<i64, StoreError> {
+        let guard = self.lock().expect("CelStore Mutex poisoned");
+        guard.insert_cortex_memory(memory)
+    }
+
+    fn search_for_workflow_ranked(
+        &self,
+        workflow_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::cortex_memory::CortexMemory>, StoreError> {
+        let guard = self.lock().expect("CelStore Mutex poisoned");
+        guard.search_cortex_memory(workflow_id, query, limit)
+    }
+}
+
+// Tier A1: same Mutex<CelStore> handle implements KnowledgeStore so the
+// canonical runner can pass one shared handle into PlanningViewInputs
+// for both memory and knowledge selection. Empty / whitespace-only
+// query short-circuits to Ok(empty) for parity with WK1's search_memory.
+impl crate::cortex_memory::KnowledgeStore for std::sync::Mutex<CelStore> {
+    fn search_knowledge_for_workflow(
+        &self,
+        query: &str,
+        workflow_scope: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::ScoredKnowledge>, StoreError> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let guard = self.lock().expect("CelStore Mutex poisoned");
+        guard.search_knowledge(trimmed, workflow_scope, limit as u32)
+    }
+}
+
+// Tier A2: same Mutex<CelStore> handle also implements RecentEventStore.
+// One open per run satisfies all three traits (CortexMemoryStore +
+// KnowledgeStore + RecentEventStore).
+impl crate::cortex_memory::RecentEventStore for std::sync::Mutex<CelStore> {
+    fn recent_events_for_workflow(
+        &self,
+        workflow_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::Observation>, StoreError> {
+        let guard = self.lock().expect("CelStore Mutex poisoned");
+        guard.get_observations(workflow_id, limit as u32)
+    }
+}
+
+// Forward the trait through `Arc<T>` for callers that want to share
+// the same store handle across multiple owners (canonical runner +
+// future cognition runtime, eval harness sub-tasks, etc.).
+impl<T: crate::cortex_memory::CortexMemoryStore + ?Sized> crate::cortex_memory::CortexMemoryStore
+    for std::sync::Arc<T>
+{
+    fn list_for_workflow(
+        &self,
+        workflow_id: &str,
+        kinds: Option<&[crate::cortex_memory::MemoryKind]>,
+        limit: usize,
+    ) -> Result<Vec<crate::cortex_memory::CortexMemory>, StoreError> {
+        (**self).list_for_workflow(workflow_id, kinds, limit)
+    }
+
+    fn insert_memory(
+        &self,
+        memory: &crate::cortex_memory::NewCortexMemory,
+    ) -> Result<i64, StoreError> {
+        (**self).insert_memory(memory)
+    }
+
+    fn search_for_workflow_ranked(
+        &self,
+        workflow_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::cortex_memory::CortexMemory>, StoreError> {
+        (**self).search_for_workflow_ranked(workflow_id, query, limit)
+    }
+}
+
+// Tier A1: forward KnowledgeStore through Arc<T> too.
+impl<T: crate::cortex_memory::KnowledgeStore + ?Sized> crate::cortex_memory::KnowledgeStore
+    for std::sync::Arc<T>
+{
+    fn search_knowledge_for_workflow(
+        &self,
+        query: &str,
+        workflow_scope: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::ScoredKnowledge>, StoreError> {
+        (**self).search_knowledge_for_workflow(query, workflow_scope, limit)
+    }
+}
+
+// Tier A2: forward RecentEventStore through Arc<T> too.
+impl<T: crate::cortex_memory::RecentEventStore + ?Sized> crate::cortex_memory::RecentEventStore
+    for std::sync::Arc<T>
+{
+    fn recent_events_for_workflow(
+        &self,
+        workflow_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::Observation>, StoreError> {
+        (**self).recent_events_for_workflow(workflow_id, limit)
     }
 }
 

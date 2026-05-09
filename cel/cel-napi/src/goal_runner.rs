@@ -238,8 +238,13 @@ pub async fn canonical_build_planning_view(
                 budget: &budget,
                 perception: &perception,
                 caps: &caps,
-                memory_db_path: None,
+                memory_store: None,
+                knowledge_store: None,
                 workflow_id: None,
+                goal_embedding: None,
+                recent_events_store: None,
+                cortex_anomalies: None,
+                cortex_freshness: None,
             })
         }
         (None, None) => {
@@ -257,8 +262,13 @@ pub async fn canonical_build_planning_view(
                 budget: &budget,
                 perception: &perception,
                 caps: &caps,
-                memory_db_path: None,
+                memory_store: None,
+                knowledge_store: None,
                 workflow_id: None,
+                goal_embedding: None,
+                recent_events_store: None,
+                cortex_anomalies: None,
+                cortex_freshness: None,
             })
         }
         _ => {

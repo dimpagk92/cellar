@@ -4,7 +4,12 @@ import { z } from "zod";
 import { compressContext } from "../context-compressor.js";
 import { serializeContextForLLM } from "../context-serializer.js";
 import type { PageContent } from "../types.js";
-import type { CanonicalAction, CanonicalStep, PerceptionFrame } from "./canonical.js";
+import type {
+  CanonicalAction,
+  CanonicalStep,
+  PerceptionFrame,
+  PlanningView,
+} from "./canonical.js";
 import type { CellarLangGraphDriver } from "./driver.js";
 import { evaluateDraftAnswer, inferGoalContract } from "./goal-contract.js";
 
@@ -107,15 +112,28 @@ export function createCortexTools(options: CreateCortexToolsOptions) {
     const activeAdapters = Array.isArray(model?.activeAdapters)
       ? model.activeAdapters.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
       : [];
-    const rendered = renderPerception(frame, maxContextChars);
+
+    // WK3 / PR5: when the driver implements `buildPlanningView` AND the
+    // tool was created with a goal, route through the canonical
+    // PlanningView pipeline (deterministic Cortex-side selector) instead
+    // of the legacy compressContext+serialize path. The serialized form
+    // produced from PlanningView mirrors the existing shape (numeric
+    // index → element id) so the LLM contract is unchanged. Drivers that
+    // don't expose buildPlanningView fall back to the legacy path —
+    // backward compat for any caller that hasn't migrated.
+    const view = await tryBuildPlanningView(options, frame);
+    const rendered = view
+      ? renderPlanningView(view, maxContextChars)
+      : renderPerception(frame, maxContextChars);
+
     const pageContent = await options.driver.getPageContent?.() ?? null;
     session.lastFrame = frame;
     session.lastIndexMap = rendered.indexMap;
     session.lastPageContent = pageContent;
 
     return JSON.stringify({
-      app: frame.perception.app,
-      window: frame.perception.window,
+      app: view?.screen.active_app ?? frame.perception.app,
+      window: view?.screen.window ?? frame.perception.window,
       timestamp_ms: frame.perception.timestamp_ms,
       active_adapters: activeAdapters,
       caps: {
@@ -126,6 +144,20 @@ export function createCortexTools(options: CreateCortexToolsOptions) {
       },
       element_count: rendered.elementCount,
       context: rendered.text,
+      // PlanningView-only diagnostics — only present when the new path
+      // ran. Helps surface to the planner why elements were dropped /
+      // which memories were hydrated this turn.
+      ...(view
+        ? {
+            selection_rationale: view.selection_rationale ?? null,
+            omitted_counts: view.omitted_counts,
+            memories: view.memories.map((m) => ({
+              id: m.id,
+              kind: m.kind,
+              summary: m.summary,
+            })),
+          }
+        : {}),
       page_content: pageContent ? renderPageContent(pageContent, Math.max(Math.floor(maxContextChars / 2), 2_000)) : null,
       note: "Use numeric target ids from this see() result in the next act() call. After any act(), call see() again.",
     }, null, 2);
@@ -219,6 +251,82 @@ function renderPerception(frame: PerceptionFrame, maxContextChars: number) {
     text: truncate(serialized.text, maxContextChars),
     indexMap: serialized.indexMap,
     elementCount: serialized.elementCount,
+  };
+}
+
+/**
+ * WK3 / PR5: try to build a `PlanningView` via the driver's canonical
+ * selector. Requires both:
+ *   1. `options.goal` (the selector is goal-keyword scored),
+ *   2. `options.driver.buildPlanningView` (driver opts in).
+ *
+ * Returns `null` on missing requirements OR builder failure — the see()
+ * tool falls back to the legacy `compressContext` path. We pass through
+ * the freshly-perceived frame so the new path doesn't double up
+ * perception work; cortex stateful-mode would re-perceive otherwise.
+ */
+async function tryBuildPlanningView(
+  options: CreateCortexToolsOptions,
+  frame: PerceptionFrame,
+): Promise<PlanningView | null> {
+  if (!options.goal || !options.driver.buildPlanningView) {
+    return null;
+  }
+  try {
+    return await options.driver.buildPlanningView(options.goal, {
+      perception: frame.perception,
+      caps: frame.caps,
+    });
+  } catch (error) {
+    // Fall back to the legacy path — never let a builder failure
+    // black-hole the see() call.
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[see] buildPlanningView failed; falling back to compressContext path",
+      error,
+    );
+    return null;
+  }
+}
+
+/**
+ * WK3 / PR5: serialize a `PlanningView` for LLM consumption in the same
+ * shape `compressContext + serializeContextForLLM` produces — numeric
+ * indices for compactness, paired with an `indexMap` the act() tool uses
+ * to resolve `target_id: "1"` back to the actual element id.
+ *
+ * One line per element: `[N] element_type "label" id (state hints)`.
+ * Keeps output compact while preserving the information the LLM needs to
+ * pick a target.
+ */
+function renderPlanningView(view: PlanningView, maxContextChars: number) {
+  const indexMap = new Map<number, string>();
+  const lines: string[] = [];
+  view.elements.forEach((el, i) => {
+    const idx = i + 1;
+    indexMap.set(idx, el.id);
+    const label = el.label ? `"${truncate(el.label, 80)}"` : "(no label)";
+    const value = el.value ? ` value="${truncate(el.value, 40)}"` : "";
+    const hints: string[] = [];
+    if (el.state.focused) hints.push("focused");
+    if (el.state.selected) hints.push("selected");
+    if (!el.state.enabled) hints.push("disabled");
+    if (el.state.checked) hints.push("checked");
+    if (el.state.expanded) hints.push("expanded");
+    if (el.clickable) hints.push("clickable");
+    if (el.settable) hints.push("settable");
+    const hintStr = hints.length > 0 ? ` [${hints.join(", ")}]` : "";
+    lines.push(`[${idx}] ${el.element_type} ${label}${value} id=${el.id}${hintStr}`);
+  });
+  if (view.omitted_counts.elements > 0) {
+    lines.push(
+      `... ${view.omitted_counts.elements} more element(s) omitted by selector budget`,
+    );
+  }
+  return {
+    text: truncate(lines.join("\n"), maxContextChars),
+    indexMap,
+    elementCount: view.elements.length,
   };
 }
 

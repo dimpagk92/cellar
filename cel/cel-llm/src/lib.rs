@@ -5,10 +5,12 @@
 
 mod client;
 mod config;
+mod embedder;
 mod error;
 
 pub use client::LlmClient;
 pub use config::{LlmProviderConfig, LlmRole, ModelProfile, ModelTier, ProviderKind};
+pub use embedder::{cosine_similarity, Embedder, EmbeddingVector};
 pub use error::LlmError;
 
 /// Content part in a chat message (text or image).

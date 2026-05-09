@@ -4,7 +4,44 @@
 **Author:** dimpagk92 + Claude, revised with Codex
 **Closes / reframes:** [dimpagk92/cellar#33](https://github.com/dimpagk92/cellar/issues/33) (Cortex persistent memory)
 **Date:** 2026-05-04
-**Updated:** 2026-05-06
+**Updated:** 2026-05-07 — post-PR3 weakness backlog cleared (WK1+WK3+WK4+WK5 shipped); PR4 reframed from "cel-cognition crate" to a tiered, eval-driven approach.
+
+---
+
+## Status (2026-05-07)
+
+**Status conventions:**
+- ✅ **merged** — landed on main, OSS-synced, in production
+- 📝 **PR'd** — code-complete, all local gates green (fmt + clippy + tests), PR open and awaiting CI/merge (currently blocked on GitHub Actions billing — see end of section)
+- 🔄 **reframed** — design changed; see referenced section
+- ⏳ **next** — actively in flight or up next
+
+| Phase | What | Status |
+|---|---|---|
+| PR1a.0 | Extract `cel-contracts` (mechanical) | ✅ merged |
+| PR1a / PR1b | `PlanningView` contract + canonical runner + N-API/MCP/SDK surfaces | ✅ merged |
+| PR1c | Cross-backend convergence test | ✅ merged |
+| PR2.0 | `cortex_memories` storage layer | ✅ merged |
+| PR2 | Memory consumers (N-API + MCP + auto-write) | ✅ merged |
+| PR3 | Memory-aware `PlanningView` (deterministic selector) | ✅ merged |
+| **WK4** | **`CortexMemoryStore` trait + open-once-per-run** | 📝 PR'd (#30) — gates green, +3 tests |
+| **WK1** | **FTS5 keyword recall (schema v3) + planning_view pre-filter** | 📝 PR'd (#31) — gates green, +8 tests |
+| **WK5** | **Stabilize 8 pre-existing flaky tests** | 📝 PR'd (#32) — gates green, both flakes verified fixed locally |
+| **WK3 / PR5** | **Migrate `langgraph/tools.ts` see-tool to `PlanningView`** | 📝 PR'd (#33) — gates green, +4 tests, backward-compat preserved (legacy fallback) |
+| **Plan reframe** | Tiered PR4 + status snapshot doc | 📝 PR'd (#34) |
+| **Tier A1** | Populate `PlanningView.knowledge` from `knowledge_fts` | 📝 PR'd (#35) — gates green, +8 tests, separate `KnowledgeStore` trait |
+| **WK2** | Vector embedding infrastructure (Embedder trait + storage search + selector plumbing) | 📝 PR'd (#36) — gates green, +14 tests; un-deferred 2026-05-07 as infrastructure-only (no bundled embedder); subsumes B2 |
+| **Tier A2** | Populate `PlanningView.recent_events` from cortex `observations` (priority + recency ordered, workflow-scoped) | 📝 PR'd — gates green, +7 tests, separate `RecentEventStore` trait |
+| **Tier A3** | Populate `PlanningView.blockers` + `anomalies` from cortex `MentalModel.anomaly_queue` + `freshness` (Dialog/AuthPrompt → blocker; HardStale → blocker; SoftStale → anomaly) | 📝 PR'd — gates green, +9 tests, new `StepExecutor::cortex_anomalies()` + `cortex_freshness()` methods |
+| **Recall eval** | Memory-recall eval in `cel-eval` (`recall-eval` feature) — 5 scenarios × 2 modes, baseline numbers established | 📝 PR'd — gates green, +5 tests, scenarios + IR metrics module (precision@k / recall@k / MRR), runs in CI as a regression guard |
+| ⏳ **Decision** | Decide A4 / B1 / B3 / which embedder to bundle | next — based on baseline numbers below |
+| Recall eval | Memory-recall eval in cel-eval | pending — gates A4 + B1/B3 + which embedder to bundle |
+| Tier A4 | Memory enrichment background pass | pending — eval-gated |
+| Tier B1 / B3 | LLM-based selector / cross-workflow priors | pending — eval-gated |
+| ~~Tier B2~~ | ~~Vector embeddings~~ | retired — subsumed by WK2 above |
+| PR4 (umbrella) | Cognition/enricher work | 🔄 reframed into Tier A/B/C — see PR4 section below |
+
+The four post-PR3 weaknesses (WK1/WK3/WK4/WK5) cleared the items called out in the PR3 honest-assessment review. `CortexMemoryStore` (WK4) is the substitution seam any future cognition runtime would have introduced; FTS5+decay (WK1) is the deterministic recall the runtime would have layered on top of; PlanningView via see-tool (WK3) is the contract every future enricher would write into. WK2 was originally deferred but later shipped as **infrastructure-only** vector embedding plumbing (trait + storage search + selector hook + null default), which subsumes the original Tier B2 entry. The remaining cognition work is now mostly "fill in the empty PlanningView fields" plus optional eval-gated upgrades — a much narrower surface than the original "cel-cognition crate" framing.
 
 ---
 
@@ -654,68 +691,165 @@ Ships:
 - Fallback behavior.
 - Tests for relevant/irrelevant memory selection.
 
-### PR 4: Cognition/Enricher Runtime
+### PR 4: Cognition / Enricher Work — Reframed (2026-05-07)
 
-Goal: make cognition a real support layer for context and memory enrichment, not a nice-to-have and not a planner.
+**Status: scope re-tiered after WK1/WK3/WK4/WK5 shipped.** The original PR4
+framing — "build the `cel-cognition` crate, add an enricher trait + runtime,
+ship two concrete enrichers" — was right in spirit but too monolithic.
+Three of the architectural pieces it would have introduced are now done:
+the substitution seam (`CortexMemoryStore` trait, WK4), the deterministic
+recall layer (FTS5 + decay, WK1), and the see-tool contract (PlanningView
+via WK3 / PR5). What's left splits cleanly along an eval-gated boundary.
 
-Ships:
+**Architectural anchor: cognition lives in the Cortex column, not the
+agent column.** `cel-cognition` (if/when it exists) is part of the
+in-house Cortex layer that *every* main agent (LangGraph, Mastra, Codex,
+Claude Code, GPT, Gemini, n8n) consumes via `PlanningView`. It is **not
+a planner.** It does not own goal interpretation, decide_next, or user
+interaction. Those stay with the pluggable agent runtime per CLAUDE.md.
 
-- `cel-cognition` crate.
-- Enricher trait/contract with typed input/output.
-- Runtime support for lifecycle, budgets, fallback, caching, and telemetry.
-- At least two concrete enrichers so the crate is justified.
-- Likely first enrichers: `memory_tagger`, `summarizer`, or `stale_detector`.
-- Integration with `PlanningView` as an enrichment source, not a planning owner.
+```text
+Main Agent (pluggable: LangGraph, Mastra, Codex, ...)
+  Owns: interaction, goal, planning, reflection
+        |
+        | consumes PlanningView; calls cel-cortex via N-API / MCP
+        v
+Cortex (in-house, single canonical impl)
+  Owns: perception, context fusion, memory, PlanningView builder
+  This column is where cognition / enricher work lives.
+        |
+        v
+Adapters (pluggable per app)
+```
 
-Does not ship:
+Ship in tiers. Tier A first; Tiers B and C only after measurement
+justifies them.
+
+#### Tier A — Cortex-side gaps with clear value (build now)
+
+These items fill PlanningView fields that exist in the contract but are
+currently always empty. They do NOT require a new crate; each lands as
+a small focused PR in `cel-cortex` (same shape as the WK PRs).
+
+- **A1 — Populate `PlanningView.knowledge`** from the existing
+  `knowledge_fts` FTS5 store (`cel-store::memory`). Same goal-keyword
+  query the WK1 selector uses. Currently always `[]` — wiring is the
+  whole change. Small PR, lives in cel-cortex/planning_view.
+
+- **A2 — Populate `PlanningView.recent_events`** from cortex
+  observations + the existing anomaly queue. Currently `[]`.
+
+- **A3 — Populate `PlanningView.blockers` + `anomalies`** from the
+  anomaly detector + freshness assessment already running in cel-cortex.
+  Currently `[]`.
+
+- **A4 — Memory enrichment background pass.** Auto-generate tags,
+  upgrade summaries, link evidence across memories at write time (not
+  per turn). The `tags` column on `cortex_memories` is empty today.
+  Mid-size PR; needs a wired `cel-llm` provider; gated by the recall
+  eval (does enrichment actually improve hydration quality?).
+
+#### Tier B — Eval-gated upgrades (don't build until measurement justifies)
+
+Build a memory-recall eval first (lives in `cel-eval`): seed a workflow
+with N memories spanning relevant + irrelevant + adjacent topics, run
+`select_memories` against a fixed set of goals, score the hydrated
+selection against a hand-labeled gold set. Then decide:
+
+- **B1 — LLM-based memory selector.** Re-rank WK1's FTS5+decay
+  candidates via an LLM call. Cost: 200–1000 ms + tokens per turn.
+  Justified only if the deterministic top-N misses memories the eval
+  marks as relevant. Slots in via a new `MemorySelector` trait;
+  deterministic path stays as the default and the fallback.
+
+- ~~**B2 — Vector embeddings (semantic recall).**~~ **Retired 2026-05-07.**
+  Subsumed by the un-deferred WK2 (which ships the *infrastructure* —
+  trait + storage path + selector plumbing — without committing to a
+  specific embedder). What remains here is the choice of which
+  embedder to wire by default (cel-llm provider call per insert vs
+  local ONNX/candle model ~50 MB binary). That choice is now a
+  product/deployment decision rather than a build decision, and stays
+  eval-gated: bundle a default embedder only if the recall eval shows
+  semantic recall is doing real work over FTS5.
+
+- **B3 — Cross-workflow priors.** Let the selector look at memories
+  from "similar" workflows (similarity defined by some signal — app
+  overlap, goal-text overlap, etc.). Privacy decision required first
+  — current strict workflow-scoping is a deliberate default.
+
+#### Tier C — Already covered or won't move the needle (do not build)
+
+- **Selector trait abstraction** — done as `CortexMemoryStore` in WK4.
+- **PlanningView contract** — done in PR1.
+- **Open-once handle** — done in WK4.
+- **Caching layer in front of SQLite** — rusqlite already caches
+  prepared statements; reads are µs-scale post-WK4. Complexity beats
+  benefit.
+- **A new `cel-cognition` crate as the entry point.** Premature.
+  Tier A lives fine in `cel-cortex`. If Tier B (especially B1+B2) lands
+  AND Tier A4 enrichment grows non-trivially, *then* spinning out
+  `cel-cognition` makes sense as a home for the cross-cutting stuff.
+  Until then, a dedicated crate is overhead without payoff.
+
+#### Does not ship under PR4 (any tier)
 
 - A mandatory planner.
-- Retry/branching/checkpoint policy.
+- Retry / branching / checkpoint policy.
 - `goal_decomposer` as core Cortex behavior.
 - Hidden adapter-owned planners.
+- Anything that promotes one main-agent runtime above the others.
 
-### PR 5: Migrate `langgraph/tools.ts` to PlanningView
+#### Sequencing recommendation
 
-Goal: finish the planner-fragmentation cleanup by routing the LangGraph
-`see` tool through the same cortex `PlanningView` the canonical Rust
-runner uses. Deferred from PR1c after a first cut hit a regression in
-`react-agent.test.ts` (the test's mocked `buildPlanningView` returned
-an empty view, which broke `act()`'s indexed-target resolution and
-caused the agent loop to time out).
+1. A1 → A2 → A3 (small, additive, fill empty fields)
+2. Memory-recall eval in `cel-eval`
+3. A4 (enrichment) once eval baseline exists
+4. Re-evaluate B1 / B2 / B3 against eval data
+5. Only then decide whether `cel-cognition` as a crate is worth its weight
 
-Ships:
+### PR 5: Migrate `langgraph/tools.ts` to PlanningView — shipped as WK3 (#33)
 
-- `langgraph/tools.ts`: `see` tool calls `driver.buildPlanningView` and
-  renders the result (replacing `compressContext` +
-  `serializeContextForLLM` on this path).
-- `renderPlanningView()` helper that produces `{ text, indexMap,
-  elementCount }` from a `PlanningView`, preserving the LLM-facing
-  numeric-index pattern act() relies on.
-- Test fixtures (`react-agent.test.ts`, `graph.test.ts`) updated so
-  their mocked `buildPlanningView` mirrors the perception's elements
-  into the view — this is what the original PR1c attempt missed.
-- `compressContext` / `serializeContextForLLM` may be marked
-  deprecated in `agent/src/index.ts` once tools.ts no longer uses them.
-  External callers retain access for one release cycle.
+**Status: shipped 2026-05-07** (queued for merge — see Status table at top
+of file for full list of pending PRs).
 
-Does not ship:
+Routed the LangGraph `see` tool through `driver.buildPlanningView`. The
+deferral risk that originally tabled this work — the `react-agent.test.ts`
+regression noted in PR1c — turned out to be a separate environment-
+dependent issue (vitest + Claude CLI subprocess race), not a contract
+mismatch. WK5 fixed that root cause; WK3 then landed cleanly with a
+fall-back-on-failure design rather than a hard dependency on
+`buildPlanningView`.
 
-- Any new MCP modes.
-- Any change to the canonical Rust runner or its tests.
+Shipped:
 
-Why deferred: PR1b's main planner path (`CelLlmPlanner`) already
-converges on the canonical Rust planner via N-API (PR1c convergence
-test proves it). Migrating the LangGraph **tool** surface is a
-correctness improvement, not a blocker — until the regression is
-fully understood, leaving `tools.ts` on the legacy compression path is
-safer than racing a half-fixed migration.
+- `langgraph/tools.ts`: `see` tool prefers `driver.buildPlanningView`
+  when both `options.goal` and `options.driver.buildPlanningView` are
+  provided. Falls back to the legacy `compressContext` +
+  `serializeContextForLLM` path otherwise (no breaking change for
+  callers that haven't migrated their drivers).
+- `renderPlanningView()` helper produces `{ text, indexMap,
+  elementCount }` from a `PlanningView`, preserving the numeric-index
+  pattern `act()` relies on.
+- New PlanningView-only fields surfaced to the planner:
+  `selection_rationale`, `omitted_counts`, and a compact `memories`
+  list (id / kind / summary).
+- Builder failures (`buildPlanningView` throws) `console.warn` and fall
+  back to the legacy path — never black-hole the see() call.
+- 4 new tests in `agent/src/langgraph/tools.test.ts` covering both the
+  new path and all three fallback conditions.
 
-Acceptance:
+Did not ship (intentional):
 
-- `react-agent.test.ts` passes alongside the migration (i.e. fix the
-  test or the interaction the test caught).
-- `pnpm --filter @cellar/agent test` green end-to-end (no excluded
-  files).
+- Hard removal of the legacy compress-context path. Kept as the
+  fallback for drivers that don't implement `buildPlanningView`.
+- `react-agent.test.ts` rewrite. The existing test continues to exercise
+  the legacy path (its driver mock has no `buildPlanningView`); the new
+  path is covered by `tools.test.ts` instead. Backward-compat proof.
+
+Acceptance (met):
+
+- `pnpm test`: 330 passed (was 326 — +4 new tests).
+- `pnpm lint` (tsc --noEmit) clean.
 - Cross-backend convergence test still passes.
 
 ---
@@ -760,11 +894,12 @@ Goal decomposition belongs primarily to agents. It can exist as an optional help
 |---|---|
 | Should `enable_cognition` default to true? | No for the first slice. Make planning view explicit/on-demand. Built-in runners can request it by default. |
 | Should memory be enabled by default? | Keep safe v1 default explicit/product-configured. Storage exists, but writes should be intentional. |
-| Should selection use an LLM immediately? | No. Start deterministic, then add optional LLM selection after the shared view is stable. |
-| Should `cel-cognition` be created immediately? | No. Start with `PlanningView`; create `cel-cognition` in PR4 with concrete enrichers and a strict non-planning boundary. |
-| Should adapters register sub-agents? | Not initially. Let adapters expose facts/capabilities first; PR4 can add scoped adapter context enrichers if needed. |
+| Should selection use an LLM immediately? | **No (confirmed by WK1).** FTS5 + decay + quoted-phrase + kind-bias scoring covers the common case. LLM-based selection (PR4 Tier B1) requires eval data showing the deterministic path falls short. |
+| Should `cel-cognition` be created immediately? | **No (confirmed by post-WK reframe).** Tier A work (fill empty PlanningView fields, memory enrichment) lives fine in `cel-cortex`. A new crate becomes worth its weight only if Tier B (LLM selector + embeddings) and richer enrichment land — and only after a recall eval shows they're needed. Until then, no crate. |
+| Should adapters register sub-agents? | Not initially. Let adapters expose facts/capabilities first; revisit if Tier A4 (memory enrichment) shows an adapter-specific gap. |
 | Where should analytics live? | Raw transcripts/eval JSONL first; DuckDB can be a later offline analytics layer, not hot-path planning storage. |
 | Who owns `PlanningBudget` defaults? | `cel-cortex` provides sensible defaults (token/element/memory/adapter-fact ceilings). Each planner overrides per-call when it knows better — e.g. host with a 128K context can request a larger budget. Defaults must keep typical prompts under common LLM context windows. |
+| What gates Tier B (LLM selector / embeddings / cross-workflow)? | A memory-recall eval in `cel-eval`: seed a workflow with relevant + irrelevant + adjacent memories, score `select_memories` against a hand-labeled gold set. If the deterministic baseline scores well, Tier B is dead. If not, the eval shows WHICH part to invest in. |
 
 ---
 
@@ -772,29 +907,84 @@ Goal decomposition belongs primarily to agents. It can exist as an optional help
 
 For the trimmed plan to be considered successful:
 
-- [ ] Agents can request raw context or selected planning context explicitly.
-- [ ] PR1a proves `PlanningView` through `cel-cortex` and the canonical Rust runner.
-- [ ] PR1b migrates direct N-API, LangGraph, and MCP/SDK surfaces to the same `PlanningView` builder.
-- [ ] Typical planning prompts stay under the configured budget.
-- [ ] Relevant elements, stateful anchors, adapter facts, blockers, and evidence refs survive selection.
-- [ ] Persistent memories can be stored without being automatically injected into prompts.
-- [ ] Memory selection is budgeted and rationale-backed before it reaches an LLM prompt.
-- [ ] Evals verify the context contract across more than one agent backend.
-- [ ] PR4 introduces `cel-cognition` as a context/memory enrichment runtime with concrete enrichers, not as a planner.
-- [ ] Docs clearly state that agents own planning and Cortex owns context/memory/execution support.
+- [x] Agents can request raw context or selected planning context explicitly. *(PR1a)*
+- [x] PR1a proves `PlanningView` through `cel-cortex` and the canonical Rust runner.
+- [x] PR1b migrates direct N-API, LangGraph, and MCP/SDK surfaces to the same `PlanningView` builder.
+- [x] Typical planning prompts stay under the configured budget. *(PR1a — `PlanningBudget` enforced)*
+- [x] Relevant elements, stateful anchors, adapter facts, blockers, and evidence refs survive selection. *(elements + selection_rationale + omitted_counts shipped; **knowledge / recent_events / blockers / anomalies still always-empty — Tier A1/A2/A3 closes these**)*
+- [x] Persistent memories can be stored without being automatically injected into prompts. *(PR2 — opt-in via `RunLimits.workflow_id_for_memory` + `RunLimits.memory_db_path`)*
+- [x] Memory selection is budgeted and rationale-backed before it reaches an LLM prompt. *(PR3 + WK1)*
+- [x] Evals verify the context contract across more than one agent backend. *(PR1c convergence test)*
+- [ ] ~~PR4 introduces `cel-cognition` as a context/memory enrichment runtime with concrete enrichers, not as a planner.~~ **REFRAMED:** Tier A work (A1–A4) lives in `cel-cortex` directly; cel-cognition crate deferred until eval data justifies it. See PR4 section above.
+- [x] Docs clearly state that agents own planning and Cortex owns context/memory/execution support. *(this doc + CLAUDE.md)*
+
+New post-WK acceptance criteria:
+
+- [x] **Tier A1**: `PlanningView.knowledge` populated from `knowledge_fts` for goals with extractable keywords. *(PR'd #35; gates green)*
+- [x] **WK2 (subsumed B2)**: vector embedding infrastructure shipped without bundled embedder — `Embedder` trait, byte-ser, cosine helper, cortex selector cosine boost wired through `PlanningViewInputs.goal_embedding`. *(PR'd #36; gates green; the 5 WK2 selector tests include a sanity-verified strengthened test that fails when the cosine path is removed)*
+- [x] **Tier A2**: `PlanningView.recent_events` populated from cortex `observations` table, priority + recency ordered, workflow-scoped. Anomaly-queue surfacing moved to A3 (the anomaly queue is in cortex's MentalModel, not the store; A3 will surface it into both `anomalies` and `blockers` via the same selector pass). *(PR'd; gates green; 7 new tests; same `Mutex<CelStore>` handle satisfies the new `RecentEventStore` trait alongside `CortexMemoryStore` + `KnowledgeStore`)*
+- [x] **Tier A3**: `PlanningView.blockers` and `PlanningView.anomalies` populated from cortex `MentalModel.anomaly_queue` + `freshness` assessment. Mapping: every anomaly → `AnomalyRef`; `Dialog` / `AuthPrompt` ALSO → `Blocker`; `HardStale` → `Blocker`; `SoftStale` → `AnomalyRef`; `Fresh` → nothing. NOT budgeted (per the `OmittedCounts` docstring "first-class blocker that should not be lost to compression"). *(PR'd; gates green; 9 new tests covering each kind + combined; new `StepExecutor::cortex_anomalies()` + `cortex_freshness()` methods with empty defaults for test executors)*
+- [x] **Memory-recall eval** lives in `cel-eval` (`recall-eval` feature) and produces baseline scores for the WK1 deterministic selector and WK1+WK2-stub. *(PR'd; gates green; 5 hand-built scenarios spanning easy keyword match / distractor density / semantic alignment / kind bias / decay floor; `print_full_report` test pretty-prints the numbers via `--nocapture`)*
+
+### Baseline numbers (post-Path-B, 10 scenarios × 2 modes × 3 k values, captured 2026-05-07)
+
+The first eval (5 scenarios) was too easy — all hand-built memories shared keyword vocabulary with their goals, so WK1 aced everything and the WK2 stub had nothing to differentiate. **Path B** added 5 harder scenarios designed to actually break WK1 if the weakness exists; the data below is the result.
+
+#### k=1 (the strictest test — does the relevant memory rank #1?)
+
+| Scenario | Mode | P@1 | R@1 | MRR |
+|---|---|---|---|---|
+| easy_keyword_match | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+| distractor_density | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+| semantic_alignment | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+| kind_bias | wk1_only / wk1+wk2_stub | 1.00 | 0.50 | 1.00 |
+| decay_floor | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+| **pure_semantic_gap** | wk1_only / wk1+wk2_stub | **0.00** | **0.00** | **0.00** |
+| heavy_distractor_density | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+| quoted_phrase_precision | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+| long_tail_recall | wk1_only / wk1+wk2_stub | 1.00 | 1.00 | 1.00 |
+
+(P@k drops at k=5 on the multi-candidate scenarios, but only because the budget admits all candidates including distractors. MRR is the ranking-quality signal; P@k is the precision-at-budget signal.)
+
+**What this tells us:**
+
+1. **WK1 is robust on every keyword-tractable scenario** — 8 / 9 scenarios at MRR=1.0 across both modes. This includes the genuinely hard ones: bm25 correctly picks the right "submit X report" out of 5 dense distractors, the `+30` quoted-phrase boost works, the kind-bias multiplier puts Failure ahead of Outcome, and the long-tail finds 1 needle in 31 memories.
+
+2. **`pure_semantic_gap` is a confirmed WK1 failure**: 0 / 0 / 0 across all k. The relevant memory says "Uploaded the documents" with goal "file the receipts" — zero keyword overlap means zero recall. This is a real, reproducible weakness.
+
+3. **The stub embedder doesn't fix the semantic gap.** Same 0 / 0 / 0 in `wk1+wk2_stub` mode. The hash-bucketed stub has no semantic awareness; only a real embedder (cel-llm provider call or local ONNX) could catch this.
+
+4. **WK2 cosine boost adds zero measurable signal on every scenario.** Identical numbers in both modes everywhere. Confirms WK1 is doing the work; the stub embedder is genuinely too weak to differentiate.
+
+**Implication — sharpened by Path B data:**
+
+- **A4 (memory enrichment)**: still NOT justified. Richer summaries / tags don't help when the underlying issue is *vocabulary mismatch between memory and goal*, not summary quality.
+- **B1 (LLM-based selector)**: NOT justified by these scenarios. WK1 already ranks correctly when there's any keyword signal at all; an LLM selector would just re-rank what WK1 already gets right.
+- **B3 (cross-workflow priors)**: NOT justified yet. The pure_semantic_gap scenario is most realistic *across* workflows (where vocabulary varies more) — but we have no production data showing how often that pattern shows up.
+- **Bundle a default embedder**: **CONDITIONALLY justified.** If production data shows pure-semantic-gap-like cases happen with non-trivial frequency, a real embedder (cel-llm or local ONNX) shipping bundled would close the only confirmed gap. Without that production data, it's still speculative — but we now know exactly *what* a real embedder would buy us. The decision becomes "is fixing the semantic-gap case worth the binary / per-call cost?", which is a much sharper question than before.
+
+**Caveat — production realism:**
+
+In current cellar usage, memories are written at run-end by `canonical_runner` using a summary derived from the *goal text* itself ("Completed: submit invoice in Concur"). That construction guarantees keyword overlap on future runs of the same goal in the same workflow — so within-workflow recall will look much more like `easy_keyword_match` than `pure_semantic_gap`. The gap matters most for **cross-workflow** retrieval (memories from workflow A surfacing for goal in workflow B), which is exactly what B3 covers and what we're not building yet.
+
+**Net:** the cognition layer is in good shape. WK1+WK2-seam is sufficient for everything we can currently measure. The eval is now a *useful production tool* — when we ship and accumulate real memories, we can grade them against this scenario suite and see whether pure-semantic-gap patterns show up enough to justify B2/B3 / A4.
+- [ ] **Tier A4**: Memory enrichment background pass — only ships if a tightened recall eval shows enrichment improves hydration quality.
+- [ ] **Tier B1 / B3**: LLM-based selector / cross-workflow priors — same gate. With current baselines, both stay deferred.
+- [ ] **Tier A4** (memory enrichment) ships only if the recall eval shows enrichment improves hydration quality.
+- [ ] **Tier B** (LLM selector / embeddings / cross-workflow) ships only if the recall eval shows the deterministic path leaves real recall on the table.
 
 ---
 
 ## What Changed From The Original Cognition Proposal
 
-| Original direction | Trimmed direction |
-|---|---|
-| New `cel-cognition` crate first | Shared `PlanningView` first; `cel-cognition` planned for PR4 |
-| Broad sub-agent framework | Context/memory enrichment runtime with concrete enrichers and no planning ownership |
-| Cortex framed as "the mind" | Cortex framed as grounding substrate for pluggable agents |
-| `goal_decomposer` in rollout | Deferred to agent/reference helper territory |
-| LLM selector in first PR | Deterministic selector first; LLM selector optional later |
-| Persistent memory plus framework plus MCP plus telemetry in one PR | Split into PR1a/PR1b PlanningView, memory store, memory-aware selection, cognition runtime |
-| `cel_perceive read` enriched by default | Raw read remains raw; planning view is explicit |
+| Original direction | Trimmed direction (PR1–PR3 era) | Post-WK reframe (2026-05-07) |
+|---|---|---|
+| New `cel-cognition` crate first | Shared `PlanningView` first; `cel-cognition` planned for PR4 | Tier A work in `cel-cortex` directly; cel-cognition crate deferred indefinitely (eval-gated) |
+| Broad sub-agent framework | Context/memory enrichment runtime with concrete enrichers, no planning ownership | Same — but no separate runtime. Enrichers (Tier A4) live in cel-cortex / cel-llm |
+| Cortex framed as "the mind" | Cortex framed as grounding substrate for pluggable agents | Same — reinforced. Cognition is part of the Cortex column, not the agent column |
+| `goal_decomposer` in rollout | Deferred to agent/reference helper territory | Same — confirmed not Cortex's job |
+| LLM selector in first PR | Deterministic selector first; LLM selector optional later | WK1 ships deterministic FTS5+decay; LLM selector (B1) is now eval-gated, not scheduled |
+| Persistent memory plus framework plus MCP plus telemetry in one PR | Split into PR1a/PR1b PlanningView, memory store, memory-aware selection, cognition runtime | Further split: PR1–PR3 + WK1/WK3/WK4/WK5 done; cognition becomes Tier A (small PRs) + Tier B (eval-gated) |
+| `cel_perceive read` enriched by default | Raw read remains raw; planning view is explicit | Same |
 
-The core insight remains: persistent memory matters, but selection matters more at prompt time. The cleanup is making that selection a shared CEL/Cortex service instead of planner-specific prompt glue.
+The core insight remains: persistent memory matters, but selection matters more at prompt time. The post-WK reframe sharpens it: **selection is a Cortex service, not a runtime.** Cognition work lives where the memory and context live. The four weakness PRs proved we can deliver real cognition wins (FTS5 ranking, store handle abstraction, see-tool migration) without spinning up a new crate. PR4's "cel-cognition crate" framing was right that more work is needed; it was wrong that the work needs its own crate to be coherent. We'll create that crate when (and only when) the eval data shows the work outgrew its current home.

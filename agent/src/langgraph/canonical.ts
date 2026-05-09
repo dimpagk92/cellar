@@ -161,6 +161,16 @@ export interface PlanningBudget {
   max_elements: number;
   max_memories: number;
   max_adapter_facts: number;
+  /**
+   * Tier A1: max KnowledgeRef entries (FTS5-ranked workflow knowledge).
+   * Optional for backward compat with v1 callers — Rust side defaults to 8.
+   */
+  max_knowledge?: number;
+  /**
+   * Tier A2: max EventRef entries (cortex observations, priority + recency).
+   * Optional for backward compat — Rust side defaults to 10.
+   */
+  max_recent_events?: number;
 }
 
 export interface PlanningScreen {

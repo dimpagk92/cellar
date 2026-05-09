@@ -89,6 +89,12 @@ pub struct CortexMemory {
     pub created_at: i64,
     /// Unix epoch seconds when the memory was last hydrated by the selector.
     pub last_accessed_at: i64,
+    /// WK2: raw embedding bytes (little-endian f32 vector) when the
+    /// runner had an `Embedder` wired at write time. `None` when no
+    /// embedder was configured. Selector uses this for cosine boosting
+    /// during scoring; pre-WK2 readers ignore the field via `serde(default)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<u8>>,
 }
 
 /// Insert payload — caller-supplied fields. Server fills `id`,
@@ -135,6 +141,72 @@ pub fn migrate_cortex_memories(conn: &Connection) -> Result<(), StoreError> {
 
         CREATE INDEX IF NOT EXISTS idx_cortex_memories_age
             ON cortex_memories(created_at);
+        ",
+    )?;
+    Ok(())
+}
+
+/// WK1: FTS5 full-text index over `cortex_memories`.
+///
+/// Idempotent, separate migration step (schema v3) so existing v2 stores
+/// pick it up on next open without re-creating the base table.
+///
+/// External-content table pattern (`content=cortex_memories,
+/// content_rowid=id`) — the FTS5 table doesn't store the indexed columns
+/// itself, just references rowids in the base table. Triggers keep the
+/// index in sync; the initial backfill `INSERT...SELECT` populates from
+/// existing rows so v2-era memories become searchable on first v3 open.
+///
+/// Three columns indexed: `summary`, `content` (the JSON payload as
+/// text — FTS5 tokenises whitespace + punctuation, which works fine for
+/// the keyword matches the planner cares about), and `tags`. We do NOT
+/// index `workflow_id` — workflow scoping happens via a JOIN-then-WHERE
+/// pattern rather than FTS5 token filtering, mirroring how
+/// `memory.rs::knowledge_fts` filters by `workflow_scope`.
+pub fn migrate_cortex_memories_fts(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS cortex_memories_fts USING fts5(
+            summary,
+            content,
+            tags,
+            content=cortex_memories,
+            content_rowid=id
+        );
+
+        CREATE TRIGGER IF NOT EXISTS cortex_memories_fts_insert
+        AFTER INSERT ON cortex_memories BEGIN
+            INSERT INTO cortex_memories_fts(rowid, summary, content, tags)
+            VALUES (new.id, COALESCE(new.summary, ''), new.content,
+                    COALESCE(new.tags, ''));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS cortex_memories_fts_delete
+        AFTER DELETE ON cortex_memories BEGIN
+            INSERT INTO cortex_memories_fts(cortex_memories_fts, rowid,
+                                             summary, content, tags)
+            VALUES ('delete', old.id, COALESCE(old.summary, ''),
+                    old.content, COALESCE(old.tags, ''));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS cortex_memories_fts_update
+        AFTER UPDATE ON cortex_memories BEGIN
+            INSERT INTO cortex_memories_fts(cortex_memories_fts, rowid,
+                                             summary, content, tags)
+            VALUES ('delete', old.id, COALESCE(old.summary, ''),
+                    old.content, COALESCE(old.tags, ''));
+            INSERT INTO cortex_memories_fts(rowid, summary, content, tags)
+            VALUES (new.id, COALESCE(new.summary, ''), new.content,
+                    COALESCE(new.tags, ''));
+        END;
+
+        -- Backfill from existing v2-era rows. INSERT OR IGNORE because a
+        -- repeat run (or a base-table row whose insert trigger already
+        -- fired) would otherwise double-index. With external-content
+        -- tables, FTS5 keys on rowid; duplicates are ignored.
+        INSERT OR IGNORE INTO cortex_memories_fts(rowid, summary, content, tags)
+        SELECT id, COALESCE(summary, ''), content, COALESCE(tags, '')
+        FROM cortex_memories;
         ",
     )?;
     Ok(())
@@ -193,7 +265,7 @@ pub fn list_memories(
         let placeholders = ks.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
         let sql = format!(
             "SELECT id, workflow_id, kind, content, summary, tags, source_ref,
-                    created_at, last_accessed_at
+                    created_at, last_accessed_at, embedding
              FROM cortex_memories
              WHERE workflow_id = ?1 AND kind IN ({placeholders})
              ORDER BY created_at DESC
@@ -216,7 +288,7 @@ pub fn list_memories(
     } else {
         let mut stmt = conn.prepare(
             "SELECT id, workflow_id, kind, content, summary, tags, source_ref,
-                    created_at, last_accessed_at
+                    created_at, last_accessed_at, embedding
              FROM cortex_memories
              WHERE workflow_id = ?1
              ORDER BY created_at DESC
@@ -244,7 +316,7 @@ pub fn touch_memory(
     )?;
     let mut stmt = conn.prepare(
         "SELECT id, workflow_id, kind, content, summary, tags, source_ref,
-                created_at, last_accessed_at
+                created_at, last_accessed_at, embedding
          FROM cortex_memories
          WHERE id = ?1",
     )?;
@@ -252,33 +324,79 @@ pub fn touch_memory(
     Ok(row)
 }
 
-/// Free-text search by `summary` (case-insensitive substring). Sufficient
-/// for v1; PR3 may upgrade to FTS5 if recall quality demands it. Returns
-/// the most-recent matches first, capped at `limit`.
+/// WK1: FTS5-ranked search across summary + content + tags, scoped to
+/// `workflow_id`, ordered by SQLite's bm25 (best match first), capped at
+/// `limit`.
+///
+/// `query` is a free-form FTS5 MATCH expression — for goal-keyword
+/// queries the planner-side helper [`safe_fts5_query_from_keywords`]
+/// builds a safe space-joined token list with each token wrapped in
+/// quotes (FTS5 implicit-AND across phrases). FTS5 syntax errors propagate
+/// as `StoreError::Database` so the selector can fall back to a plain
+/// recency list when the query is malformed.
+///
+/// The single-arg LIKE-substring `search_memory` (pre-WK1) is replaced —
+/// callers via N-API/MCP `cel_think search_memory` get the bm25-ranked
+/// result without API change.
 pub fn search_memory(
     conn: &Connection,
     workflow_id: &str,
     query: &str,
     limit: usize,
 ) -> Result<Vec<CortexMemory>, StoreError> {
-    let pattern = format!("%{}%", query.trim());
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        // FTS5 MATCH with empty string errors with "fts5: syntax error
+        // near ''" — short-circuit to a clear empty result instead of
+        // surfacing a confusing parser error.
+        return Ok(Vec::new());
+    }
     let limit_i64 = limit as i64;
     let mut stmt = conn.prepare(
-        "SELECT id, workflow_id, kind, content, summary, tags, source_ref,
-                created_at, last_accessed_at
-         FROM cortex_memories
-         WHERE workflow_id = ?1
-           AND (summary LIKE ?2 COLLATE NOCASE
-                OR content LIKE ?2 COLLATE NOCASE)
-         ORDER BY created_at DESC
+        "SELECT cm.id, cm.workflow_id, cm.kind, cm.content, cm.summary,
+                cm.tags, cm.source_ref, cm.created_at, cm.last_accessed_at,
+                cm.embedding
+         FROM cortex_memories_fts fts
+         JOIN cortex_memories cm ON fts.rowid = cm.id
+         WHERE cortex_memories_fts MATCH ?1
+           AND cm.workflow_id = ?2
+         ORDER BY rank
          LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![workflow_id, pattern, limit_i64], row_to_memory)?;
+    let rows = stmt.query_map(params![trimmed, workflow_id, limit_i64], row_to_memory)?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(StoreError::from)?
         .into_iter()
         .map(Ok)
         .collect()
+}
+
+/// WK1: build a FTS5-safe MATCH expression from keyword tokens.
+///
+/// Each token is wrapped in double quotes so FTS5 treats it as a literal
+/// phrase (skipping its operator parser — bare tokens that look like
+/// `OR`/`AND`/`NOT` would otherwise change query semantics; quoted
+/// phrases bypass that). Tokens with embedded quotes are skipped (FTS5
+/// has no escape mechanism inside double-quoted phrases).
+///
+/// Returns `None` when there are no usable tokens — caller should fall
+/// back to a plain recency list rather than running an FTS5 search with
+/// nothing to match.
+pub fn safe_fts5_query_from_keywords(keywords: &[String]) -> Option<String> {
+    let parts: Vec<String> = keywords
+        .iter()
+        .filter(|k| !k.is_empty() && !k.contains('"'))
+        .map(|k| format!("\"{k}\""))
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        // Space-separated tokens are FTS5's implicit AND. We want OR
+        // for keyword recall — the planner's per-token signal is "any
+        // of these is a hint", not "all of these must appear". Use
+        // explicit OR.
+        Some(parts.join(" OR "))
+    }
 }
 
 /// Prune memories whose decay score (computed at `now_secs` against
@@ -326,6 +444,111 @@ pub fn prune_memories(
         deleted += n;
     }
     Ok(deleted)
+}
+
+// ─── Store trait ─────────────────────────────────────────────────────────────
+
+/// The minimal contract `cel-cortex` (and any future cognition runtime)
+/// needs from a cortex-memory backing store: list workflow-scoped memories
+/// for hydration, insert a new memory for the auto-write path.
+///
+/// Introduced in WK4 to replace the path-based API on `PlanningViewInputs`
+/// (which forced consumers to re-open SQLite on every planner turn).
+/// `cel_store::CelStore` is the production impl; tests can swap in a
+/// trivial in-memory impl when they want to exercise selector logic without
+/// touching disk; a future cel-cognition runtime can wrap an LRU + remote
+/// store behind the same shape.
+///
+/// All methods take `&self` so callers can share `&CelStore` (or
+/// `Arc<CelStore>`) across the lifetime of a run. Errors are surfaced as
+/// `StoreError` — callers (selector, auto-writer) are expected to log and
+/// fall back to "no memory" rather than fail the run.
+/// Tier A2 (post-WK reframe): the read surface `cel-cortex::planning_view`
+/// uses to populate `PlanningView.recent_events` from cortex
+/// `observations`.
+///
+/// Separate trait from `CortexMemoryStore` and `KnowledgeStore`
+/// because observations are conceptually different (compressed
+/// run-history summaries; ordered by priority then recency, not
+/// keyword-relevance) and may want a different impl strategy
+/// later (e.g. cross-workflow dashboards). Keeping the traits
+/// distinct preserves substitution flexibility.
+///
+/// Production impl: `Mutex<CelStore>` (forwards to the existing
+/// `CelStore::get_observations`). `None` in `PlanningViewInputs` skips
+/// the hydration entirely — pre-A2 behaviour for callers that haven't
+/// opted in.
+pub trait RecentEventStore: Send + Sync {
+    /// Pull active observations for the workflow, ordered by priority
+    /// (high → medium → low) then by recency, capped at `limit`.
+    /// Mirrors the existing `CelStore::get_observations` shape.
+    fn recent_events_for_workflow(
+        &self,
+        workflow_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::Observation>, StoreError>;
+}
+
+/// Tier A1 (post-WK reframe): the read surface `cel-cortex::planning_view`
+/// uses to populate `PlanningView.knowledge` from `knowledge_fts`.
+///
+/// Separate trait from `CortexMemoryStore` because the underlying tables,
+/// schema, and use case are different — memories are workflow-scoped
+/// run-outcome priors; knowledge facts are durable cross-session
+/// references the user / tooling has explicitly stored. Keeping them as
+/// distinct traits lets a future cognition runtime substitute one
+/// without forcing a re-impl of the other.
+///
+/// Production impl: `Mutex<CelStore>` (in `schema.rs`). Forwarded
+/// through `Arc<T>` via the same blanket impl as `CortexMemoryStore`.
+pub trait KnowledgeStore: Send + Sync {
+    /// Search the FTS5 knowledge index, scoped to a workflow (or NULL =
+    /// global facts). Returns bm25-ranked best-match-first, capped at
+    /// `limit`. Empty / whitespace-only query returns `Ok(empty)` —
+    /// callers don't have to pre-validate.
+    fn search_knowledge_for_workflow(
+        &self,
+        query: &str,
+        workflow_scope: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::ScoredKnowledge>, StoreError>;
+}
+
+pub trait CortexMemoryStore: Send + Sync {
+    /// List memories for `workflow_id`, most-recent-first, capped at
+    /// `limit`. Optionally filter by kind (any kind matches when `None`).
+    /// Mirrors the existing `CelStore::list_cortex_memories` shape.
+    fn list_for_workflow(
+        &self,
+        workflow_id: &str,
+        kinds: Option<&[MemoryKind]>,
+        limit: usize,
+    ) -> Result<Vec<CortexMemory>, StoreError>;
+
+    /// Insert a new memory. Returns the new row id. Mirrors the existing
+    /// `CelStore::insert_cortex_memory` shape.
+    fn insert_memory(&self, memory: &NewCortexMemory) -> Result<i64, StoreError>;
+
+    /// WK1: FTS5-ranked search across summary + content + tags.
+    ///
+    /// `query` is a free-form FTS5 MATCH expression. Returns memories
+    /// matching `query` within `workflow_id`, ordered by SQLite's bm25
+    /// (best match first), capped at `limit`. An empty / whitespace-only
+    /// `query` returns an empty Vec rather than surfacing FTS5's parser
+    /// error.
+    ///
+    /// Default impl forwards to `search_memory` so existing impls don't
+    /// have to add anything; the production `Mutex<CelStore>` impl
+    /// overrides it directly for clarity. Selector callers (cortex
+    /// planning_view) prefer this over `list_for_workflow` when the goal
+    /// has extractable keywords — relevance pre-filter beats the 200-
+    /// most-recent fallback at distinguishing signal from history bulk.
+    fn search_for_workflow_ranked(
+        &self,
+        workflow_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<CortexMemory>, StoreError>;
 }
 
 // ─── Decay ───────────────────────────────────────────────────────────────────
@@ -384,6 +607,10 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<CortexMemory> {
     let source_ref: Option<String> = row.get(6)?;
     let created_at: i64 = row.get(7)?;
     let last_accessed_at: i64 = row.get(8)?;
+    // WK2: embedding column. NULL = not embedded (no embedder was wired
+    // at write time, or the embedder failed). Selector treats None as
+    // "skip this candidate's cosine boost".
+    let embedding: Option<Vec<u8>> = row.get(9)?;
     Ok(CortexMemory {
         id,
         workflow_id,
@@ -394,6 +621,7 @@ fn row_to_memory(row: &Row<'_>) -> rusqlite::Result<CortexMemory> {
         source_ref,
         created_at,
         last_accessed_at,
+        embedding,
     })
 }
 
@@ -406,7 +634,10 @@ mod tests {
 
     fn open_test_db() -> Connection {
         let conn = Connection::open_in_memory().expect("open");
-        migrate_cortex_memories(&conn).expect("migrate");
+        migrate_cortex_memories(&conn).expect("migrate v2");
+        // WK1: also create the FTS5 index so search_memory tests work
+        // against the same shape `CelStore::open` produces in production.
+        migrate_cortex_memories_fts(&conn).expect("migrate v3 (fts5)");
         conn
     }
 
@@ -567,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn search_finds_by_summary_substring_case_insensitive() {
+    fn wk1_search_finds_by_token_match_via_fts5() {
         let conn = open_test_db();
         let now = 1_700_000_000;
         insert_memory(
@@ -598,10 +829,235 @@ mod tests {
             now,
         )
         .unwrap();
+        // Both memories contain the token "submit" (FTS5 is
+        // case-insensitive by default). Both hit.
         let hits = search_memory(&conn, "wf", "submit", 10).unwrap();
         assert_eq!(hits.len(), 2);
+        // Only the Concur memory contains "concur".
         let hits = search_memory(&conn, "wf", "concur", 10).unwrap();
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn wk1_search_returns_bm25_ranked_results_relevance_first() {
+        let conn = open_test_db();
+        let now = 1_700_000_000;
+        // Memory A: matches twice ("submit" appears in both summary and
+        // content) — should rank above the once-only match.
+        insert_memory(
+            &conn,
+            &NewCortexMemory {
+                workflow_id: "wf".into(),
+                kind: MemoryKind::Outcome,
+                content: serde_json::json!({"action": "submit invoice"}),
+                summary: Some("Submitted payroll via the submit button".into()),
+                tags: vec!["form".into()],
+                source_ref: None,
+                embedding: None,
+            },
+            now,
+        )
+        .unwrap();
+        // Memory B: matches once.
+        insert_memory(
+            &conn,
+            &NewCortexMemory {
+                workflow_id: "wf".into(),
+                kind: MemoryKind::Prior,
+                content: serde_json::json!({"note": "open the page"}),
+                summary: Some("clicked submit once on the form".into()),
+                tags: vec![],
+                source_ref: None,
+                embedding: None,
+            },
+            now,
+        )
+        .unwrap();
+        let hits = search_memory(&conn, "wf", "submit", 10).unwrap();
+        assert_eq!(hits.len(), 2, "both memories contain 'submit'");
+        // bm25 favours the higher term-frequency / shorter-doc match. The
+        // first hit's summary contains "submit" twice (Submitted +
+        // submit) — that's the higher-relevance one.
+        assert!(
+            hits[0]
+                .summary
+                .as_deref()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("submitted payroll"),
+            "expected denser-match memory first; got {:?}",
+            hits[0].summary
+        );
+    }
+
+    #[test]
+    fn wk1_search_returns_empty_for_no_match() {
+        let conn = open_test_db();
+        let now = 1_700_000_000;
+        insert_memory(
+            &conn,
+            &NewCortexMemory {
+                workflow_id: "wf".into(),
+                kind: MemoryKind::Outcome,
+                content: serde_json::json!({}),
+                summary: Some("clicked save on the invoice".into()),
+                tags: vec![],
+                source_ref: None,
+                embedding: None,
+            },
+            now,
+        )
+        .unwrap();
+        let hits = search_memory(&conn, "wf", "router", 10).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn wk1_search_empty_query_returns_empty_not_error() {
+        // Empty / whitespace-only queries must short-circuit to Ok(empty)
+        // rather than surface FTS5's "syntax error near ''" so callers
+        // can pass through user input without pre-validation.
+        let conn = open_test_db();
+        assert!(search_memory(&conn, "wf", "", 10).unwrap().is_empty());
+        assert!(search_memory(&conn, "wf", "   ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn wk1_search_scopes_to_workflow_id() {
+        let conn = open_test_db();
+        let now = 1_700_000_000;
+        for wf in ["wf-a", "wf-b"] {
+            insert_memory(
+                &conn,
+                &NewCortexMemory {
+                    workflow_id: wf.into(),
+                    kind: MemoryKind::Outcome,
+                    content: serde_json::json!({}),
+                    summary: Some(format!("submit thing in {wf}")),
+                    tags: vec![],
+                    source_ref: None,
+                    embedding: None,
+                },
+                now,
+            )
+            .unwrap();
+        }
+        let hits = search_memory(&conn, "wf-a", "submit", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].workflow_id, "wf-a");
+    }
+
+    #[test]
+    fn wk1_fts5_index_stays_in_sync_through_delete_and_update() {
+        let conn = open_test_db();
+        let now = 1_700_000_000;
+        let id = insert_memory(
+            &conn,
+            &NewCortexMemory {
+                workflow_id: "wf".into(),
+                kind: MemoryKind::Outcome,
+                content: serde_json::json!({}),
+                summary: Some("uniquetokenA in summary".into()),
+                tags: vec![],
+                source_ref: None,
+                embedding: None,
+            },
+            now,
+        )
+        .unwrap();
+        // Insert trigger: search finds it.
+        assert_eq!(
+            search_memory(&conn, "wf", "uniquetokenA", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Update via raw UPDATE (mirrors what an enricher might do —
+        // we don't ship an `update_memory` helper but the FTS5 trigger
+        // must still keep up).
+        conn.execute(
+            "UPDATE cortex_memories SET summary = ?1 WHERE id = ?2",
+            params!["uniquetokenB now in summary", id],
+        )
+        .unwrap();
+        // Update trigger fired: old token gone, new token present.
+        assert_eq!(
+            search_memory(&conn, "wf", "uniquetokenA", 10)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            search_memory(&conn, "wf", "uniquetokenB", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Delete trigger: row is removed from index.
+        conn.execute("DELETE FROM cortex_memories WHERE id = ?1", params![id])
+            .unwrap();
+        assert_eq!(
+            search_memory(&conn, "wf", "uniquetokenB", 10)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn wk1_fts5_backfills_existing_v2_rows_on_v3_open() {
+        // Simulate a v2-era store: create the connection, run only the
+        // v2 migration, insert a row, THEN run the v3 migration and
+        // verify the v2-era row is searchable.
+        let conn = Connection::open_in_memory().unwrap();
+        migrate_cortex_memories(&conn).unwrap();
+        insert_memory(
+            &conn,
+            &NewCortexMemory {
+                workflow_id: "wf".into(),
+                kind: MemoryKind::Outcome,
+                content: serde_json::json!({}),
+                summary: Some("preexisting v2 era memory about taxes".into()),
+                tags: vec![],
+                source_ref: None,
+                embedding: None,
+            },
+            1_700_000_000,
+        )
+        .unwrap();
+        // No FTS5 yet — search would fail. Now run v3 migration.
+        migrate_cortex_memories_fts(&conn).unwrap();
+        // Backfill ran during migration → search finds the v2-era row.
+        let hits = search_memory(&conn, "wf", "taxes", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0]
+            .summary
+            .as_deref()
+            .unwrap()
+            .contains("preexisting v2"));
+    }
+
+    #[test]
+    fn wk1_safe_fts5_query_quotes_each_token_and_drops_empties() {
+        // Empty or quote-bearing tokens are filtered; remaining tokens
+        // are joined with explicit OR (recall semantics).
+        assert_eq!(safe_fts5_query_from_keywords(&[]), None);
+        assert_eq!(
+            safe_fts5_query_from_keywords(&["".into(), "ok".into()]),
+            Some("\"ok\"".into())
+        );
+        assert_eq!(
+            safe_fts5_query_from_keywords(&["a".into(), "b".into(), "c".into()]),
+            Some("\"a\" OR \"b\" OR \"c\"".into())
+        );
+        // Token containing a double-quote is dropped (FTS5 phrases have
+        // no escape mechanism).
+        assert_eq!(
+            safe_fts5_query_from_keywords(&["nope\"oops".into(), "fine".into()]),
+            Some("\"fine\"".into())
+        );
     }
 
     #[test]

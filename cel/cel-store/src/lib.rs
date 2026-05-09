@@ -15,11 +15,13 @@ pub mod pgvector;
 mod schema;
 
 pub use cortex_memory::{
-    decay_score, insert_memory, list_memories, migrate_cortex_memories, now_unix_secs,
-    prune_memories, search_memory, touch_memory, CortexMemory, MemoryKind, NewCortexMemory,
-    DEFAULT_HALF_LIFE_DAYS,
+    decay_score, insert_memory, list_memories, migrate_cortex_memories,
+    migrate_cortex_memories_fts, now_unix_secs, prune_memories, safe_fts5_query_from_keywords,
+    search_memory, touch_memory, CortexMemory, CortexMemoryStore, KnowledgeStore, MemoryKind,
+    NewCortexMemory, RecentEventStore, DEFAULT_HALF_LIFE_DAYS,
 };
 pub use filesystem::FsStore;
+pub use memory::ScoredKnowledge;
 pub use memory::{EvictionConfig, EvictionResult, Observation, ObservationPriority, WorkingMemory};
 pub use schema::{CelStore, KnowledgeFact, RunRecord, StepRecord};
 

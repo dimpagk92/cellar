@@ -890,16 +890,20 @@ Goal decomposition belongs primarily to agents. It can exist as an optional help
 
 ## Open Decisions
 
-| Question | Current recommendation |
+| Question | Resolution |
 |---|---|
-| Should `enable_cognition` default to true? | No for the first slice. Make planning view explicit/on-demand. Built-in runners can request it by default. |
-| Should memory be enabled by default? | Keep safe v1 default explicit/product-configured. Storage exists, but writes should be intentional. |
-| Should selection use an LLM immediately? | **Build the seam now; the LLM-backed impl is opt-in.** B1 ships as a `MemorySelector` trait with WK1 as the always-safe fallback (mirroring WK2's embedder seam). Wiring the trait is unconditional; *bundling* a particular LLM impl is what the eval gates — not the seam itself. (Earlier "no" framing was over-conservative; reframed 2026-05-09.) |
-| Should `cel-cognition` be created immediately? | **No (confirmed by post-WK reframe).** Tier A work (fill empty PlanningView fields, memory enrichment) lives fine in `cel-cortex`. A new crate becomes worth its weight only if Tier B (LLM selector + embeddings) and richer enrichment land — and only after a recall eval shows they're needed. Until then, no crate. |
-| Should adapters register sub-agents? | Not initially. Let adapters expose facts/capabilities first; revisit if Tier A4 (memory enrichment) shows an adapter-specific gap. |
-| Where should analytics live? | Raw transcripts/eval JSONL first; DuckDB can be a later offline analytics layer, not hot-path planning storage. |
-| Who owns `PlanningBudget` defaults? | `cel-cortex` provides sensible defaults (token/element/memory/adapter-fact ceilings). Each planner overrides per-call when it knows better — e.g. host with a 128K context can request a larger budget. Defaults must keep typical prompts under common LLM context windows. |
-| What gates Tier B (LLM selector / embeddings / cross-workflow)? | A memory-recall eval in `cel-eval`: seed a workflow with relevant + irrelevant + adjacent memories, score `select_memories` against a hand-labeled gold set. If the deterministic baseline scores well, Tier B is dead. If not, the eval shows WHICH part to invest in. |
+| ~~Should `enable_cognition` default to true?~~ | ✅ **Resolved.** No — opt-in via `RunLimits.workflow_id_for_memory` + `memory_db_path`. Built-in runners can wire it; defaults stay explicit. |
+| ~~Should memory be enabled by default?~~ | ✅ **Resolved.** No — opt-in same as above. Privacy-safe default. |
+| ~~Should selection use an LLM immediately?~~ | ✅ **Resolved.** Build the seam, ship deterministic as fallback. B1's `MemorySelector` trait shipped with WK1 as always-safe fallback. *Bundling* a particular LLM impl is the deployment decision (still open — see Deployment Decisions below). |
+| ~~Should `cel-cognition` be created immediately?~~ | ✅ **Resolved.** No — and not deferred either, just **abandoned as an architecture choice.** The seams in `cel-llm` (`Embedder`, `MemoryEnricher`, `MemorySelector`) + `cel-cortex` (`build_planning_view`, selectors) + `cel-store` (`CortexMemoryStore`, `KnowledgeStore`, `RecentEventStore`) covered everything the crate was supposed to host, with no umbrella runtime needed. Future revisit only if traits + per-impl crates stop being enough. |
+| ~~Should adapters register sub-agents?~~ | ✅ **Resolved.** No. Adapters expose facts/capabilities; cortex is the orchestrator. Stays this way. |
+| ~~Where should analytics live?~~ | ✅ **Resolved.** Raw JSONL first (already present in `cel-eval/transcripts/`). DuckDB / OLAP layer is a future offline-analytics PR, not hot-path. Not a cognition-layer concern. |
+| ~~Who owns `PlanningBudget` defaults?~~ | ✅ **Resolved.** `cel-cortex` owns; planners override per-call via `PlanningViewInputs.budget`. Defaults sized to common LLM context windows. |
+| ~~What gates Tier B (LLM selector / embeddings / cross-workflow)?~~ | ✅ **Resolved by reframe.** The infrastructure is unconditional (B1 + WK2 seam shipped; B3 still gated on privacy decision). The recall eval in `cel-eval` produces baseline scores so deployment-time questions ("which embedder do we bundle?", "which selector LLM do we default to?") have data behind them. |
+| **B3: cross-workflow privacy boundary** | 🟡 **Open.** Same user, same org, same tenant, public/global? Defaults? Per-workflow opt-in toggle? Needs product call before code. Until decided, all memory + knowledge selection stays strictly workflow-scoped (current behaviour). |
+| **Deployment: bundle a default Embedder?** | 🟡 **Open.** WK2 ships the seam; what (if anything) ships as the default impl? Options: `cel-llm` provider-based (per-call API tokens) or local ONNX/candle (~50 MB binary). Decide based on production recall data + whether semantic recall actually moves the needle in real workflows. |
+| **Deployment: bundle a default MemoryEnricher?** | 🟡 **Open.** A4 ships the seam; default could call any LLM provider once per memory write to enrich summary + tags. Cheap (one call per memory, amortized across reads) but still needs a model + prompt. |
+| **Deployment: bundle a default MemorySelector?** | 🟡 **Open.** B1 ships the seam; default LLM impl would re-rank WK1's shortlist per turn. Per-turn LLM cost — only ship if recall eval / production data shows WK1 ordering misses important recall. |
 
 ---
 
@@ -989,3 +993,75 @@ In current cellar usage, memories are written at run-end by `canonical_runner` u
 | `cel_perceive read` enriched by default | Raw read remains raw; planning view is explicit | Same |
 
 The core insight remains: persistent memory matters, but selection matters more at prompt time. The post-WK reframe sharpens it: **selection is a Cortex service, not a runtime.** Cognition work lives where the memory and context live. The four weakness PRs proved we can deliver real cognition wins (FTS5 ranking, store handle abstraction, see-tool migration) without spinning up a new crate. PR4's "cel-cognition crate" framing was right that more work is needed; it was wrong that the work needs its own crate to be coherent. We'll create that crate when (and only when) the eval data shows the work outgrew its current home.
+
+---
+
+## Closing Retrospective (2026-05-09)
+
+The arc started 2026-05-04 with the original cognition proposal: build a `cel-cognition` crate with a planner-like enricher runtime, ship persistent memory + selection together, default everything on. It ended 2026-05-09 with **no `cel-cognition` crate**, three independent LLM-opt-in seams in `cel-llm`, and a deterministic-by-default selector that aces 9 of 10 hand-built recall scenarios with no LLM call required.
+
+### What shipped (in chronological order)
+
+```
+2026-05-06  PR1a.0  cel-contracts crate extraction (mechanical)
+2026-05-06  PR1a    PlanningView contract + canonical runner
+2026-05-06  PR1b    PlanningView for all surfaces (N-API/MCP/SDK)
+2026-05-06  PR1c    Cross-backend convergence test
+2026-05-06  PR2.0   cortex_memories storage layer
+2026-05-06  PR2     Memory consumers + auto-write
+2026-05-06  PR3     Memory-aware PlanningView (deterministic selector)
+2026-05-08  WK4     CortexMemoryStore trait + open-once-per-run
+2026-05-08  WK1     FTS5 keyword recall (schema v3 + bm25)
+2026-05-08  WK5     Stabilized 8 pre-existing flaky tests
+2026-05-08  WK3/PR5 langgraph see-tool → PlanningView migration
+2026-05-08  docs    post-WK plan reframe (Tier A/B/C)
+2026-05-08  A1      PlanningView.knowledge from FTS5
+2026-05-08  WK2     Vector embedding infrastructure (Embedder trait)
+2026-05-08  A2      PlanningView.recent_events from observations
+2026-05-08  A3      PlanningView.blockers + anomalies from MentalModel
+2026-05-08  eval    Memory-recall eval (10 scenarios, 2 modes)
+2026-05-08  TS-sync JS PlanningBudget mirrors Rust
+2026-05-09  A4      MemoryEnricher trait + write-time hook
+2026-05-09  B1      MemorySelector trait + read-time re-rank
+```
+
+13 PRs on private (`#28`–`#42`) + 2 OSS sync PRs (`cellar#69`, `cellar#70`). Every infrastructure item from the original plan that didn't require an external decision is shipped on both repos.
+
+### What we learned
+
+**The most valuable architectural decision was extracting `cel-contracts` first** (PR1a.0). It made every subsequent change strictly additive and testable in isolation. Without it the rest would have been a series of cross-crate refactors instead of focused per-crate PRs.
+
+**The "cel-cognition crate first" framing was wrong.** Tier A (fill empty PlanningView fields) lives fine in `cel-cortex`. Tier B (LLM seams) lives in `cel-llm`. The crate boundary the original plan wanted didn't match the actual seams that emerged from the work. Best correction: don't create the crate; let the seams accumulate where they naturally live; revisit only if and when the seam surface gets too big to host inline.
+
+**The recall eval underdelivered as a gate but overdelivered as a tool.** It was supposed to tell us "build B1 / B2 / A4 only if WK1 falls short." On the synthetic scenarios, WK1 didn't fall short (9/10 perfect MRR). That correctly told us: **don't bundle a default LLM-backed selector / embedder / enricher**. But the eval can't replace production data — it can only confirm that the deterministic baseline is in good shape for keyword-tractable scenarios. The reframe (build the seam regardless, eval validates *deployment*) brought it in line with reality.
+
+**The "always-safe fallback" pattern repeated three times** (WK2 embedder, A4 enricher, B1 selector). Each shipped:
+1. A trait in `cel-llm`
+2. A `with_*` builder on `CanonicalGoalRunner`
+3. A hook in the runner's hot path
+4. Failure paths that fall through to deterministic behaviour without blocking the run
+5. No bundled LLM impl — production callers wire one if they want it
+
+By the third one this was muscle memory. The pattern is now the de-facto contract for "how to add an LLM-opt-in to cellar without coupling the rest of the system to LLM availability."
+
+**Stacked PRs vs sequential PRs vs admin-merging.** Stacking 9 PRs ahead of a CI-billing block taught a hard lesson: **don't stack speculatively past the next mergeable PR**. When the queue resolved, the cascade rebases were tedious (skip-already-applied commits, cherry-pick the unique commit, force-push, re-target base from deleted ref to main). For future arcs: ship one PR, wait for it to merge, then start the next.
+
+**WK2 / A4 / B1 deferral was a near-mistake.** The original "eval-gated → don't build until eval forces it" framing for these three would have left the cognition layer with a deterministic-only floor and no path to LLM enhancement without re-architecting. The reframe (ship the seam, defer the bundled impl) preserved both options. Worth remembering: **eval gates *deployment*, not *infrastructure*** — building the trait is unconditional when the trait is part of the long-term contract.
+
+### What did NOT ship — and why that's correct
+
+- **`cel-cognition` crate** — abandoned, not deferred. The seams in `cel-llm` + `cel-cortex` covered everything the crate was supposed to host.
+- **B3 cross-workflow priors** — deferred on a privacy decision, not on engineering. Implementing it without deciding the boundary (same user / same org / same tenant / public) would have shipped the wrong default and locked in a privacy stance silently.
+- **A4 / B1 / WK2 default LLM impls** — eval-gated, correctly. Production data + the recall eval together tell us if/which to bundle. Until then, the seams are the contract.
+- **Background re-enrichment of pre-A4 memories** — out of scope. New writes get enriched; old ones stay as they are. A future migration could backfill if useful.
+
+### Strategic next steps (not in this plan)
+
+- **Production dogfooding** — only thing that converts the synthetic recall eval baseline into real signal.
+- **Harder eval scenarios** — diminishing returns vs production data; defer.
+- **Platform breadth** — more adapters / benchmark server / web app integration. Per `CLAUDE.md` repo direction.
+- **B3 privacy decision** — when ready to add cross-workflow recall.
+
+### Closing line
+
+The cognition layer was supposed to be a runtime. It became a set of seams. The seams turned out to be enough.

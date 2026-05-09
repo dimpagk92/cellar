@@ -93,6 +93,17 @@ pub struct PlanningViewInputs<'a> {
     /// an `AnomalyRef` (visible to planner but not blocking); `Fresh`
     /// contributes nothing. `None` preserves PR1 behaviour.
     pub cortex_freshness: Option<&'a FreshnessAssessment>,
+    /// Closing-gap fill: adapter facts collected by the runner from
+    /// active adapters via `StepExecutor::adapter_facts`. When set,
+    /// they populate `view.adapter_facts` directly + contribute one
+    /// `EvidenceRef` each to `view.evidence`. `None` (default) keeps
+    /// `view.adapter_facts` empty — pre-closure behaviour.
+    ///
+    /// Adapter selection is the adapter's own concern: each adapter's
+    /// `facts_for_planning_view` impl decides what's relevant for the
+    /// current goal + perception. The runner aggregates without
+    /// reranking.
+    pub adapter_facts: Option<&'a [cel_contracts::AdapterFactRef]>,
 }
 
 /// Build a budgeted `PlanningView` from current cortex perception + caps,
@@ -161,6 +172,18 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
         omitted_elements,
     );
 
+    // Closing-gap fill: synthesize EvidenceRefs from everything the
+    // selectors picked, so the planner can trace each surfaced item
+    // back to its source. One EvidenceRef per kept memory / knowledge
+    // fact / recent event. Adapter facts get their own evidence entries
+    // when they're populated (Tier-A adapter integration below).
+    let evidence = synthesize_evidence(
+        &memory_selection.kept,
+        &knowledge_selection.kept,
+        &recent_events_selection.kept,
+        inputs.adapter_facts.unwrap_or(&[]),
+    );
+
     PlanningView {
         goal: inputs.goal.to_string(),
         budget: inputs.budget.clone(),
@@ -171,14 +194,18 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
             url: inputs.caps.cdp_url.clone(),
         },
         elements,
-        adapter_facts: vec![],
+        // Closing-gap fill: adapter_facts now plumbed through from the
+        // runner via the new `adapter_facts` field on PlanningViewInputs.
+        // Pre-existing callers that don't set the field still get the
+        // empty Vec — backward compat preserved.
+        adapter_facts: inputs.adapter_facts.map(|s| s.to_vec()).unwrap_or_default(),
         capabilities: caps_to_capabilities(inputs.caps),
         memories: memory_selection.kept,
         knowledge: knowledge_selection.kept,
         recent_events: recent_events_selection.kept,
         blockers,
         anomalies,
-        evidence: vec![],
+        evidence,
         selection_rationale,
         omitted_counts: OmittedCounts {
             elements: omitted_elements,
@@ -820,6 +847,70 @@ fn build_rationale(
     Some(parts.join(" "))
 }
 
+// ─── Evidence synthesis (closing-gap fill) ──────────────────────────────────
+
+/// Build `view.evidence` from everything the selectors picked. One
+/// `EvidenceRef` per kept memory / knowledge fact / recent event /
+/// adapter fact, so the planner can cross-reference any item back to
+/// its source without inflating the view.
+///
+/// Each `EvidenceRef`:
+/// - `source` — `"memory"` / `"knowledge"` / `"observation"` /
+///   `"adapter_fact"` (matches the docstring of EvidenceRef in
+///   `cel_contracts`).
+/// - `id` — the source row's stable id stringified (e.g. `"42"` for
+///   memory id 42; `"obs:99"` for an observation; `"<adapter>:<kind>"`
+///   for an adapter fact since AdapterFactRef doesn't carry a stable id).
+/// - `summary` — short text the planner can include in prompts; uses
+///   the source's summary or a fallback.
+fn synthesize_evidence(
+    memories: &[cel_contracts::MemoryRef],
+    knowledge: &[cel_contracts::KnowledgeRef],
+    recent_events: &[cel_contracts::EventRef],
+    adapter_facts: &[cel_contracts::AdapterFactRef],
+) -> Vec<cel_contracts::EvidenceRef> {
+    let mut out = Vec::with_capacity(
+        memories.len() + knowledge.len() + recent_events.len() + adapter_facts.len(),
+    );
+    for m in memories {
+        out.push(cel_contracts::EvidenceRef {
+            source: "memory".into(),
+            id: m.id.to_string(),
+            summary: m.summary.clone(),
+        });
+    }
+    for k in knowledge {
+        out.push(cel_contracts::EvidenceRef {
+            source: "knowledge".into(),
+            id: k.id.to_string(),
+            summary: short_preview(&k.content, 80),
+        });
+    }
+    for e in recent_events {
+        out.push(cel_contracts::EvidenceRef {
+            source: "observation".into(),
+            id: e.id.clone(),
+            summary: e.summary.clone(),
+        });
+    }
+    for f in adapter_facts {
+        out.push(cel_contracts::EvidenceRef {
+            source: "adapter_fact".into(),
+            id: format!("{}:{}", f.adapter, f.kind),
+            summary: short_preview(&serde_json::to_string(&f.payload).unwrap_or_default(), 80),
+        });
+    }
+    out
+}
+
+fn short_preview(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
+}
+
 // ─── Capabilities folding ────────────────────────────────────────────────────
 
 fn caps_to_capabilities(caps: &RuntimeCaps) -> Vec<CapabilityRef> {
@@ -1171,6 +1262,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.elements.len(), 30);
         assert_eq!(view.omitted_counts.elements, 170);
@@ -1203,6 +1295,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         let ids: Vec<&str> = view.elements.iter().map(|e| e.id.as_str()).collect();
@@ -1236,6 +1329,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         assert_eq!(view.run_progress.steps_used, 13);
@@ -1264,6 +1358,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.elements.len(), 0);
         assert_eq!(view.omitted_counts.elements, 0);
@@ -1295,6 +1390,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.elements.iter().all(|e| e.id != "hidden"));
     }
@@ -1349,6 +1445,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.memories.is_empty());
         assert_eq!(view.omitted_counts.memories, 0);
@@ -1388,6 +1485,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         assert!(
@@ -1438,6 +1536,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         assert_eq!(view.memories.len(), 2);
@@ -1471,6 +1570,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         assert!(view.memories.is_empty());
@@ -1516,6 +1616,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         // Both candidates score 0 → both omitted, none kept.
@@ -1581,6 +1682,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.memories.is_empty());
     }
@@ -1619,6 +1721,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         assert!(view.memories[0].summary.contains("two-step"));
@@ -1655,6 +1758,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         // PR1 perception-only behaviour preserved.
         assert!(view.knowledge.is_empty());
@@ -1694,6 +1798,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         // Two facts mention "submit" / "Concur" tokens; the espresso
         // one doesn't. FTS5 returns only the matching pair.
@@ -1732,6 +1837,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.knowledge.len(), 3);
         assert_eq!(view.omitted_counts.knowledge, 3);
@@ -1760,6 +1866,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.knowledge.len(), 0);
         // 0 candidates returned by FTS5 → 0 omitted (we never had them).
@@ -1787,6 +1894,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.knowledge.is_empty());
         assert_eq!(view.omitted_counts.knowledge, 0);
@@ -1815,6 +1923,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         let rationale = view.selection_rationale.expect("expected rationale");
         assert!(
@@ -1852,6 +1961,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.knowledge.is_empty());
     }
@@ -1886,6 +1996,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.memories.len(), 1);
         assert_eq!(view.knowledge.len(), 1);
@@ -1926,6 +2037,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         // PR1 perception-only behaviour preserved.
         assert!(view.recent_events.is_empty());
@@ -1958,6 +2070,7 @@ mod tests {
             recent_events_store: Some(&store),
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.recent_events.is_empty());
     }
@@ -2009,6 +2122,7 @@ mod tests {
             recent_events_store: Some(&store),
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.recent_events.len(), 4);
         // High-priority pair surface first (most-recent within priority
@@ -2048,6 +2162,7 @@ mod tests {
             recent_events_store: Some(&store),
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.recent_events.len(), 3);
         assert_eq!(view.omitted_counts.recent_events, 4);
@@ -2077,6 +2192,7 @@ mod tests {
             recent_events_store: Some(&store),
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.recent_events.len(), 1);
         let ev = &view.recent_events[0];
@@ -2114,6 +2230,7 @@ mod tests {
             recent_events_store: Some(&store),
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         let rationale = view.selection_rationale.expect("expected rationale");
         assert!(
@@ -2150,8 +2267,170 @@ mod tests {
             recent_events_store: Some(&store),
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.recent_events.is_empty());
+    }
+
+    // ─── Closing-gap fill: evidence + adapter_facts ─────────────────────────
+
+    #[test]
+    fn closing_evidence_synthesized_from_populated_memories() {
+        let store = fresh_store();
+        let id = seed_memory(
+            &store,
+            "wf",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "Submitted invoice via Concur",
+            serde_json::json!({}),
+        );
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "submit invoice in Concur",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_store: Some(&store),
+            knowledge_store: None,
+            workflow_id: Some("wf"),
+            goal_embedding: None,
+            recent_events_store: None,
+            cortex_anomalies: None,
+            cortex_freshness: None,
+            adapter_facts: None,
+        });
+        assert_eq!(view.memories.len(), 1);
+        assert_eq!(view.evidence.len(), 1);
+        let ev = &view.evidence[0];
+        assert_eq!(ev.source, "memory");
+        assert_eq!(ev.id, id.to_string());
+        assert!(ev.summary.contains("Submitted invoice"));
+    }
+
+    #[test]
+    fn closing_evidence_unions_memory_knowledge_event_adapter_sources() {
+        // One of each surfaceable item; expect 4 EvidenceRefs total
+        // with the right source mix.
+        let store = fresh_store();
+        let _ = seed_memory(
+            &store,
+            "wf",
+            cel_store::cortex_memory::MemoryKind::Outcome,
+            "Submitted invoice via Concur",
+            serde_json::json!({}),
+        );
+        let _ = seed_knowledge(&store, "Concur uses two-step submit", "manual");
+        let _ = seed_observation(
+            &store,
+            "wf",
+            "saw login dialog",
+            cel_store::ObservationPriority::High,
+        );
+        let adapter_facts = vec![cel_contracts::AdapterFactRef {
+            adapter: "numbers".into(),
+            kind: "selected_range".into(),
+            payload: serde_json::json!({"sheet": "Sheet1", "range": "B2:B7"}),
+        }];
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "submit invoice in Concur",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_store: Some(&store),
+            knowledge_store: Some(&store),
+            workflow_id: Some("wf"),
+            goal_embedding: None,
+            recent_events_store: Some(&store),
+            cortex_anomalies: None,
+            cortex_freshness: None,
+            adapter_facts: Some(&adapter_facts),
+        });
+        // 1 memory + 1 knowledge + 1 event + 1 adapter fact → 4 evidence
+        assert_eq!(view.evidence.len(), 4);
+        let sources: Vec<&str> = view.evidence.iter().map(|e| e.source.as_str()).collect();
+        assert!(sources.contains(&"memory"));
+        assert!(sources.contains(&"knowledge"));
+        assert!(sources.contains(&"observation"));
+        assert!(sources.contains(&"adapter_fact"));
+    }
+
+    #[test]
+    fn closing_evidence_empty_when_nothing_selected() {
+        // Pure perception-only build: no memory/knowledge/events/adapter
+        // facts → empty evidence, just like before the closing-gap fix.
+        // No observable behaviour change for callers that don't opt in.
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_store: None,
+            knowledge_store: None,
+            workflow_id: None,
+            goal_embedding: None,
+            recent_events_store: None,
+            cortex_anomalies: None,
+            cortex_freshness: None,
+            adapter_facts: None,
+        });
+        assert!(view.evidence.is_empty());
+        assert!(view.adapter_facts.is_empty());
+    }
+
+    #[test]
+    fn closing_adapter_facts_passthrough_into_view() {
+        // Adapter facts provided to PlanningViewInputs land verbatim
+        // in view.adapter_facts (no reranking, no filtering — runner
+        // is the orchestrator, builder just hydrates).
+        let facts = vec![
+            cel_contracts::AdapterFactRef {
+                adapter: "numbers".into(),
+                kind: "selected_range".into(),
+                payload: serde_json::json!({"range": "A1"}),
+            },
+            cel_contracts::AdapterFactRef {
+                adapter: "browser".into(),
+                kind: "url".into(),
+                payload: serde_json::json!({"url": "https://example.com"}),
+            },
+        ];
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_store: None,
+            knowledge_store: None,
+            workflow_id: None,
+            goal_embedding: None,
+            recent_events_store: None,
+            cortex_anomalies: None,
+            cortex_freshness: None,
+            adapter_facts: Some(&facts),
+        });
+        assert_eq!(view.adapter_facts.len(), 2);
+        assert_eq!(view.adapter_facts[0].adapter, "numbers");
+        assert_eq!(view.adapter_facts[1].adapter, "browser");
+        // Each adapter fact also contributes one evidence ref.
+        let adapter_evidence: Vec<&cel_contracts::EvidenceRef> = view
+            .evidence
+            .iter()
+            .filter(|e| e.source == "adapter_fact")
+            .collect();
+        assert_eq!(adapter_evidence.len(), 2);
     }
 
     // ─── Tier A3: anomalies + blockers ──────────────────────────────────────
@@ -2195,6 +2474,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert!(view.anomalies.is_empty());
         assert!(view.blockers.is_empty());
@@ -2225,6 +2505,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: Some(&anomalies),
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.anomalies.len(), 1);
         assert_eq!(view.anomalies[0].kind, "dialog");
@@ -2258,6 +2539,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: Some(&anomalies),
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.anomalies[0].kind, "auth_prompt");
         assert_eq!(view.blockers.len(), 1);
@@ -2287,6 +2569,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: Some(&anomalies),
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.anomalies.len(), 2);
         assert!(view.blockers.is_empty(), "Error/AppSwitch must not block");
@@ -2310,6 +2593,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: Some(&freshness),
+            adapter_facts: None,
         });
         assert!(view.anomalies.is_empty());
         assert_eq!(view.blockers.len(), 1);
@@ -2337,6 +2621,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: Some(&freshness),
+            adapter_facts: None,
         });
         assert!(view.blockers.is_empty(), "soft-stale must NOT block");
         assert_eq!(view.anomalies.len(), 1);
@@ -2361,6 +2646,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: Some(&freshness),
+            adapter_facts: None,
         });
         assert!(view.anomalies.is_empty());
         assert!(view.blockers.is_empty());
@@ -2391,6 +2677,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: Some(&anomalies),
             cortex_freshness: Some(&freshness),
+            adapter_facts: None,
         });
         assert_eq!(view.anomalies.len(), 1, "1 anomaly from dialog");
         assert_eq!(
@@ -2421,6 +2708,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: Some(&anomalies),
             cortex_freshness: None,
+            adapter_facts: None,
         });
         let rationale = view.selection_rationale.expect("expected rationale");
         assert!(
@@ -2530,6 +2818,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         assert_eq!(
@@ -2588,6 +2877,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         assert_eq!(view.memories.len(), 2);
     }
@@ -2624,6 +2914,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         // Memory still surfaces via FTS5+decay; no panic, no NaN scoring.
         assert_eq!(view.memories.len(), 1);
@@ -2665,6 +2956,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         // No panic. Memory hydrates via FTS5+decay despite invalid
         // stored embedding bytes.
@@ -2705,6 +2997,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
         // Cosine alone cannot lift a base=0 memory. Empty hydration.
         assert_eq!(view.memories.len(), 0);
@@ -2756,6 +3049,7 @@ mod tests {
             recent_events_store: None,
             cortex_anomalies: None,
             cortex_freshness: None,
+            adapter_facts: None,
         });
 
         // Exactly one memory hydrated; the unrelated 50 never made it

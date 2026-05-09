@@ -98,6 +98,20 @@ pub trait StepExecutor: Send + Sync {
     async fn cortex_freshness(&self) -> Option<cel_cortex::FreshnessAssessment> {
         None
     }
+
+    /// Closing-gap fill: aggregate adapter facts for the goal +
+    /// current perception. Production `CortexStepExecutor` walks the
+    /// active adapters and unions their `facts_for_planning_view`
+    /// outputs; test executors return empty. Surfaced per turn into
+    /// `PlanningView.adapter_facts` (and into `view.evidence`) by
+    /// the cortex builder.
+    async fn adapter_facts(
+        &self,
+        _goal: &str,
+        _context: &ScreenContext,
+    ) -> Vec<cel_contracts::AdapterFactRef> {
+        Vec::new()
+    }
 }
 
 fn empty_context() -> ScreenContext {
@@ -288,6 +302,11 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             // surfaces immediately.
             let cortex_anomalies = self.executor.cortex_anomalies().await;
             let cortex_freshness = self.executor.cortex_freshness().await;
+            // Closing-gap fill: collect adapter facts per turn so the
+            // planner sees app-specific structured truth in
+            // PlanningView.adapter_facts. Empty for test executors via
+            // the trait default.
+            let adapter_facts = self.executor.adapter_facts(goal, &perception).await;
 
             // Build the budgeted planning view from this turn's perception +
             // caps. Replaces the raw `&ScreenContext` + `&RuntimeCaps` pair
@@ -332,6 +351,11 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                 // empty Vec / None there).
                 cortex_anomalies: Some(cortex_anomalies.as_slice()),
                 cortex_freshness: cortex_freshness.as_ref(),
+                // Closing-gap fill: pass the per-turn adapter facts.
+                // Always present (test executors return empty Vec).
+                // Builder populates view.adapter_facts directly + emits
+                // one EvidenceRef per fact into view.evidence.
+                adapter_facts: Some(adapter_facts.as_slice()),
             });
 
             // Tier B1: LLM-based memory re-rank. Runs only when a
@@ -1402,6 +1426,20 @@ impl StepExecutor for CortexStepExecutor {
         let model = self.cortex.model();
         let guard = model.read().await;
         guard.freshness.clone()
+    }
+
+    /// Closing-gap fill: aggregate adapter facts from every active
+    /// registered adapter via `Cortex::collect_adapter_facts_for_planning_view`.
+    /// Per-turn cost = N active adapters × adapter's facts call;
+    /// adapters that haven't opted in return empty in O(1).
+    async fn adapter_facts(
+        &self,
+        goal: &str,
+        context: &ScreenContext,
+    ) -> Vec<cel_contracts::AdapterFactRef> {
+        self.cortex
+            .collect_adapter_facts_for_planning_view(goal, context)
+            .await
     }
 }
 

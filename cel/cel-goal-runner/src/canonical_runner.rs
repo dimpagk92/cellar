@@ -80,6 +80,24 @@ pub trait StepExecutor: Send + Sync {
     async fn capabilities(&self) -> RuntimeCaps {
         RuntimeCaps::default()
     }
+
+    /// Tier A3: snapshot of the cortex's current anomaly queue.
+    /// Production `CortexStepExecutor` reads this from the live
+    /// `MentalModel`; test executors return empty by default. Surfaced
+    /// per turn into `PlanningView.anomalies` (and the blocking subset
+    /// into `PlanningView.blockers`) by the cortex selector.
+    async fn cortex_anomalies(&self) -> Vec<cel_cortex::Anomaly> {
+        vec![]
+    }
+
+    /// Tier A3: snapshot of the cortex's freshness assessment.
+    /// `HardStale` becomes a `Blocker`; `SoftStale` becomes an
+    /// `AnomalyRef`; `Fresh` contributes nothing. `None` skips the
+    /// freshness signal entirely (default for test executors that
+    /// don't have a `MentalModel`).
+    async fn cortex_freshness(&self) -> Option<cel_cortex::FreshnessAssessment> {
+        None
+    }
 }
 
 fn empty_context() -> ScreenContext {
@@ -105,27 +123,84 @@ fn empty_context() -> ScreenContext {
 pub struct CanonicalGoalRunner<P: PlanProducer, X: StepExecutor> {
     planner: P,
     executor: X,
+    /// WK2 (un-deferred): optional embedder for cortex memory.
+    /// When wired, the runner embeds the goal once per run (used by
+    /// the cortex selector for cosine-boosting candidate memories) and
+    /// the outcome memory at write time (so future runs can compare).
+    /// `None` means WK1 deterministic recall only — no embedding work
+    /// done, no per-call latency or token cost.
+    embedder: Option<Arc<dyn cel_llm::Embedder>>,
 }
 
 impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
     pub fn new(planner: P, executor: X) -> Self {
-        Self { planner, executor }
+        Self {
+            planner,
+            executor,
+            embedder: None,
+        }
+    }
+
+    /// WK2: builder-style opt-in to embedder-aware memory.
+    ///
+    /// Pass `Arc::new(MyEmbedder { ... })` to enable. Until called, the
+    /// runner ignores embeddings entirely — production preserved
+    /// pre-WK2 behaviour for callers who haven't wired one up.
+    pub fn with_embedder(mut self, embedder: Arc<dyn cel_llm::Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Run `goal` to completion or structured failure.
     ///
-    /// Thin outer wrapper: runs the loop, then writes a final outcome
-    /// memory if the caller opted in via
-    /// `RunLimits.workflow_id_for_memory` + `RunLimits.memory_db_path`
-    /// (PR2). Both must be set; either alone is a no-op.
+    /// Thin outer wrapper: opens the cortex memory store once (if the
+    /// caller opted in via both `RunLimits.workflow_id_for_memory` AND
+    /// `RunLimits.memory_db_path`), pre-computes the goal embedding
+    /// once (if an embedder is wired), runs the loop with both handles
+    /// for per-turn memory READS, then writes the final outcome memory
+    /// with the same handle (and embedding, if available).
+    ///
+    /// WK4: 1 SQLite open per memory-enabled run.
+    /// WK2: 1 goal-embed call + 1 outcome-embed call per memory-enabled
+    /// run when an embedder is wired; 0 otherwise.
     pub async fn run(&self, goal: &str, limits: RunLimits) -> GoalOutcome {
         let start = Instant::now();
-        let outcome = self.run_inner(goal, &limits, start).await;
-        write_outcome_memory_if_enabled(&limits, goal, &outcome, start.elapsed());
+        let memory_store = open_memory_store_if_enabled(&limits);
+
+        // WK2: embed the goal once (it doesn't change within a run).
+        // Failure logs at WARN and falls back to None — selector then
+        // skips the cosine boost, behaviour matches pre-WK2.
+        let goal_embedding = compute_goal_embedding(self.embedder.as_ref(), goal).await;
+
+        let outcome = self
+            .run_inner(
+                goal,
+                &limits,
+                start,
+                memory_store.as_ref(),
+                goal_embedding.as_deref(),
+            )
+            .await;
+        write_outcome_memory_if_enabled(
+            memory_store.as_ref(),
+            self.embedder.as_ref(),
+            &limits,
+            goal,
+            &outcome,
+            start.elapsed(),
+        )
+        .await;
         outcome
     }
 
-    async fn run_inner(&self, goal: &str, limits: &RunLimits, start: Instant) -> GoalOutcome {
+    async fn run_inner(
+        &self,
+        goal: &str,
+        limits: &RunLimits,
+        start: Instant,
+        memory_store: Option<&std::sync::Mutex<cel_store::CelStore>>,
+        goal_embedding: Option<&[u8]>,
+    ) -> GoalOutcome {
         info!(
             goal,
             max_steps = limits.max_steps,
@@ -157,23 +232,57 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             let mut caps = self.executor.capabilities().await;
             caps.steps_used = steps_used;
             caps.max_steps = limits.max_steps;
+            // Tier A3: snapshot the cortex's current anomaly queue +
+            // freshness state so the planner sees them in `view.anomalies`,
+            // `view.blockers`, and the rationale string. Per-turn so a
+            // newly-detected anomaly (e.g. a modal that just appeared)
+            // surfaces immediately.
+            let cortex_anomalies = self.executor.cortex_anomalies().await;
+            let cortex_freshness = self.executor.cortex_freshness().await;
 
             // Build the budgeted planning view from this turn's perception +
             // caps. Replaces the raw `&ScreenContext` + `&RuntimeCaps` pair
             // the planner used to receive directly.
             //
-            // PR3: when the caller opted in to memory writes via
+            // PR3 + WK4: when the caller opted in to memory writes via
             // `RunLimits.workflow_id_for_memory` + `RunLimits.memory_db_path`,
             // also use those for memory READS. The planner sees prior
             // memories from past runs of the same workflow on every turn.
+            // WK4: the store is opened once in `run` and shared across
+            // every turn here — `&Mutex<CelStore>` auto-coerces to
+            // `&dyn CortexMemoryStore`.
             let planning_budget = PlanningBudget::default();
             let view = build_planning_view(&PlanningViewInputs {
                 goal,
                 budget: &planning_budget,
                 perception: &perception,
                 caps: &caps,
-                memory_db_path: limits.memory_db_path.as_deref(),
+                memory_store: memory_store.map(|m| m as &dyn cel_store::CortexMemoryStore),
                 workflow_id: limits.workflow_id_for_memory.as_deref(),
+                // Tier A1: same handle satisfies KnowledgeStore. The
+                // canonical runner opts the planner into knowledge
+                // hydration whenever it opted into memory hydration —
+                // both depend on the same `Mutex<CelStore>` opened by
+                // `open_memory_store_if_enabled`. A future caller that
+                // wants knowledge WITHOUT memory could split this; for
+                // now the two opt-ins move together.
+                knowledge_store: memory_store.map(|m| m as &dyn cel_store::KnowledgeStore),
+                // WK2: pre-computed goal embedding (run-once at the
+                // top of `run()`). When present + the candidate has a
+                // stored embedding of matching dimension, the selector
+                // adds a cosine boost on top of WK1's FTS5+decay base.
+                goal_embedding,
+                // Tier A2: same handle satisfies RecentEventStore for
+                // hydrating PlanningView.recent_events from cortex
+                // observations. Couples to the same memory opt-in for
+                // now (workflow-scoped via workflow_id_for_memory).
+                recent_events_store: memory_store.map(|m| m as &dyn cel_store::RecentEventStore),
+                // Tier A3: pass the per-turn cortex anomaly queue +
+                // freshness snapshot computed above. Always present
+                // (even from test executors via the trait defaults —
+                // empty Vec / None there).
+                cortex_anomalies: Some(cortex_anomalies.as_slice()),
+                cortex_freshness: cortex_freshness.as_ref(),
             });
 
             // Phase gate: past the budget midpoint with no terminal-
@@ -586,35 +695,86 @@ fn budget_exhausted(kind: &str, last_purpose: &str, steps_used: u32) -> GoalOutc
     })
 }
 
+/// WK4: open the cortex memory store once if both opt-in fields are set.
+///
+/// Wraps in `Mutex<CelStore>` so the resulting handle satisfies the
+/// `CortexMemoryStore` trait's `Send + Sync` bound (required for use
+/// across async-fn awaits inside `run_inner`). Failure to open is logged
+/// at WARN — the run continues with `None`, identical to the
+/// "didn't opt in" path. Open errors no longer manifest mid-run.
+fn open_memory_store_if_enabled(
+    limits: &RunLimits,
+) -> Option<std::sync::Mutex<cel_store::CelStore>> {
+    let path = match (
+        limits.workflow_id_for_memory.as_deref(),
+        limits.memory_db_path.as_deref(),
+    ) {
+        (Some(_), Some(p)) => p,
+        _ => return None,
+    };
+    match cel_store::CelStore::open(path) {
+        Ok(s) => Some(std::sync::Mutex::new(s)),
+        Err(e) => {
+            tracing::warn!(
+                db_path = path,
+                error = %e,
+                "WK4: failed to open cortex memory store; \
+                 run continues with no memory reads/writes",
+            );
+            None
+        }
+    }
+}
+
+/// WK2: embed the goal text via the wired embedder, or return None when
+/// no embedder is configured. Failure logs at WARN and returns None so
+/// the run continues with the WK1 deterministic selector path
+/// (FTS5+decay only, no cosine boost). Called once per run from `run()`
+/// so the loop doesn't pay per-turn embed latency.
+async fn compute_goal_embedding(
+    embedder: Option<&Arc<dyn cel_llm::Embedder>>,
+    goal: &str,
+) -> Option<Vec<u8>> {
+    let emb = embedder?;
+    match emb.embed(goal).await {
+        Ok(v) => Some(v.to_bytes()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "WK2: goal embedding failed; selector falls back to FTS5+decay only",
+            );
+            None
+        }
+    }
+}
+
 /// PR2: write a final outcome memory to `cortex_memories` if the caller
-/// opted in. No-op when `workflow_id_for_memory` or `memory_db_path` is
-/// `None`. Failure to write is logged at WARN — never propagates back to
-/// the caller. The runner's primary contract is "report the run
-/// outcome"; memory persistence is an opt-in side effect.
-fn write_outcome_memory_if_enabled(
+/// opted in. No-op when `workflow_id_for_memory` is `None` or when the
+/// store handle is `None` (open failed earlier or caller didn't opt in).
+/// Failure to write is logged at WARN — never propagates back to the
+/// caller. The runner's primary contract is "report the run outcome";
+/// memory persistence is an opt-in side effect.
+///
+/// WK4: takes the already-open `Mutex<CelStore>` from `run` instead of
+/// re-opening from `RunLimits.memory_db_path`. Same data, one fewer open.
+///
+/// WK2: also takes the optional embedder. When wired, the summary text
+/// is embedded once and stored on the new memory's `embedding` column —
+/// future runs of the same workflow can then cosine-boost it during
+/// selection (see `planning_view::score_memory`). Embed failure logs at
+/// WARN and writes the memory with `embedding: None` (still useful via
+/// FTS5+decay; the cosine path just won't fire for this entry).
+async fn write_outcome_memory_if_enabled(
+    memory_store: Option<&std::sync::Mutex<cel_store::CelStore>>,
+    embedder: Option<&Arc<dyn cel_llm::Embedder>>,
     limits: &RunLimits,
     goal: &str,
     outcome: &GoalOutcome,
     duration: std::time::Duration,
 ) {
-    let (workflow_id, db_path) = match (
-        limits.workflow_id_for_memory.as_deref(),
-        limits.memory_db_path.as_deref(),
-    ) {
-        (Some(w), Some(p)) => (w, p),
+    let (store, workflow_id) = match (memory_store, limits.workflow_id_for_memory.as_deref()) {
+        (Some(s), Some(w)) => (s, w),
         _ => return,
-    };
-
-    let store = match cel_store::CelStore::open(db_path) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                db_path,
-                error = %e,
-                "PR2 outcome memory: failed to open store; skipping write",
-            );
-            return;
-        }
     };
 
     let (kind, summary, content) = match outcome {
@@ -665,6 +825,24 @@ fn write_outcome_memory_if_enabled(
         }
     };
 
+    // WK2: embed the summary text once when an embedder is wired.
+    // Falls back to None on embed failure (logged); falls through to
+    // None when no embedder is wired at all (no per-call cost).
+    let embedding = match embedder {
+        Some(emb) => match emb.embed(&summary).await {
+            Ok(v) => Some(v.to_bytes()),
+            Err(e) => {
+                tracing::warn!(
+                    workflow_id,
+                    error = %e,
+                    "WK2 outcome memory: embed failed; storing memory without embedding",
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
     let new_memory = cel_store::cortex_memory::NewCortexMemory {
         workflow_id: workflow_id.to_string(),
         kind,
@@ -675,10 +853,13 @@ fn write_outcome_memory_if_enabled(
             "canonical_runner:duration_ms={}",
             duration.as_millis()
         )),
-        embedding: None,
+        embedding,
     };
 
-    match store.insert_cortex_memory(&new_memory) {
+    // Use the `CortexMemoryStore` trait so the inherent `&CelStore`
+    // method is reached via the same path the planning_view selector
+    // takes — keeps both sides on the same contract.
+    match cel_store::CortexMemoryStore::insert_memory(store, &new_memory) {
         Ok(id) => tracing::info!(
             workflow_id,
             memory_id = id,
@@ -1005,6 +1186,26 @@ impl StepExecutor for CortexStepExecutor {
             steps_used: 0,
             max_steps: 0,
         }
+    }
+
+    /// Tier A3: read the cortex's current anomaly queue from MentalModel.
+    /// Cloning the small VecDeque is cheap (anomalies are bounded by
+    /// the cortex's own dedup logic; typical queue is 0–5 entries).
+    async fn cortex_anomalies(&self) -> Vec<cel_cortex::Anomaly> {
+        let model = self.cortex.model();
+        let guard = model.read().await;
+        guard.anomaly_queue.iter().cloned().collect()
+    }
+
+    /// Tier A3: snapshot the cortex's freshness assessment. Returns
+    /// `None` until the cortex tick loop populates it via
+    /// `refresh_derived`; `Some(_)` after the first refresh. The
+    /// selector treats both the same way (skip the freshness signal
+    /// when None — pre-A3 behaviour).
+    async fn cortex_freshness(&self) -> Option<cel_cortex::FreshnessAssessment> {
+        let model = self.cortex.model();
+        let guard = model.read().await;
+        guard.freshness.clone()
     }
 }
 
@@ -1618,5 +1819,77 @@ mod tests {
             );
             let _ = std::fs::remove_file(&db_path);
         }
+    }
+
+    // ─── WK4: store-handle abstraction ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn wk4_open_failure_does_not_kill_run() {
+        // Bad path → store open fails. Run should still complete on the
+        // happy path (no memory reads, no final write attempt). Pre-WK4
+        // the open happened inside `write_outcome_memory_if_enabled` and
+        // surfaced as a WARN at the end; with WK4 the open happens once
+        // up front in `run` and the same WARN surfaces there. Either way,
+        // the outcome itself is unaffected — that's what this test
+        // pins down.
+        let bad_path = "/dev/null/does-not-exist/wk4-bad.db";
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "got it".into(),
+            extracted_data: serde_json::Value::Null,
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("wk4-test".into()),
+            memory_db_path: Some(bad_path.into()),
+        };
+        let outcome = runner.run("any goal", limits).await;
+        assert!(
+            matches!(outcome, GoalOutcome::Succeeded { .. }),
+            "bad memory_db_path must not affect the run outcome; got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wk4_store_opened_once_then_read_and_written_via_same_handle() {
+        // Hard pin on the WK4 contract: when memory is enabled and the
+        // run produces an outcome, exactly ONE memory should land in the
+        // store under the right workflow_id, AND the store must remain
+        // openable + readable from a fresh handle afterward (proving the
+        // runner closed cleanly when the Mutex<CelStore> went out of
+        // scope, no leaked handle blocking a re-open).
+        let db_path = pr2_temp_db("wk4_oneshot");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "completed wk4 path".into(),
+            extracted_data: serde_json::json!({"k": "v"}),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("wk4-oneshot".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let outcome = runner.run("test wk4", limits).await;
+        assert!(matches!(outcome, GoalOutcome::Succeeded { .. }));
+
+        // Re-open from a fresh handle — proves the runner-owned handle
+        // dropped cleanly. (SQLite WAL doesn't lock readers but a leaked
+        // exclusive handle on Linux can; this catches that regression.)
+        let reread = cel_store::CelStore::open(&db_path).expect("re-open");
+        let memories = reread
+            .list_cortex_memories("wk4-oneshot", None, 10)
+            .expect("list");
+        assert_eq!(memories.len(), 1, "expected exactly one outcome memory");
+        assert_eq!(
+            memories[0].kind,
+            cel_store::cortex_memory::MemoryKind::Outcome
+        );
+        let _ = std::fs::remove_file(&db_path);
     }
 }

@@ -605,6 +605,7 @@ dependencies = [
  "cel-context",
  "cel-contracts",
  "cel-input",
+ "cel-llm",
  "cel-network",
  "cel-signals",
  "cel-store",

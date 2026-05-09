@@ -552,6 +552,16 @@ function isRateLimitLikeError(error: unknown): boolean {
 }
 
 function shouldUseClaudeCli(): boolean {
+  // WK5: under vitest, an injected `llmCompleteWithRole` mock is the
+  // entire point of the test — silently shelling out to the real
+  // `claude` CLI (when the dev's machine has Claude Code installed
+  // and no API key configured) bypasses the mock, hangs for 5s waiting
+  // on the subprocess, and times out. Skip the CLI fallback in any
+  // vitest worker so the mock always wins. Production runs (no
+  // VITEST env vars set) keep the CLI fallback intact.
+  if (process.env.VITEST || process.env.VITEST_WORKER_ID) {
+    return false;
+  }
   return (
     celConfig.llmProvider === "anthropic" &&
     discoverClaudeCliOauthTokens().length > 0 &&

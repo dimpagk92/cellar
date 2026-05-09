@@ -380,6 +380,33 @@ impl Cortex {
             .collect()
     }
 
+    /// Closing-gap fill: aggregate `AdapterFactRef`s from every
+    /// **active** registered adapter for the current goal + perception.
+    /// Each adapter's `facts_for_planning_view` impl decides what's
+    /// relevant; the cortex just unions the results without reranking.
+    /// Inactive adapters are skipped (we don't poke deactivated apps
+    /// for facts).
+    ///
+    /// Per-turn cost = N active adapters × adapter's facts call.
+    /// Default `facts_for_planning_view` returns empty in O(1), so
+    /// adapters that haven't opted in are free.
+    pub async fn collect_adapter_facts_for_planning_view(
+        &self,
+        goal: &str,
+        context: &cel_context::ScreenContext,
+    ) -> Vec<cel_contracts::AdapterFactRef> {
+        let guard = self.adapters.read().await;
+        let mut out = Vec::new();
+        for adapter in guard.iter() {
+            if adapter.state != crate::adapter::AdapterState::Active {
+                continue;
+            }
+            let mut facts = adapter.driver.facts_for_planning_view(goal, context).await;
+            out.append(&mut facts);
+        }
+        out
+    }
+
     /// Is a CDP client bound? Used by the canonical runner to tell
     /// the planner whether `cdp_eval` / `navigate` will actually
     /// dispatch somewhere vs be blind.

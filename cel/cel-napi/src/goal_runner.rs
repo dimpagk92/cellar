@@ -245,6 +245,7 @@ pub async fn canonical_build_planning_view(
                 recent_events_store: None,
                 cortex_anomalies: None,
                 cortex_freshness: None,
+                adapter_facts: None,
             })
         }
         (None, None) => {
@@ -269,6 +270,7 @@ pub async fn canonical_build_planning_view(
                 recent_events_store: None,
                 cortex_anomalies: None,
                 cortex_freshness: None,
+                adapter_facts: None,
             })
         }
         _ => {

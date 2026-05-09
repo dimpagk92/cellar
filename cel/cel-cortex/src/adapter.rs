@@ -266,6 +266,24 @@ pub trait AdapterDriver: Send + Sync {
 
     /// Check if the target application is running and reachable.
     async fn probe(&self) -> bool;
+
+    /// Closing-gap fill: surface app-specific structured facts the
+    /// planner should see in its `PlanningView.adapter_facts` slot.
+    /// Called once per planner turn (alongside `get_context`) by the
+    /// Cortex aggregator. Default returns empty — adapters that don't
+    /// have structured facts to surface keep pre-closure behaviour.
+    ///
+    /// Adapters decide what's relevant for `goal` + `context`. The
+    /// planner sees the union from all active adapters; no reranking.
+    /// Each fact contributes one `EvidenceRef` to `view.evidence` so
+    /// the planner can trace it back to its adapter.
+    async fn facts_for_planning_view(
+        &self,
+        _goal: &str,
+        _context: &cel_context::ScreenContext,
+    ) -> Vec<cel_contracts::AdapterFactRef> {
+        Vec::new()
+    }
 }
 
 // ── Adapter State ──────────────────────────────────────────────────────────

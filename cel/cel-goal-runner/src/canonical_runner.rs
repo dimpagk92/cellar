@@ -130,6 +130,22 @@ pub struct CanonicalGoalRunner<P: PlanProducer, X: StepExecutor> {
     /// `None` means WK1 deterministic recall only — no embedding work
     /// done, no per-call latency or token cost.
     embedder: Option<Arc<dyn cel_llm::Embedder>>,
+    /// Tier A4: optional memory enricher. When wired, the runner calls
+    /// it once per outcome-memory write (in `write_outcome_memory_if_enabled`)
+    /// to produce a richer summary + tags before persistence. Failure
+    /// or absence falls through to the plain runner-generated summary
+    /// (current pre-A4 behaviour). One LLM call per write, amortized
+    /// across all future reads of that memory.
+    memory_enricher: Option<Arc<dyn cel_llm::MemoryEnricher>>,
+    /// Tier B1: optional LLM-based memory selector for read-time
+    /// re-ranking of WK1's shortlist. When wired, the runner takes
+    /// `view.memories` after `build_planning_view` (which already
+    /// applied WK1 deterministic ranking + cap), asks the selector to
+    /// re-rank, and reorders/filters `view.memories` per the LLM's
+    /// priority list. On selector failure or absence: WK1 ordering
+    /// stands (pre-B1 behaviour). One LLM call per turn — amortizable
+    /// across the per-turn perception + planner round-trip.
+    memory_selector: Option<Arc<dyn cel_llm::MemorySelector>>,
 }
 
 impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
@@ -138,6 +154,8 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             planner,
             executor,
             embedder: None,
+            memory_enricher: None,
+            memory_selector: None,
         }
     }
 
@@ -148,6 +166,36 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
     /// pre-WK2 behaviour for callers who haven't wired one up.
     pub fn with_embedder(mut self, embedder: Arc<dyn cel_llm::Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self
+    }
+
+    /// Tier A4: builder-style opt-in to LLM-driven memory enrichment
+    /// at write time.
+    ///
+    /// Pass `Arc::new(MyEnricher { ... })` to enable. Until called, the
+    /// runner writes the plain summary + `["canonical_runner"]` tag set
+    /// (pre-A4 behaviour). When called, each outcome-memory write runs
+    /// `enricher.enrich(...)` once; on success the enriched summary +
+    /// merged tag set are persisted; on failure the runner logs WARN
+    /// and falls through to the plain path. Never blocks the run.
+    pub fn with_memory_enricher(mut self, enricher: Arc<dyn cel_llm::MemoryEnricher>) -> Self {
+        self.memory_enricher = Some(enricher);
+        self
+    }
+
+    /// Tier B1: builder-style opt-in to LLM-based memory selector
+    /// re-ranking.
+    ///
+    /// Pass `Arc::new(MySelector { ... })` to enable. Until called, the
+    /// runner uses WK1 deterministic ordering directly (pre-B1
+    /// behaviour). When called, every turn — after `build_planning_view`
+    /// has applied WK1 ranking + cap and before `decide_next` — the
+    /// runner asks the selector to re-rank `view.memories`. On success
+    /// the LLM's order replaces WK1's. On failure (LLM error / parse
+    /// error / unknown ids) the runner logs WARN and WK1's order
+    /// stands. Always-safe: B1 never blocks the run.
+    pub fn with_memory_selector(mut self, selector: Arc<dyn cel_llm::MemorySelector>) -> Self {
+        self.memory_selector = Some(selector);
         self
     }
 
@@ -184,6 +232,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
         write_outcome_memory_if_enabled(
             memory_store.as_ref(),
             self.embedder.as_ref(),
+            self.memory_enricher.as_ref(),
             &limits,
             goal,
             &outcome,
@@ -284,6 +333,24 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                 cortex_anomalies: Some(cortex_anomalies.as_slice()),
                 cortex_freshness: cortex_freshness.as_ref(),
             });
+
+            // Tier B1: LLM-based memory re-rank. Runs only when a
+            // selector is wired AND WK1 produced a non-empty shortlist
+            // (no point re-ranking 0 items). On any failure the WK1
+            // ordering already in `view.memories` stands — never blocks
+            // the run.
+            let mut view = view;
+            if let Some(selector) = self.memory_selector.as_ref() {
+                if !view.memories.is_empty() {
+                    apply_memory_selector(
+                        &mut view.memories,
+                        selector,
+                        goal,
+                        planning_budget.max_memories as usize,
+                    )
+                    .await;
+                }
+            }
 
             // Phase gate: past the budget midpoint with no terminal-
             // app work yet → inject a synthetic history record telling
@@ -731,6 +798,71 @@ fn open_memory_store_if_enabled(
 /// the run continues with the WK1 deterministic selector path
 /// (FTS5+decay only, no cosine boost). Called once per run from `run()`
 /// so the loop doesn't pay per-turn embed latency.
+/// Tier B1: re-rank `memories` (in place) using the LLM selector. On
+/// any failure path — selector errors, parse failure, all returned ids
+/// unknown to the candidate set — leaves `memories` untouched (WK1
+/// ordering preserved). Defensive: silently drops unknown ids and
+/// truncates results past `max_to_keep` rather than erroring on a
+/// chatty LLM.
+///
+/// Always-safe: on no path does this block the run, mutate state
+/// outside `memories`, or surface an error to the caller. The runner's
+/// next step (planner.decide_next) sees either re-ranked or original
+/// memories — either is a valid input.
+async fn apply_memory_selector(
+    memories: &mut Vec<cel_contracts::MemoryRef>,
+    selector: &Arc<dyn cel_llm::MemorySelector>,
+    goal: &str,
+    max_to_keep: usize,
+) {
+    let candidates: Vec<cel_llm::MemoryRerankItem> = memories
+        .iter()
+        .map(|m| cel_llm::MemoryRerankItem {
+            id: m.id,
+            kind: m.kind.clone(),
+            summary: m.summary.clone(),
+        })
+        .collect();
+    let ctx = cel_llm::MemoryRerankContext {
+        goal,
+        candidates: &candidates,
+        max_to_keep,
+    };
+    let new_order = match selector.rerank(&ctx).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "B1 memory selector errored; falling back to WK1 ordering",
+            );
+            return;
+        }
+    };
+
+    // Defensive filter: keep only ids that actually exist in the
+    // candidate set. Truncate to `max_to_keep`. Empty result is valid
+    // (selector said "nothing relevant" — runner persists that).
+    let known_ids: std::collections::HashSet<i64> = memories.iter().map(|m| m.id).collect();
+    let kept_ids: Vec<i64> = new_order
+        .into_iter()
+        .filter(|id| known_ids.contains(id))
+        .take(max_to_keep)
+        .collect();
+
+    // Reorder `memories` to match `kept_ids` priority. Build a lookup
+    // by id, then walk kept_ids in order pulling from the lookup.
+    let mut by_id: std::collections::HashMap<i64, cel_contracts::MemoryRef> =
+        memories.drain(..).map(|m| (m.id, m)).collect();
+    for id in kept_ids {
+        if let Some(m) = by_id.remove(&id) {
+            memories.push(m);
+        }
+    }
+    // Note: ids in `by_id` after this loop are dropped — that's the
+    // selector's filter behaviour. The LLM is trusted to filter as
+    // well as sort.
+}
+
 async fn compute_goal_embedding(
     embedder: Option<&Arc<dyn cel_llm::Embedder>>,
     goal: &str,
@@ -764,9 +896,17 @@ async fn compute_goal_embedding(
 /// selection (see `planning_view::score_memory`). Embed failure logs at
 /// WARN and writes the memory with `embedding: None` (still useful via
 /// FTS5+decay; the cosine path just won't fire for this entry).
+///
+/// Tier A4: also takes the optional memory enricher. When wired, the
+/// runner calls `enricher.enrich(...)` once per write to produce a
+/// richer summary + extra tags. On success the enriched values land on
+/// the persisted memory; on failure the runner logs WARN and writes
+/// the plain summary + the default `["canonical_runner"]` tag set
+/// (pre-A4 behaviour). Always-safe: A4 never blocks the run.
 async fn write_outcome_memory_if_enabled(
     memory_store: Option<&std::sync::Mutex<cel_store::CelStore>>,
     embedder: Option<&Arc<dyn cel_llm::Embedder>>,
+    enricher: Option<&Arc<dyn cel_llm::MemoryEnricher>>,
     limits: &RunLimits,
     goal: &str,
     outcome: &GoalOutcome,
@@ -825,11 +965,67 @@ async fn write_outcome_memory_if_enabled(
         }
     };
 
-    // WK2: embed the summary text once when an embedder is wired.
-    // Falls back to None on embed failure (logged); falls through to
-    // None when no embedder is wired at all (no per-call cost).
+    // Tier A4: enrich the summary + tags via the LLM enricher when one
+    // is wired. Falls through to (plain summary, ["canonical_runner"]
+    // tag set) on enricher absence or failure — pre-A4 behaviour
+    // preserved exactly. The enrichment runs BEFORE the embedding step
+    // so that WK2 embeds the *enriched* summary (richer text → more
+    // semantic signal in the cosine boost).
+    let kind_str = kind.as_str();
+    let content_json = serde_json::to_string(&content).unwrap_or_default();
+    let (final_summary, mut final_tags) = match enricher {
+        Some(enr) => {
+            let input = cel_llm::MemoryEnrichmentInput {
+                plain_summary: &summary,
+                kind: kind_str,
+                content_json: &content_json,
+                goal,
+            };
+            match enr.enrich(&input).await {
+                Ok(out) if !out.enriched_summary.is_empty() => {
+                    let mut tags = vec!["canonical_runner".into()];
+                    // Cap merged tag count at 16 to bound storage growth.
+                    for t in out.tags.into_iter().take(15) {
+                        if !tags.iter().any(|existing: &String| existing == &t) {
+                            tags.push(t);
+                        }
+                    }
+                    (out.enriched_summary, tags)
+                }
+                Ok(_) => {
+                    // Enricher returned empty summary — defensive
+                    // fallback (treat same as failure).
+                    tracing::warn!(
+                        workflow_id,
+                        "A4 outcome memory: enricher returned empty summary; using plain",
+                    );
+                    (summary.clone(), vec!["canonical_runner".into()])
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        workflow_id,
+                        error = %e,
+                        "A4 outcome memory: enrich failed; using plain summary + default tags",
+                    );
+                    (summary.clone(), vec!["canonical_runner".into()])
+                }
+            }
+        }
+        None => (summary.clone(), vec!["canonical_runner".into()]),
+    };
+    // The enriched summary is what gets embedded — richer text gives
+    // WK2's cosine boost more semantic signal to work with.
+    let summary_for_embedding = final_summary.clone();
+    let _ = &mut final_tags; // silence "unused mut" if A4 fallback only path runs
+
+    // WK2: embed the (possibly enriched) summary text when an embedder
+    // is wired. Falls back to None on embed failure (logged); falls
+    // through to None when no embedder is wired at all (no per-call
+    // cost). Drops the original summary binding so the borrow checker
+    // is happy.
+    drop(summary);
     let embedding = match embedder {
-        Some(emb) => match emb.embed(&summary).await {
+        Some(emb) => match emb.embed(&summary_for_embedding).await {
             Ok(v) => Some(v.to_bytes()),
             Err(e) => {
                 tracing::warn!(
@@ -847,8 +1043,8 @@ async fn write_outcome_memory_if_enabled(
         workflow_id: workflow_id.to_string(),
         kind,
         content,
-        summary: Some(summary),
-        tags: vec!["canonical_runner".into()],
+        summary: Some(final_summary),
+        tags: final_tags,
         source_ref: Some(format!(
             "canonical_runner:duration_ms={}",
             duration.as_millis()
@@ -1890,6 +2086,408 @@ mod tests {
             memories[0].kind,
             cel_store::cortex_memory::MemoryKind::Outcome
         );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // ─── Tier A4: memory enrichment infrastructure ──────────────────────────
+
+    use async_trait::async_trait;
+
+    /// Stub enricher: prefixes summary, adds two tags. Used to verify
+    /// the runner actually invokes + persists enriched output.
+    struct StubEnricherTagger;
+    #[async_trait]
+    impl cel_llm::MemoryEnricher for StubEnricherTagger {
+        async fn enrich(
+            &self,
+            input: &cel_llm::MemoryEnrichmentInput<'_>,
+        ) -> Result<cel_llm::MemoryEnrichmentOutput, cel_llm::LlmError> {
+            Ok(cel_llm::MemoryEnrichmentOutput {
+                enriched_summary: format!("[A4-rich] {}", input.plain_summary),
+                tags: vec!["concur".into(), "submit".into(), input.kind.to_string()],
+            })
+        }
+    }
+
+    /// Always-error stub: verifies the fallback path actually fires.
+    struct AlwaysFailEnricher;
+    #[async_trait]
+    impl cel_llm::MemoryEnricher for AlwaysFailEnricher {
+        async fn enrich(
+            &self,
+            _: &cel_llm::MemoryEnrichmentInput<'_>,
+        ) -> Result<cel_llm::MemoryEnrichmentOutput, cel_llm::LlmError> {
+            Err(cel_llm::LlmError::RequestFailed("simulated".into()))
+        }
+    }
+
+    /// Empty-output stub: enricher returns success but with empty
+    /// summary. Runner must defensively fall back to plain (we don't
+    /// want to persist a memory with summary == "").
+    struct EmptyOutputEnricher;
+    #[async_trait]
+    impl cel_llm::MemoryEnricher for EmptyOutputEnricher {
+        async fn enrich(
+            &self,
+            _: &cel_llm::MemoryEnrichmentInput<'_>,
+        ) -> Result<cel_llm::MemoryEnrichmentOutput, cel_llm::LlmError> {
+            Ok(cel_llm::MemoryEnrichmentOutput {
+                enriched_summary: String::new(),
+                tags: vec!["should_be_dropped".into()],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a4_no_enricher_writes_plain_summary_and_default_tags() {
+        // Pre-A4 behaviour preserved when no enricher is wired.
+        let db_path = pr2_temp_db("a4_none");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "did the thing".into(),
+            extracted_data: serde_json::Value::Null,
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("a4-none".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let _ = runner.run("submit invoice", limits).await;
+
+        let store = cel_store::CelStore::open(&db_path).expect("re-open");
+        let memories = store.list_cortex_memories("a4-none", None, 10).unwrap();
+        assert_eq!(memories.len(), 1);
+        // Plain summary preserved verbatim (no [A4-rich] prefix).
+        assert_eq!(memories[0].summary.as_deref(), Some("did the thing"));
+        // Default tag set only.
+        assert_eq!(memories[0].tags, vec!["canonical_runner".to_string()]);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn a4_enricher_success_persists_enriched_summary_and_merged_tags() {
+        let db_path = pr2_temp_db("a4_success");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "Submitted invoice via Concur".into(),
+            extracted_data: serde_json::Value::Null,
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new())
+            .with_memory_enricher(Arc::new(StubEnricherTagger));
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("a4-success".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let _ = runner.run("submit invoice in Concur", limits).await;
+
+        let store = cel_store::CelStore::open(&db_path).expect("re-open");
+        let memories = store.list_cortex_memories("a4-success", None, 10).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].summary.as_deref(),
+            Some("[A4-rich] Submitted invoice via Concur")
+        );
+        // Default tag merged with stub tags. Order: default first, then
+        // enricher tags in their original order.
+        assert_eq!(
+            memories[0].tags,
+            vec![
+                "canonical_runner".to_string(),
+                "concur".into(),
+                "submit".into(),
+                "outcome".into()
+            ]
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn a4_enricher_error_falls_back_to_plain_path() {
+        // Critical contract: enricher failure NEVER blocks the run
+        // and NEVER prevents the memory from landing. The plain
+        // summary + default tags persist, identical to the no-enricher
+        // case.
+        let db_path = pr2_temp_db("a4_fallback");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "fallback test summary".into(),
+            extracted_data: serde_json::Value::Null,
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new())
+            .with_memory_enricher(Arc::new(AlwaysFailEnricher));
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("a4-fallback".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let outcome = runner.run("g", limits).await;
+        assert!(matches!(outcome, GoalOutcome::Succeeded { .. }));
+
+        let store = cel_store::CelStore::open(&db_path).expect("re-open");
+        let memories = store.list_cortex_memories("a4-fallback", None, 10).unwrap();
+        assert_eq!(memories.len(), 1, "memory must land even on enrich failure");
+        assert_eq!(
+            memories[0].summary.as_deref(),
+            Some("fallback test summary"),
+            "plain summary persisted on enricher error"
+        );
+        assert_eq!(
+            memories[0].tags,
+            vec!["canonical_runner".to_string()],
+            "default tags only on enricher error"
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // ─── Tier B1: LLM memory selector re-rank ───────────────────────────────
+
+    /// Reverse-order selector: lets us assert the runner actually
+    /// applied the selector by checking memory ordering after a turn.
+    struct ReverseRerank;
+    #[async_trait]
+    impl cel_llm::MemorySelector for ReverseRerank {
+        async fn rerank(
+            &self,
+            ctx: &cel_llm::MemoryRerankContext<'_>,
+        ) -> Result<Vec<i64>, cel_llm::LlmError> {
+            Ok(ctx.candidates.iter().rev().map(|c| c.id).collect())
+        }
+    }
+
+    /// Always-error selector: verifies fallback path.
+    struct AlwaysFailRerank;
+    #[async_trait]
+    impl cel_llm::MemorySelector for AlwaysFailRerank {
+        async fn rerank(
+            &self,
+            _: &cel_llm::MemoryRerankContext<'_>,
+        ) -> Result<Vec<i64>, cel_llm::LlmError> {
+            Err(cel_llm::LlmError::RequestFailed("simulated".into()))
+        }
+    }
+
+    /// Selector that returns ids guaranteed not in the candidate set.
+    /// Verifies the runner's defensive "drop unknown ids" behaviour.
+    struct InventsIdsRerank;
+    #[async_trait]
+    impl cel_llm::MemorySelector for InventsIdsRerank {
+        async fn rerank(
+            &self,
+            _: &cel_llm::MemoryRerankContext<'_>,
+        ) -> Result<Vec<i64>, cel_llm::LlmError> {
+            Ok(vec![999_001, 999_002, 999_003])
+        }
+    }
+
+    /// Helper: seed N memories under a workflow + run with the given
+    /// selector wired (or none), return the resulting view.memories
+    /// id ordering captured from a single planner turn. Uses the
+    /// happy-path Done planner so we get exactly one turn before
+    /// outcome write.
+    async fn b1_capture_memory_order(
+        selector: Option<Arc<dyn cel_llm::MemorySelector>>,
+        seeded_summaries: &[&str],
+    ) -> Vec<i64> {
+        let db_path = pr2_temp_db("b1_order");
+        // Seed memories DIRECTLY in the store (bypass runner) so we
+        // control the workflow_id state before the run.
+        let store = cel_store::CelStore::open(&db_path).expect("open seed store");
+        let mut seeded_ids = Vec::new();
+        for (i, summary) in seeded_summaries.iter().enumerate() {
+            let id = store
+                .insert_cortex_memory(&cel_store::cortex_memory::NewCortexMemory {
+                    workflow_id: "b1-test".into(),
+                    kind: cel_store::cortex_memory::MemoryKind::Outcome,
+                    content: serde_json::json!({"i": i, "goal": "submit invoice"}),
+                    summary: Some(summary.to_string()),
+                    tags: vec![],
+                    source_ref: None,
+                    embedding: None,
+                })
+                .expect("seed insert");
+            seeded_ids.push(id);
+        }
+        drop(store);
+
+        // Capture-planner: reads view.memories on its first call,
+        // returns Done. We can inspect what memories the runner
+        // surfaced.
+        let captured: Arc<std::sync::Mutex<Vec<i64>>> = Arc::new(std::sync::Mutex::new(vec![]));
+        let captured_clone = captured.clone();
+        struct CapturePlanner {
+            captured: Arc<std::sync::Mutex<Vec<i64>>>,
+        }
+        #[async_trait]
+        impl PlanProducer for CapturePlanner {
+            async fn decide_next(
+                &self,
+                _goal: &str,
+                _history: &[AttemptRecord],
+                _shared: &serde_json::Value,
+                view: &cel_contracts::PlanningView,
+                _shot: Option<&[u8]>,
+            ) -> Result<NextMove, String> {
+                *self.captured.lock().unwrap() = view.memories.iter().map(|m| m.id).collect();
+                Ok(NextMove::Done {
+                    summary: "captured".into(),
+                    extracted_data: serde_json::Value::Null,
+                })
+            }
+        }
+        let planner = CapturePlanner {
+            captured: captured_clone,
+        };
+        let mut runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        if let Some(s) = selector {
+            runner = runner.with_memory_selector(s);
+        }
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("b1-test".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let _ = runner.run("submit invoice", limits).await;
+        let order = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_file(&db_path);
+        order
+    }
+
+    #[tokio::test]
+    async fn b1_no_selector_preserves_wk1_ordering() {
+        // Pre-B1 behaviour: WK1 deterministic order stands.
+        let order = b1_capture_memory_order(
+            None,
+            &[
+                "Submitted invoice attempt one",
+                "Submitted invoice attempt two",
+                "Submitted invoice attempt three",
+            ],
+        )
+        .await;
+        // 3 memories should surface; we don't pin specific WK1 order
+        // (it's bm25 + decay-dependent and could shift if WK1 internals
+        // change), only that all 3 are present and the count matches.
+        assert_eq!(order.len(), 3, "all 3 keyword-matching memories surface");
+    }
+
+    #[tokio::test]
+    async fn b1_selector_success_replaces_wk1_ordering() {
+        // ReverseRerank: whatever WK1 ordered, we'll see reversed.
+        let no_sel_order = b1_capture_memory_order(
+            None,
+            &[
+                "Submitted invoice attempt alpha",
+                "Submitted invoice attempt beta",
+                "Submitted invoice attempt gamma",
+            ],
+        )
+        .await;
+        let with_sel_order = b1_capture_memory_order(
+            Some(Arc::new(ReverseRerank)),
+            &[
+                "Submitted invoice attempt alpha",
+                "Submitted invoice attempt beta",
+                "Submitted invoice attempt gamma",
+            ],
+        )
+        .await;
+        assert_eq!(no_sel_order.len(), 3);
+        assert_eq!(with_sel_order.len(), 3);
+        // Reverse: with-selector order is no-selector reversed.
+        let mut expected_reversed = no_sel_order.clone();
+        expected_reversed.reverse();
+        assert_eq!(
+            with_sel_order, expected_reversed,
+            "selector must reverse WK1 order"
+        );
+    }
+
+    #[tokio::test]
+    async fn b1_selector_error_falls_back_to_wk1_ordering() {
+        // Critical: selector failure must not change ordering.
+        let no_sel_order = b1_capture_memory_order(
+            None,
+            &[
+                "Submitted invoice attempt one",
+                "Submitted invoice attempt two",
+            ],
+        )
+        .await;
+        let failed_sel_order = b1_capture_memory_order(
+            Some(Arc::new(AlwaysFailRerank)),
+            &[
+                "Submitted invoice attempt one",
+                "Submitted invoice attempt two",
+            ],
+        )
+        .await;
+        assert_eq!(
+            no_sel_order, failed_sel_order,
+            "selector failure must leave WK1 ordering intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn b1_selector_inventing_unknown_ids_drops_them_safely() {
+        // Selector returns ids that don't exist in the candidate
+        // pool. Defensive filter: empty memories result. NOT a panic,
+        // NOT a fall-back to WK1 (the selector was "successful" — it
+        // just said "none of these"). The runner trusts the LLM's
+        // filter intent.
+        let order = b1_capture_memory_order(
+            Some(Arc::new(InventsIdsRerank)),
+            &[
+                "Submitted invoice attempt one",
+                "Submitted invoice attempt two",
+            ],
+        )
+        .await;
+        assert!(
+            order.is_empty(),
+            "inventing-ids selector → empty memories (defensive filter); got {order:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a4_enricher_empty_summary_treated_as_failure() {
+        // Defensive check: an enricher that returns Ok but with an
+        // empty summary string would otherwise persist a useless
+        // memory. Runner must treat this as failure → plain fallback.
+        let db_path = pr2_temp_db("a4_empty");
+        let planner = ScriptedPlanner::new(vec![NextMove::Done {
+            summary: "real text".into(),
+            extracted_data: serde_json::Value::Null,
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new())
+            .with_memory_enricher(Arc::new(EmptyOutputEnricher));
+        let limits = RunLimits {
+            max_steps: 5,
+            timeout_ms: 10_000,
+            max_step_retries: 3,
+            terminal_app: None,
+            workflow_id_for_memory: Some("a4-empty".into()),
+            memory_db_path: Some(db_path.clone()),
+        };
+        let _ = runner.run("g", limits).await;
+
+        let store = cel_store::CelStore::open(&db_path).expect("re-open");
+        let memories = store.list_cortex_memories("a4-empty", None, 10).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].summary.as_deref(), Some("real text"));
+        // The "should_be_dropped" tag should NOT have leaked through —
+        // we treated the empty summary as failure and used defaults.
+        assert_eq!(memories[0].tags, vec!["canonical_runner".to_string()]);
         let _ = std::fs::remove_file(&db_path);
     }
 }

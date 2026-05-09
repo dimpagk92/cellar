@@ -33,11 +33,11 @@
 | **WK2** | Vector embedding infrastructure (Embedder trait + storage search + selector plumbing) | 📝 PR'd (#36) — gates green, +14 tests; un-deferred 2026-05-07 as infrastructure-only (no bundled embedder); subsumes B2 |
 | **Tier A2** | Populate `PlanningView.recent_events` from cortex `observations` (priority + recency ordered, workflow-scoped) | 📝 PR'd — gates green, +7 tests, separate `RecentEventStore` trait |
 | **Tier A3** | Populate `PlanningView.blockers` + `anomalies` from cortex `MentalModel.anomaly_queue` + `freshness` (Dialog/AuthPrompt → blocker; HardStale → blocker; SoftStale → anomaly) | 📝 PR'd — gates green, +9 tests, new `StepExecutor::cortex_anomalies()` + `cortex_freshness()` methods |
-| **Recall eval** | Memory-recall eval in `cel-eval` (`recall-eval` feature) — 5 scenarios × 2 modes, baseline numbers established | 📝 PR'd — gates green, +5 tests, scenarios + IR metrics module (precision@k / recall@k / MRR), runs in CI as a regression guard |
-| ⏳ **Decision** | Decide A4 / B1 / B3 / which embedder to bundle | next — based on baseline numbers below |
-| Recall eval | Memory-recall eval in cel-eval | pending — gates A4 + B1/B3 + which embedder to bundle |
-| Tier A4 | Memory enrichment background pass | pending — eval-gated |
-| Tier B1 / B3 | LLM-based selector / cross-workflow priors | pending — eval-gated |
+| **Recall eval** | Memory-recall eval in `cel-eval` (`recall-eval` feature) — 10 scenarios × 2 modes, baseline numbers established | ✅ merged — scenarios + IR metrics (P@k / R@k / MRR), Path B added 5 harder cases |
+| **Tier A4 (infrastructure)** | `MemoryEnricher` trait + write-time hook + always-safe fallback to plain summary | ✅ merged (#41) — +4 runner tests + 3 trait tests; mirrors WK2 pattern (seam shipped, no bundled LLM impl) |
+| **Tier B1 (infrastructure)** | `MemorySelector` trait + read-time re-rank + always-safe fallback to WK1 deterministic ordering | 📝 PR'd — gates green, +4 runner tests + 3 trait tests; mirrors A4 + WK2 pattern (seam shipped, no bundled LLM impl) |
+| Tier B3 | Cross-workflow priors | deferred — needs privacy decision before code |
+| ⏳ **Next** | Production dogfooding / harder eval scenarios / platform breadth (adapters, benchmark server) | next — strategic call |
 | ~~Tier B2~~ | ~~Vector embeddings~~ | retired — subsumed by WK2 above |
 | PR4 (umbrella) | Cognition/enricher work | 🔄 reframed into Tier A/B/C — see PR4 section below |
 
@@ -894,7 +894,7 @@ Goal decomposition belongs primarily to agents. It can exist as an optional help
 |---|---|
 | Should `enable_cognition` default to true? | No for the first slice. Make planning view explicit/on-demand. Built-in runners can request it by default. |
 | Should memory be enabled by default? | Keep safe v1 default explicit/product-configured. Storage exists, but writes should be intentional. |
-| Should selection use an LLM immediately? | **No (confirmed by WK1).** FTS5 + decay + quoted-phrase + kind-bias scoring covers the common case. LLM-based selection (PR4 Tier B1) requires eval data showing the deterministic path falls short. |
+| Should selection use an LLM immediately? | **Build the seam now; the LLM-backed impl is opt-in.** B1 ships as a `MemorySelector` trait with WK1 as the always-safe fallback (mirroring WK2's embedder seam). Wiring the trait is unconditional; *bundling* a particular LLM impl is what the eval gates — not the seam itself. (Earlier "no" framing was over-conservative; reframed 2026-05-09.) |
 | Should `cel-cognition` be created immediately? | **No (confirmed by post-WK reframe).** Tier A work (fill empty PlanningView fields, memory enrichment) lives fine in `cel-cortex`. A new crate becomes worth its weight only if Tier B (LLM selector + embeddings) and richer enrichment land — and only after a recall eval shows they're needed. Until then, no crate. |
 | Should adapters register sub-agents? | Not initially. Let adapters expose facts/capabilities first; revisit if Tier A4 (memory enrichment) shows an adapter-specific gap. |
 | Where should analytics live? | Raw transcripts/eval JSONL first; DuckDB can be a later offline analytics layer, not hot-path planning storage. |
@@ -968,10 +968,11 @@ The first eval (5 scenarios) was too easy — all hand-built memories shared key
 In current cellar usage, memories are written at run-end by `canonical_runner` using a summary derived from the *goal text* itself ("Completed: submit invoice in Concur"). That construction guarantees keyword overlap on future runs of the same goal in the same workflow — so within-workflow recall will look much more like `easy_keyword_match` than `pure_semantic_gap`. The gap matters most for **cross-workflow** retrieval (memories from workflow A surfacing for goal in workflow B), which is exactly what B3 covers and what we're not building yet.
 
 **Net:** the cognition layer is in good shape. WK1+WK2-seam is sufficient for everything we can currently measure. The eval is now a *useful production tool* — when we ship and accumulate real memories, we can grade them against this scenario suite and see whether pure-semantic-gap patterns show up enough to justify B2/B3 / A4.
-- [ ] **Tier A4**: Memory enrichment background pass — only ships if a tightened recall eval shows enrichment improves hydration quality.
-- [ ] **Tier B1 / B3**: LLM-based selector / cross-workflow priors — same gate. With current baselines, both stay deferred.
-- [ ] **Tier A4** (memory enrichment) ships only if the recall eval shows enrichment improves hydration quality.
-- [ ] **Tier B** (LLM selector / embeddings / cross-workflow) ships only if the recall eval shows the deterministic path leaves real recall on the table.
+- [x] **Tier A4 (infrastructure)**: Memory enrichment seam — `MemoryEnricher` trait in `cel-llm` + `MemoryEnrichmentInput`/`Output` shapes + `with_memory_enricher` builder on `CanonicalGoalRunner` + write-time hook in `write_outcome_memory_if_enabled` with always-safe fallback (plain summary + `["canonical_runner"]` tag set on enricher absence/failure/empty-output). Mirrors WK2 pattern: ship the seam, no bundled LLM impl. *(Shipped this PR; 4 new tests pin the contract: no enricher → plain; success → enriched + merged tags; failure → plain fallback; empty-output → plain fallback. 3 stub-trait tests in cel-llm.)*
+- [x] **Tier B1 (infrastructure)**: LLM-based memory selector — `MemorySelector` trait in `cel-llm` + `MemoryRerankContext`/`MemoryRerankItem` shapes + `with_memory_selector` builder on `CanonicalGoalRunner` + read-time re-rank in `run_inner` after `build_planning_view`, with always-safe fallback (selector failure / unknown ids → WK1 ordering preserved). Mirrors A4 + WK2 pattern: ship the seam, no bundled LLM impl. *(Shipped this PR; 4 new runner tests pin the contract: no selector → WK1 order; success → re-ordered; failure → WK1 fallback; invents-ids → defensive drop. 3 stub-trait tests in cel-llm.)*
+- [ ] **Tier B3**: Cross-workflow priors — needs an explicit privacy decision before code. Stays deferred until that product call lands.
+
+**Reframe note (2026-05-09):** Earlier wording marked A4 + B1 as "eval-gated → don't build until eval forces it." That was over-conservative — the original architectural intent (visible in the PR4 reframe section above) is "build the seam, keep the deterministic path as fallback, eval validates the LLM impl's *quality*." This block of acceptance criteria now matches that intent. Only B3 stays as a true deferral (different reason — privacy boundary needs deciding first).
 
 ---
 

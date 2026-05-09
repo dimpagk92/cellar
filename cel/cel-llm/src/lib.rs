@@ -6,12 +6,16 @@
 mod client;
 mod config;
 mod embedder;
+mod enricher;
 mod error;
+mod selector;
 
 pub use client::LlmClient;
 pub use config::{LlmProviderConfig, LlmRole, ModelProfile, ModelTier, ProviderKind};
 pub use embedder::{cosine_similarity, Embedder, EmbeddingVector};
+pub use enricher::{MemoryEnricher, MemoryEnrichmentInput, MemoryEnrichmentOutput};
 pub use error::LlmError;
+pub use selector::{MemoryRerankContext, MemoryRerankItem, MemorySelector};
 
 /// Content part in a chat message (text or image).
 #[derive(Debug, Clone, serde::Serialize)]

@@ -211,6 +211,14 @@ fn spawn_real_execution(
         };
 
         // Canonical GoalOutcome → worker JobStatus.
+        //
+        // `Refused` is the agent's "ask the user to clarify" terminal
+        // (added with `NextMove::Clarify`). The worker protocol doesn't
+        // model a distinct refused status, so it surfaces as a `Failed`
+        // job with the clarification question in the error field.
+        // Clients that need to distinguish read the structured `result`
+        // JSON, which round-trips `GoalOutcome::Refused` verbatim via
+        // `serde_json::to_value(&outcome)` a few lines above.
         let (job_status, error) = match &outcome {
             cel_contracts::GoalOutcome::Succeeded { .. } => (JobStatus::Succeeded, None),
             cel_contracts::GoalOutcome::Failed(report) => (
@@ -221,6 +229,10 @@ fn spawn_real_execution(
                     report.failing_step,
                     report.attempts.last().cloned().unwrap_or_default()
                 )),
+            ),
+            cel_contracts::GoalOutcome::Refused { summary } => (
+                JobStatus::Failed,
+                Some(format!("clarification needed: {summary}")),
             ),
         };
         store.update_status(&job_id, job_status, Some(result_json), error);

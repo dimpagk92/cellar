@@ -2,7 +2,7 @@
 //!
 //! One method, one decision: given the goal, the full history of what the
 //! agent has done so far, the live perception + screenshot, return the next
-//! move (a batch of steps, or Done, or Fail).
+//! move (a batch of steps, or Done, or Fail, or Clarify).
 //!
 //! Lives in cel-contracts so cortex/runner can describe the contract without
 //! depending on cel-planner and so any planner runtime (LangGraph, Mastra,
@@ -52,6 +52,10 @@ pub trait PlanProducer: Send + Sync {
     ///   `GoalOutcome::Succeeded`.
     /// * `NextMove::Fail { reason }` — terminate as
     ///   `GoalOutcome::Failed`.
+    /// * `NextMove::Clarify { question }` — refuse to act because the
+    ///   goal is too ambiguous or destructive without confirmation;
+    ///   terminate as `GoalOutcome::Refused` with `question` in the
+    ///   summary.
     ///
     /// Errors propagate to the runner as a planner-layer failure
     /// (e.g. LLM down, parse failure) and terminate the run.

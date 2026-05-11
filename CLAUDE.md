@@ -45,6 +45,23 @@ Built-in planners and runners can exist, but they should be treated as clients, 
 Prefer agent-agnostic evals that test CEL and adapter capabilities.
 Runtime-specific evals are allowed, but they should be clearly isolated and secondary.
 
+## Adapter Layout (May 2026)
+
+Adapters live under `adapters/`. Two parallel languages, same `AdapterDriver` contract:
+
+- **Rust adapters** (in-process, called via the cortex tick loop):
+  `adapters/numbers`, `adapters/excel`, `adapters/sap-gui`, `adapters/bloomberg`,
+  `adapters/metatrader`, `adapters/browser-rs`.
+- **TypeScript adapters** (out-of-process via `ProcessDriver`, used by the
+  LangGraph runtime): `adapters/browser`.
+
+Browser perception is provided by **two** browser adapters that share the same
+conceptual contract: `adapters/browser/` (TS, Playwright + watchdogs) and
+`adapters/browser-rs/` (Rust, in-process via `cel-cdp`). Both declare
+`truth_surface: "browser_dom"` so the cortex tags their elements as
+`ContextSource::Cdp`. See `docs/adapters-cel-agents.md` § "Browser perception"
+for the unification roadmap.
+
 ## Files To Read First
 
 - [docs/adapters-cel-agents.md](docs/adapters-cel-agents.md)

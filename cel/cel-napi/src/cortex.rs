@@ -98,6 +98,12 @@ pub(crate) fn get_cortex_handle() -> Option<Arc<cel_cortex::Cortex>> {
 /// Boot the Rust Cortex — starts the always-on 200ms perception tick loop.
 #[napi]
 pub fn boot_cortex() -> napi::Result<()> {
+    // Ensure tracing is on before any `tracing::*` macro fires below.
+    // Without this, the AX-permission warning (and any other boot-time
+    // diagnostics) get silently dropped because the global subscriber
+    // hasn't been installed yet.
+    crate::ensure_tracing_init();
+
     let handle = rt_handle()?;
 
     let mut state = get_state()
@@ -106,6 +112,24 @@ pub fn boot_cortex() -> napi::Result<()> {
 
     if state.cortex.is_some() {
         return Err(napi::Error::from_reason("Cortex already running"));
+    }
+
+    // One-shot AX-trust check. Without this permission, every cortex tick
+    // emits the same `Accessibility tree unavailable` WARN — easy to drown
+    // in. Surfacing it once here, with the fix path, makes the failure
+    // diagnosable without grepping logs.
+    #[cfg(target_os = "macos")]
+    if !cel_accessibility::ax_is_process_trusted() {
+        tracing::warn!(
+            target: "cel_napi::cortex",
+            "macOS Accessibility permission missing for the host process. \
+             AX-element observations will be empty until granted. \
+             Fix: System Settings → Privacy & Security → Accessibility, \
+             then enable the host (Terminal / Claude Desktop / Claude Code / \
+             Cursor / etc.) and restart it. \
+             CDP browser perception and adapter-driven app truth (Numbers, \
+             Excel, …) work without AX trust."
+        );
     }
 
     let a11y = cel_accessibility::create_tree();
@@ -127,6 +151,14 @@ pub fn boot_cortex() -> napi::Result<()> {
     let mut cortex = cel_cortex::Cortex::new("mcp-default".into()).with_native_input_unsafe();
     #[cfg(target_os = "macos")]
     cortex.register_adapter(Box::new(adapter_numbers::NumbersAdapter::new()));
+    // Register the native browser adapter so MCP clients automatically get
+    // DOM perception when a CDP target is reachable. Registered without a
+    // CDP client up front — `BrowserAdapter::probe()` returns false until
+    // one is bound, so the cortex tick loop simply leaves the adapter
+    // inactive in non-browser sessions. When the user's MCP host opens a
+    // browser and `cel_cdp::connect_to_focused_app()` succeeds, the
+    // adapter activates without any extra wiring.
+    cortex.register_adapter(Box::new(adapter_browser::BrowserAdapter::new()));
     if let Some((capture, config)) = default_audio_capture() {
         cortex = cortex.with_audio(capture, config);
         stream_status.audio_capture = true;

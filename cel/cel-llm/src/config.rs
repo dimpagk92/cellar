@@ -44,16 +44,41 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// Default API endpoint for this provider.
+    /// Default API endpoint for this provider. All endpoints are
+    /// OpenAI-compatible chat completions URLs — Anthropic uses its compat
+    /// shim (`/v1/chat/completions` instead of native `/v1/messages`) so the
+    /// LlmClient can speak one protocol everywhere.
     pub fn default_endpoint(&self) -> &str {
         match self {
             Self::OpenAI => "https://api.openai.com/v1/chat/completions",
             Self::Gemini => {
                 "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
             }
-            Self::Anthropic => "https://api.anthropic.com/v1/messages",
+            // OpenAI-compat shim, NOT native /v1/messages.
+            // See https://docs.anthropic.com/en/api/openai-sdk
+            Self::Anthropic => "https://api.anthropic.com/v1/chat/completions",
             Self::Ollama => "http://localhost:11434/v1/chat/completions",
             Self::HuggingFace | Self::Custom => "",
+        }
+    }
+
+    /// Auto-detect provider from a base URL (or full chat completions URL)
+    /// when `CEL_LLM_PROVIDER` is unset. Lets users switch backends just by
+    /// changing `CEL_LLM_BASE_URL` without flipping a separate provider flag.
+    /// Falls back to `Custom` for unknown hosts (still works — we send
+    /// OpenAI-shaped requests with Bearer auth, the de facto standard).
+    pub fn from_base_url(url: &str) -> Self {
+        let url = url.to_lowercase();
+        if url.contains("api.anthropic.com") {
+            Self::Anthropic
+        } else if url.contains("api.openai.com") {
+            Self::OpenAI
+        } else if url.contains("generativelanguage.googleapis.com") {
+            Self::Gemini
+        } else if url.contains("localhost") || url.contains("127.0.0.1") {
+            Self::Ollama
+        } else {
+            Self::Custom
         }
     }
 
@@ -213,19 +238,29 @@ pub struct LlmProviderConfig {
 impl LlmProviderConfig {
     /// Build configuration from environment variables.
     ///
-    /// Reads the following env vars:
-    /// - `CEL_LLM_PROVIDER` — provider name (openai, anthropic, gemini, huggingface, custom)
-    /// - `CEL_LLM_MODEL` — model name/ID override
-    /// - `CEL_LLM_API_KEY` — API key (falls back to provider-specific vars below)
-    /// - `CEL_LLM_ENDPOINT` — custom endpoint URL override
+    /// Minimal config for the common case — three env vars, one provider:
     ///
-    /// Provider-specific API key fallbacks (checked when `CEL_LLM_API_KEY` is unset):
-    /// - `OPENAI_API_KEY`
-    /// - `ANTHROPIC_API_KEY`
-    /// - `GEMINI_API_KEY`
-    /// - `HUGGINGFACE_API_KEY` / `HF_API_KEY`
+    /// - `CEL_LLM_API_KEY` — your API key (single key for the whole runtime)
+    /// - `CEL_LLM_BASE_URL` — full chat completions URL (OpenAI-compatible).
+    ///   Switch providers just by changing this. Examples:
+    ///   - Anthropic: `https://api.anthropic.com/v1/chat/completions`
+    ///   - Gemini:    `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`
+    ///   - OpenAI:    `https://api.openai.com/v1/chat/completions`
+    ///   - Ollama:    `http://localhost:11434/v1/chat/completions`
+    /// - `CEL_LLM_MODEL` — model id (e.g. `claude-sonnet-4-20250514`,
+    ///   `gemini-2.5-flash`, `gpt-4o`)
     ///
-    /// Returns `None` if `CEL_LLM_PROVIDER` is not set.
+    /// `CEL_LLM_PROVIDER` is optional; auto-detected from `CEL_LLM_BASE_URL`
+    /// when unset. `CEL_LLM_ENDPOINT` is kept as an alias for `CEL_LLM_BASE_URL`
+    /// for backwards compatibility.
+    ///
+    /// Provider-specific API key fallbacks (when `CEL_LLM_API_KEY` is unset):
+    /// `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+    /// `HUGGINGFACE_API_KEY` / `HF_API_KEY`. Useful when you already have
+    /// a provider key in your shell env.
+    ///
+    /// Returns `None` if neither `CEL_LLM_PROVIDER` nor `CEL_LLM_BASE_URL`
+    /// is set.
     pub fn from_env() -> Option<Self> {
         Self::from_env_with_role(LlmRole::General)
     }
@@ -233,23 +268,49 @@ impl LlmProviderConfig {
     /// Build configuration from environment variables with role-based override.
     ///
     /// Resolution order for each field:
-    /// 1. `CEL_LLM_{ROLE}_X` (e.g., `CEL_LLM_PLANNER_PROVIDER`)
-    /// 2. `CEL_LLM_X` (base fallback)
-    /// 3. Provider-specific keys (e.g., `ANTHROPIC_API_KEY`)
+    /// 1. `CEL_LLM_{ROLE}_X` (e.g., `CEL_LLM_PLANNER_PROVIDER`) — power-user
+    ///    knob for mixed-provider setups (cheap Gemini for vision + premium
+    ///    Sonnet for planner).
+    /// 2. `CEL_LLM_X` (base fallback — the common case)
+    /// 3. Provider-specific keys (e.g., `ANTHROPIC_API_KEY`) for the API key
+    ///    field only.
     ///
-    /// Returns `None` if no provider can be resolved.
+    /// Returns `None` if no provider can be resolved (neither
+    /// `CEL_LLM_PROVIDER` nor `CEL_LLM_BASE_URL` is set).
     pub fn from_env_with_role(role: LlmRole) -> Option<Self> {
         let prefix = role.env_prefix();
 
-        // Provider: try role-specific, then base
-        let provider_str = if role != LlmRole::General {
+        // Endpoint / base URL: read first, since provider can be auto-detected
+        // from it when `CEL_LLM_PROVIDER` is unset. Accept both
+        // `CEL_LLM_BASE_URL` (the documented name) and `CEL_LLM_ENDPOINT`
+        // (legacy alias). Role-specific overrides take precedence.
+        let endpoint = if role != LlmRole::General {
+            std::env::var(format!("{prefix}_BASE_URL"))
+                .or_else(|_| std::env::var(format!("{prefix}_ENDPOINT")))
+                .or_else(|_| std::env::var("CEL_LLM_BASE_URL"))
+                .or_else(|_| std::env::var("CEL_LLM_ENDPOINT"))
+                .ok()
+        } else {
+            std::env::var("CEL_LLM_BASE_URL")
+                .or_else(|_| std::env::var("CEL_LLM_ENDPOINT"))
+                .ok()
+        };
+
+        // Provider: explicit `CEL_LLM_PROVIDER` wins; else auto-detect from
+        // the base URL; else bail. Lets users get away with just BASE_URL +
+        // API_KEY + MODEL, no provider flag.
+        let explicit_provider = if role != LlmRole::General {
             std::env::var(format!("{prefix}_PROVIDER"))
                 .or_else(|_| std::env::var("CEL_LLM_PROVIDER"))
-                .ok()?
+                .ok()
         } else {
-            std::env::var("CEL_LLM_PROVIDER").ok()?
+            std::env::var("CEL_LLM_PROVIDER").ok()
         };
-        let provider = ProviderKind::from(provider_str.as_str());
+        let provider = match (explicit_provider.as_deref(), endpoint.as_deref()) {
+            (Some(p), _) => ProviderKind::from(p),
+            (None, Some(url)) if !url.is_empty() => ProviderKind::from_base_url(url),
+            (None, _) => return None,
+        };
 
         // API key: role-specific → base → provider-specific
         let api_key = if role != LlmRole::General {
@@ -270,15 +331,6 @@ impl LlmProviderConfig {
                 .ok()
         } else {
             std::env::var("CEL_LLM_MODEL").ok()
-        };
-
-        // Endpoint: role-specific → base
-        let endpoint = if role != LlmRole::General {
-            std::env::var(format!("{prefix}_ENDPOINT"))
-                .or_else(|_| std::env::var("CEL_LLM_ENDPOINT"))
-                .ok()
-        } else {
-            std::env::var("CEL_LLM_ENDPOINT").ok()
         };
 
         // Escalation model: role-specific → base
@@ -354,10 +406,17 @@ impl LlmProviderConfig {
         let content = std::fs::read_to_string(&path).ok()?;
         let file: ConfigFile = toml::from_str(&content).ok()?;
         let llm = file.llm?;
+        let provider = ProviderKind::from(llm.provider.as_str());
+        // `cellar init` writes a config.toml without an `api_key` (the key
+        // lives in the environment). Fall back to the provider-specific env
+        // var so we don't ship an empty `Authorization: Bearer` header.
+        let api_key = llm
+            .api_key
+            .or_else(|| Self::provider_specific_key(&provider));
         Some(Self {
-            provider: ProviderKind::from(llm.provider.as_str()),
+            provider,
             endpoint: llm.endpoint,
-            api_key: llm.api_key,
+            api_key,
             model: llm.model,
             temperature: llm.temperature,
             escalation_model: llm.escalation_model,
@@ -479,6 +538,55 @@ model = "gemma4:e4b"
             "http://localhost:11434/v1/chat/completions"
         );
         assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn test_from_config_file_falls_back_to_provider_specific_env() {
+        // Regression: with the default `cellar init` config.toml (provider
+        // only, no api_key) and `ANTHROPIC_API_KEY` exported, the loaded
+        // config must carry the env-var key — otherwise requests go out with
+        // an empty bearer token and the server returns HTTP 401.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_anthropic = std::env::var("ANTHROPIC_API_KEY").ok();
+        let prev_oauth = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+
+        let tmp = std::env::temp_dir().join(format!(
+            "cel-llm-config-fallback-test-{}",
+            std::process::id()
+        ));
+        let cellar_dir = tmp.join(".cellar");
+        std::fs::create_dir_all(&cellar_dir).unwrap();
+        std::fs::write(
+            cellar_dir.join("config.toml"),
+            r#"[llm]
+provider = "anthropic"
+"#,
+        )
+        .unwrap();
+
+        std::env::set_var("HOME", &tmp);
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-fallback");
+        std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
+        let config = LlmProviderConfig::from_config_file().expect("should load config");
+
+        // Restore env before asserting so a panic doesn't poison other tests.
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_anthropic {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+        match prev_oauth {
+            Some(v) => std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", v),
+            None => std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(config.provider, ProviderKind::Anthropic);
+        assert_eq!(config.api_key.as_deref(), Some("sk-ant-test-fallback"));
     }
 
     #[test]

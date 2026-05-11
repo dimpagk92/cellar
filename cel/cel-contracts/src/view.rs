@@ -257,6 +257,10 @@ pub struct KnowledgeRef {
 /// only facts about the active adapter for the focused app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterFactRef {
+    /// Optional stable id supplied by the adapter. When absent, CEL
+    /// synthesizes evidence ids from adapter/kind/payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub adapter: String,
     pub kind: String,
     pub payload: serde_json::Value,

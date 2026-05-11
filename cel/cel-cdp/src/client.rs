@@ -26,6 +26,16 @@ pub struct CdpClient {
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
     >,
+    /// WebSocket URL captured at construction so the resilient
+    /// retry path can rebuild the WebSocket if Chrome drops the
+    /// underlying connection mid-run. Wrapped in a Mutex because
+    /// reconnection sometimes has to fall back to a freshly-
+    /// discovered target (Chrome destroyed the original page) —
+    /// the URL the next reconnect should try is updated after a
+    /// successful re-discovery so we don't keep banging on a dead
+    /// target. Empty when the URL isn't known (legacy callers
+    /// that bypass `connect`).
+    ws_url: std::sync::Mutex<String>,
     next_id: AtomicU64,
 }
 
@@ -38,6 +48,7 @@ impl CdpClient {
 
         Ok(Self {
             ws: Mutex::new(ws),
+            ws_url: std::sync::Mutex::new(ws_url.to_string()),
             next_id: AtomicU64::new(1),
         })
     }
@@ -145,6 +156,42 @@ impl CdpClient {
     pub async fn get_url(&self) -> Result<String, CdpError> {
         let result = self.evaluate("window.location.href").await?;
         Ok(result.as_str().unwrap_or("").to_string())
+    }
+
+    /// Capture a screenshot of the bound page via `Page.captureScreenshot`.
+    ///
+    /// Returns JPEG bytes at quality 80, viewport-only (no
+    /// `captureBeyondViewport`). Routing screenshots through CDP rather
+    /// than the macOS display capture is what lets headless Chrome
+    /// scenarios actually photograph the rendered page instead of the
+    /// foreground OS window — without this, the planner sees the editor /
+    /// terminal that happens to be focused and refuses with "I'm not in
+    /// the browser".
+    ///
+    /// Quality 80 mirrors the macOS-display fallback in
+    /// `CortexStepExecutor::screenshot_png` so payload size stays
+    /// consistent regardless of which path produced the bytes (typical
+    /// 100–300 KB; well under the Anthropic 5 MB cap).
+    pub async fn capture_screenshot(&self) -> Result<Vec<u8>, CdpError> {
+        let result = self
+            .send_command(
+                "Page.captureScreenshot",
+                serde_json::json!({
+                    "format": "jpeg",
+                    "quality": 80,
+                    "captureBeyondViewport": false,
+                }),
+            )
+            .await?;
+        let b64 = result.get("data").and_then(|v| v.as_str()).ok_or_else(|| {
+            CdpError::InvalidResponse("Page.captureScreenshot missing 'data' field".into())
+        })?;
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| {
+                CdpError::InvalidResponse(format!("Page.captureScreenshot invalid base64: {e}"))
+            })
     }
 
     /// Capture a DOM snapshot with paint order and computed styles.
@@ -360,4 +407,188 @@ impl CdpClient {
         }
         Err(last_err)
     }
+
+    /// Send a CDP command, transparently reconnecting once if the
+    /// underlying WebSocket has been torn down by Chrome
+    /// (`closed connection` / `broken pipe` / `WebSocket closed`).
+    /// Used by long-lived shared `Arc<CdpClient>` instances that
+    /// need to survive Chrome dropping a single socket while the
+    /// browser process itself remains alive — without this, a
+    /// transient hiccup mid-eval cascades into "every later
+    /// scenario fails because the shared client is dead".
+    pub async fn send_command_resilient(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, CdpError> {
+        match self.send_command(method, params.clone()).await {
+            Ok(v) => Ok(v),
+            Err(e) if is_connection_dropped(&e) => {
+                tracing::warn!(
+                    method = %method,
+                    error = %e,
+                    "CDP connection dropped — reconnecting and retrying once"
+                );
+                if let Err(reconnect_err) = self.reconnect().await {
+                    tracing::warn!(
+                        error = %reconnect_err,
+                        "CDP reconnect failed; surfacing original error"
+                    );
+                    return Err(e);
+                }
+                self.send_command(method, params).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `navigate` variant that uses the resilient sender. Same
+    /// reconnect-once-on-drop behaviour as
+    /// [`send_command_resilient`].
+    pub async fn navigate_resilient(&self, url: &str) -> Result<(), CdpError> {
+        self.send_command_resilient("Page.enable", serde_json::json!({}))
+            .await?;
+        self.send_command_resilient(
+            "Page.navigate",
+            serde_json::json!({ "url": url }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// `evaluate` variant that uses the resilient sender so a
+    /// dropped WebSocket auto-reconnects + retries once. Used by
+    /// the cortex action-dispatch path so a single Chrome hiccup
+    /// during a multi-scenario eval doesn't permanently break the
+    /// shared `Arc<CdpClient>` for every consumer that holds a
+    /// clone of it.
+    ///
+    /// Mirrors the parsing logic in [`Self::evaluate`] (extracts
+    /// `result.value` from the CDP `Runtime.evaluate` response).
+    pub async fn evaluate_resilient(
+        &self,
+        expression: &str,
+    ) -> Result<serde_json::Value, CdpError> {
+        let result = self
+            .send_command_resilient(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        Ok(result
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Replace the inner WebSocket with a fresh connection.
+    ///
+    /// Strategy:
+    /// 1. Try the originally-supplied `ws_url`. Fast path — works
+    ///    when Chrome dropped the socket but the page target is
+    ///    still alive (the common case for `closed connection` /
+    ///    `broken pipe` mid-eval).
+    /// 2. If the original URL fails (Chrome destroyed the page,
+    ///    HTTP 500 on the WebSocket upgrade, etc.) re-discover the
+    ///    target via the same `discover_cdp_targets` path that
+    ///    `connect_to_focused_app` uses, and try the first
+    ///    successful WebSocket. Update the stored `ws_url` so the
+    ///    next reconnect (if needed) uses the live target.
+    ///
+    /// Best-effort: holds the WebSocket mutex for the duration of
+    /// the swap so concurrent senders don't see a half-open state.
+    /// Errors propagate so the caller can fall back if needed.
+    async fn reconnect(&self) -> Result<(), CdpError> {
+        let stored_url = self
+            .ws_url
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+
+        let mut last_err: Option<CdpError> = None;
+        let mut new_ws = None;
+        let mut new_url = None;
+
+        if !stored_url.is_empty() {
+            match tokio_tungstenite::connect_async(&stored_url).await {
+                Ok((ws, _)) => {
+                    new_ws = Some(ws);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        url = %stored_url,
+                        error = %e,
+                        "CDP reconnect to stored ws_url failed; re-discovering"
+                    );
+                    last_err = Some(CdpError::ConnectionFailed(format!(
+                        "reconnect to {stored_url} failed: {e}"
+                    )));
+                }
+            }
+        }
+
+        if new_ws.is_none() {
+            for target in crate::discovery::discover_cdp_targets() {
+                if target.ws_url.is_empty() || target.ws_url == stored_url {
+                    continue;
+                }
+                match tokio_tungstenite::connect_async(&target.ws_url).await {
+                    Ok((ws, _)) => {
+                        tracing::info!(
+                            ws_url = %target.ws_url,
+                            "CDP reconnect: switched to freshly-discovered target after \
+                             stored ws_url died"
+                        );
+                        new_url = Some(target.ws_url.clone());
+                        new_ws = Some(ws);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(CdpError::ConnectionFailed(format!(
+                            "reconnect to discovered {} failed: {e}",
+                            target.ws_url
+                        )));
+                    }
+                }
+            }
+        }
+
+        let Some(ws) = new_ws else {
+            return Err(last_err.unwrap_or_else(|| {
+                CdpError::ConnectionFailed("reconnect failed: no usable target".into())
+            }));
+        };
+
+        if let Some(url) = new_url {
+            if let Ok(mut guard) = self.ws_url.lock() {
+                *guard = url;
+            }
+        }
+        let mut guard = self.ws.lock().await;
+        *guard = ws;
+        // Reset id counter — the new socket is a fresh CDP session
+        // and Chrome's id-tracking starts over.
+        self.next_id.store(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Recognise WebSocket-shutdown errors so `send_command_resilient`
+/// knows when to attempt a reconnect rather than propagating the
+/// failure unchanged.
+fn is_connection_dropped(err: &CdpError) -> bool {
+    let (CdpError::CommandFailed(msg) | CdpError::ConnectionFailed(msg)) = err else {
+        return false;
+    };
+    let lower = msg.to_lowercase();
+    lower.contains("closed connection")
+        || lower.contains("broken pipe")
+        || lower.contains("websocket closed")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("trying to work with closed connection")
 }

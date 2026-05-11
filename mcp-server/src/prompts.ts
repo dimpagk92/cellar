@@ -179,6 +179,37 @@ const PROMPTS: PromptDefinition[] = [
       };
     },
   },
+
+  {
+    name: "cellar/diagnose-focus",
+    title: "Diagnose where a keystroke or click landed",
+    description:
+      "Walks through the focus-routing path when a cel_act type/key/click appears to have done nothing or landed in the wrong window. Combines target_app validation, the cortex feed wrong-app diagnostic, and the system-frontmost reading.",
+    argsSchema: {
+      target_app: z
+        .string()
+        .optional()
+        .describe(
+          "App that should have received the event (e.g. 'Finder', 'Numbers', 'Google Chrome'). Optional — if omitted the prompt walks through identifying the intended target.",
+        ),
+    },
+    build: (args) => {
+      const target = args.target_app ?? "<the target app>";
+      return {
+        description: "Diagnose focus routing for a misfired cel_act",
+        messages: [
+          userMsg(
+            `A previous cel_act dispatched but appears to have done nothing or landed in the wrong window. Walk the focus-routing path:\n\n` +
+              `1. **Read the system frontmost.** Run \`osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'\` (or check a recent cel_perceive read's currentContext.app). If the frontmost is NOT "${target}", the keystroke landed there — that's the immediate cause.\n` +
+              `2. **Re-fire with target_app.** Re-issue the original cel_act with \`target_app: "${target}"\`. The action variants (type / key_press / key_combo / click / right_click / double_click / mouse_move / scroll / drag) all accept it — the helper activates the app and waits up to 1500ms for it to be macOS-frontmost before firing. The result string carries a \`(focus: ...)\` diagnostic so you can audit whether activation was needed.\n` +
+              `3. **Inspect the cortex's view.** If a cel_perceive session is active, call \`cel_perceive { mode: "feed", action: "<verb>" }\`. The response includes \`landedInWrongApp: { expected, actual }\` when the action visibly changed nothing AND the cortex's tracked app disagrees with the OS frontmost — that's confirmation the routing was bad rather than the action being a no-op.\n` +
+              `4. **If the app never comes frontmost,** target_app raises a structured "Action aborted" error rather than silently typing into the wrong window. The error names the actual frontmost so you know who stole focus (typically the MCP host's own window covering everything).\n\n` +
+              `Common root causes: a host like Claude Desktop in full-screen covering the target app; a previous bash round-trip that re-fronted the host; a Numbers/Pages document open in a different Space.`,
+          ),
+        ],
+      };
+    },
+  },
 ];
 
 export function registerPrompts(server: McpServer): void {

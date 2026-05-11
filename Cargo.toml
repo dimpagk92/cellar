@@ -19,6 +19,7 @@ members = [
     "cel/cel-napi",
     "cellar-worker",
     "adapters/adapter-common",
+    "adapters/browser-rs",
     "adapters/numbers",
 ]
 
@@ -57,6 +58,7 @@ cel-goal-runner = { path = "cel/cel-goal-runner" }
 cel-cdp = { path = "cel/cel-cdp" }
 cel-signals = { path = "cel/cel-signals" }
 adapter-common = { path = "adapters/adapter-common" }
+adapter-browser = { path = "adapters/browser-rs" }
 adapter-numbers = { path = "adapters/numbers" }
 
 # Tauri

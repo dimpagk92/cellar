@@ -60,6 +60,8 @@ impl NumbersAdapter {
                 platform: vec![String::from("macos")],
                 runtime: String::from("native"),
                 entrypoint: None,
+                manifest_alias: None,
+                manifest_extends: None,
                 context: ContextDeclaration {
                     element_types: vec![String::from("table"), String::from("table_cell")],
                     refresh_ms: 200,
@@ -382,6 +384,66 @@ impl AdapterDriver for NumbersAdapter {
             false
         }
     }
+
+    async fn facts_for_planning_view(
+        &self,
+        _goal: &str,
+        _context: &cel_context::ScreenContext,
+    ) -> Vec<cel_contracts::AdapterFactRef> {
+        if !self.connected {
+            return Vec::new();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            self.preview_payload()
+                .ok()
+                .and_then(numbers_preview_fact)
+                .into_iter()
+                .collect()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Vec::new()
+        }
+    }
+}
+
+fn numbers_preview_fact(preview: Value) -> Option<cel_contracts::AdapterFactRef> {
+    let preview_range = preview
+        .get("preview_range")
+        .and_then(Value::as_str)
+        .unwrap_or("A1:F6")
+        .to_string();
+    let non_empty_cells = preview
+        .get("cells")
+        .and_then(Value::as_array)
+        .map(|cells| {
+            cells
+                .iter()
+                .filter(|cell| {
+                    cell.get("value")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .map(|value| !value.is_empty())
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let non_empty_count = non_empty_cells.len();
+
+    Some(cel_contracts::AdapterFactRef {
+        id: Some(format!("numbers:preview:{preview_range}")),
+        adapter: "numbers".into(),
+        kind: "table_preview".into(),
+        payload: json!({
+            "preview_range": preview_range,
+            "non_empty_cells": non_empty_cells,
+            "non_empty_count": non_empty_count,
+        }),
+    })
 }
 
 fn numbers_actions() -> HashMap<String, ActionDeclaration> {
@@ -593,6 +655,26 @@ mod tests {
             .get("write_cells")
             .map(|decl| decl.requires_verification)
             .unwrap_or(false));
+    }
+
+    #[test]
+    fn preview_fact_carries_compact_document_model_truth() {
+        let fact = numbers_preview_fact(json!({
+            "preview_range": "A1:F6",
+            "cells": [
+                { "ref": "A1", "value": "Ticker" },
+                { "ref": "B1", "value": "" },
+                { "ref": "A2", "value": "BTC" }
+            ]
+        }))
+        .expect("preview fact");
+
+        assert_eq!(fact.id.as_deref(), Some("numbers:preview:A1:F6"));
+        assert_eq!(fact.adapter, "numbers");
+        assert_eq!(fact.kind, "table_preview");
+        assert_eq!(fact.payload["non_empty_count"], 2);
+        assert_eq!(fact.payload["non_empty_cells"][0]["ref"], "A1");
+        assert_eq!(fact.payload["non_empty_cells"][1]["ref"], "A2");
     }
 
     #[test]

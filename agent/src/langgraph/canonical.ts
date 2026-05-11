@@ -108,6 +108,32 @@ export interface PerceptionFrame {
   perception: ScreenContext;
   screenshot_base64?: string | null;
   caps: RuntimeCaps;
+  adapter_facts?: AdapterFactRef[];
+  cortex_anomalies?: CortexAnomaly[];
+  cortex_freshness?: CortexFreshnessAssessment | null;
+}
+
+export type CortexAnomalyType = "dialog" | "error" | "app_switch" | "auth_prompt";
+
+export interface CortexAnomaly {
+  type: CortexAnomalyType;
+  title?: string | null;
+  description: string;
+  timestamp: number;
+  element_ids?: string[];
+}
+
+export type FreshnessState = "fresh" | "soft_stale" | "hard_stale";
+export type StalenessCause = "time" | "event" | "confidence" | "verification";
+
+export interface CortexFreshnessAssessment {
+  state: FreshnessState;
+  causes: StalenessCause[];
+  age_ms: number;
+  confidence: number;
+  last_update_ms: number;
+  last_event_ms?: number | null;
+  last_significant_event_ms?: number | null;
 }
 
 // ─── Cortex memory (PR2) ─────────────────────────────────────────────────────
@@ -224,6 +250,7 @@ export interface KnowledgeRef {
 }
 
 export interface AdapterFactRef {
+  id?: string | null;
   adapter: string;
   kind: string;
   payload: unknown;

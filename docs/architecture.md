@@ -144,6 +144,17 @@ The right approach is:
 
 - `adapters/` — app/domain-specific integrations
 - app-specific execution helpers in core crates are acceptable when they are clearly adapter-like, but they should evolve toward explicit adapter surfaces
+- two languages share one `AdapterDriver` contract: native Rust adapters
+  (`adapters/numbers`, `adapters/excel`, `adapters/sap-gui`,
+  `adapters/bloomberg`, `adapters/metatrader`, `adapters/browser-rs`) run
+  in-process via the cortex tick loop; TypeScript adapters
+  (`adapters/browser`) run out-of-process via `ProcessDriver` and are used
+  by the LangGraph runtime
+- browser perception specifically is provided by **two** parallel adapters
+  (`adapters/browser` TS, `adapters/browser-rs` Rust) because the LangGraph
+  and canonical runtimes have different IPC budgets — see
+  `docs/adapters-cel-agents.md` § "Browser perception" for the
+  unification roadmap
 
 ### Agent integrations
 

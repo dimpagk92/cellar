@@ -70,6 +70,76 @@ pub fn ax_request_process_trust() -> bool {
     true
 }
 
+/// Process-startup pre-flight for the macOS Accessibility permission.
+///
+/// Call this from a binary's `main()` (or equivalent boot path) so the
+/// first AX-requiring tool call doesn't surprise the user with a stream
+/// of `Accessibility tree unavailable` warnings + silent degradation.
+///
+/// Returns the trust state. **Never aborts the process** — accessibility
+/// is recoverable per-call (browser-only / CDP goals work without it),
+/// and forcing a startup abort would punish workloads that don't need AX.
+///
+/// `interactive`:
+/// - `true`  — When denied, also call [`ax_request_process_trust`], which
+///   triggers the macOS system notification. The user can click it to
+///   jump straight into Settings with the binary pre-selected. Right for
+///   user-facing binaries (CLI, GUI app).
+/// - `false` — When denied, only log a clear WARN with grant instructions.
+///   Right for daemons / CI runners / headless services where a system
+///   notification would be unanswered noise.
+///
+/// On non-macOS platforms this is a no-op that returns `true`.
+///
+/// macOS Accessibility quirks worth knowing:
+/// - The grant is per-binary-identity. Signed releases use the
+///   code-signing fingerprint; unsigned dev builds use the path +
+///   checksum — so a `cargo build` rebuild typically requires
+///   re-granting. The notification rate-limits itself, so calling this
+///   on every cold start is safe.
+/// - macOS does NOT pick up a grant mid-process. The process must
+///   restart after the user toggles the permission on.
+/// - Once the binary appears in the Accessibility list (even toggled
+///   off), the prompt notification will not re-fire — the user has to
+///   open Settings themselves.
+pub fn ensure_trust_or_log(interactive: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        if macos::is_process_trusted() {
+            tracing::debug!("Accessibility permission granted");
+            return true;
+        }
+        if interactive {
+            // Side effect: posts the macOS system notification. Return
+            // value is the current trust state (still false the first
+            // time — the user hasn't clicked through yet).
+            macos::request_process_trust();
+            tracing::warn!(
+                "Accessibility permission not granted. A macOS notification \
+                 should now be visible — click it to open System Settings → \
+                 Privacy & Security → Accessibility, add this binary, and \
+                 toggle it on. macOS does not pick up the grant mid-process; \
+                 restart after enabling. Goals that only need CDP / browser \
+                 perception will continue to work without it."
+            );
+        } else {
+            tracing::warn!(
+                "Accessibility permission not granted. To enable AX-dependent \
+                 features, open System Settings → Privacy & Security → \
+                 Accessibility, add this binary, and toggle it on; then \
+                 restart the process. Browser-only / CDP goals continue to \
+                 work without it."
+            );
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = interactive;
+        true
+    }
+}
+
 /// Create a platform-appropriate accessibility tree provider.
 pub fn create_tree() -> Box<dyn AccessibilityTree> {
     #[cfg(target_os = "linux")]
@@ -106,6 +176,36 @@ pub fn create_tree() -> Box<dyn AccessibilityTree> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_trust_or_log_returns_actual_trust_state_without_panicking() {
+        // Contract: the helper must NEVER abort the process, regardless of
+        // platform or trust state. It's called from binary main()s where a
+        // panic on first call would block users with browser-only goals
+        // who don't need AX at all.
+        //
+        // On non-macOS the return must be true (no-op).
+        // On macOS the return must match `ax_is_process_trusted()` — we
+        // can't assert a specific value because that depends on whether
+        // the test harness binary was granted permission in the dev
+        // environment, but the helper must not lie.
+        let interactive = ensure_trust_or_log(true);
+        let headless = ensure_trust_or_log(false);
+        // Both modes must observe the same trust state.
+        assert_eq!(
+            interactive, headless,
+            "ensure_trust_or_log must report the same trust state regardless of `interactive` — \
+             the flag only changes the side effect (prompt vs log), not the truth."
+        );
+        // And that trust state must match the underlying ax_is_process_trusted.
+        assert_eq!(
+            interactive,
+            ax_is_process_trusted(),
+            "ensure_trust_or_log must agree with ax_is_process_trusted; \
+             one returning true while the other returns false would mean a binary thinks it's \
+             granted when it isn't (or vice versa)."
+        );
+    }
 
     #[test]
     fn test_stub_get_tree() {

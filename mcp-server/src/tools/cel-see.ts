@@ -62,6 +62,15 @@ export const celSeeSchema = z.discriminatedUnion("mode", [
   // --- screenshot ---
   z.object({
     mode: z.literal("screenshot"),
+    display_id: z
+      .number()
+      .optional()
+      .describe(
+        "Optional monitor id (from cel_see mode 'monitors'). When omitted, " +
+          "captures the display containing the frontmost app's key window — important " +
+          "on multi-monitor setups where the primary display may be empty wallpaper " +
+          "while the active app lives on a secondary screen.",
+      ),
   }),
 
   // --- observation: load a previously persisted observation snapshot ---
@@ -385,7 +394,7 @@ export async function handleCelSee(cel: Cel, args: Input) {
       }
 
       case "screenshot": {
-        const buffer = cel.captureScreen();
+        const buffer = cel.captureScreen(args.display_id);
         const base64 = buffer.toString("base64");
         return {
           content: [

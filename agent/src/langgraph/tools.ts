@@ -156,6 +156,10 @@ export function createCortexTools(options: CreateCortexToolsOptions) {
               kind: m.kind,
               summary: m.summary,
             })),
+            adapter_facts: view.adapter_facts,
+            blockers: view.blockers,
+            anomalies: view.anomalies,
+            evidence: view.evidence,
           }
         : {}),
       page_content: pageContent ? renderPageContent(pageContent, Math.max(Math.floor(maxContextChars / 2), 2_000)) : null,
@@ -276,6 +280,9 @@ async function tryBuildPlanningView(
     return await options.driver.buildPlanningView(options.goal, {
       perception: frame.perception,
       caps: frame.caps,
+      adapterFacts: frame.adapter_facts,
+      cortexAnomalies: frame.cortex_anomalies,
+      cortexFreshness: frame.cortex_freshness,
     });
   } catch (error) {
     // Fall back to the legacy path — never let a builder failure

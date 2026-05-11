@@ -55,7 +55,7 @@ CEL uses four tools organized by intent:
 | **cel_think** | Optional built-in planning, memory, autonomous execution | 17 modes |
 | **cel_perceive** | Always-on perception (Cortex) | 8 modes |
 
-Plus 5 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`).
+Plus 6 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`, `cellar/diagnose-focus`).
 
 ---
 
@@ -416,12 +416,18 @@ Prompts are returned regardless of cel-napi availability — they're static temp
 | `cellar/debug-hung-action` | `action` (optional) | Diagnoses why an action didn't land — reads Cortex status, recent diffs, and lists common causes |
 | `cellar/extract-table` | `app_hint` (optional) | Pulls a structured table from the screen, with branches for AX-friendly apps, Numbers, and browser DOM |
 | `cellar/run-numbers-write` | `sheet` (optional), `cells` (required JSON) | Writes cells deterministically into Numbers via the structured app-truth path (`write_cells`) |
+| `cellar/diagnose-focus` | `target_app` (optional) | Walks the focus-routing path when a `cel_act` lands in the wrong window — combines the `target_app` validation, the `cel_perceive feed` `landedInWrongApp` diagnostic, and the system-frontmost reading |
 
 ### How hosts surface them
 
-In Claude Code: type `/` and prompts appear as commands you can pick.
-In MCP Inspector: the **Prompts** tab lists them with their arguments.
-Programmatically: send `prompts/list` for the catalog and `prompts/get` to materialize one with arguments.
+| Host | How to discover prompts |
+|------|-------------------------|
+| Claude Code (CLI / IDE) | Type `/` at the prompt — registered MCP prompts appear inline as `/cellar/<name>` commands with autocomplete on the arguments. |
+| Cursor | Open the chat sidebar → `/` → MCP-registered prompts appear under the server name. |
+| Codex (CLI) | Slash-command browser via `/` or run `codex prompts list` to print the catalog. |
+| Claude Desktop | Currently does NOT auto-suggest MCP prompts in the UI; reach for them via the underlying `prompts/list` JSON-RPC if you're scripting. |
+| MCP Inspector | The **Prompts** tab lists them with their arguments — useful for smoke-testing without a real client. |
+| Programmatic | Send `prompts/list` for the catalog and `prompts/get` to materialise one with arguments — the same JSON-RPC any host uses internally. |
 
 ### Adding more
 

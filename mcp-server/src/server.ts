@@ -39,7 +39,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
 
   if (degraded) {
     console.warn(
-      "[cellar-mcp] cel-napi not available — running in schema-only mode. " +
+      "[cel-mcp] cel-napi not available — running in schema-only mode. " +
       "Tool definitions are exposed but real calls return errors. " +
       "Install on macOS for full functionality: https://github.com/dimpagk92/cellar",
     );
@@ -51,7 +51,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
       {
         type: "text" as const,
         text:
-          "Cellar MCP server is running in schema-only mode (no cel-napi native module). " +
+          "CEL MCP server is running in schema-only mode (no cel-napi native module). " +
           "Real tool calls require a macOS host with the cel-napi binary built. " +
           "See https://github.com/dimpagk92/cellar#installation",
       },
@@ -129,12 +129,17 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "",
         "## Focus Stability",
         "",
-        "Keyboard actions (`type`, `key_combo`, `key_press`) go to the **frontmost** app. If the host",
-        "process (e.g. Claude Desktop, Codex) is in a full-screen window covering the target app,",
-        "a click into the target's pixel area will front it BUT subsequent keystrokes may snap back.",
+        "Keyboard actions (`type`, `key_combo`, `key_press`) and coord-based actions",
+        "(`click`, `right_click`, `double_click`, `mouse_move`, `scroll`, `drag`) all dispatch via",
+        "CGEventPost, which routes to the **frontmost** app. If the host process (e.g. Claude Desktop,",
+        "Codex) is in a full-screen window covering the target app, a click into the target's pixel",
+        "area will front it BUT subsequent events may snap back.",
         "",
-        "If you hit focus instability: shell out to `osascript -e 'tell app \"<Name>\" to activate'`",
-        "before sending keys. `cel_perceive` emits `focus_changed` events that let you detect this.",
+        "Pass `target_app: \"<Name>\"` on any of these actions and CEL will activate the app and wait",
+        "for it to be frontmost (~50–600ms typical) before firing. The result string includes a",
+        "`(focus: ...)` diagnostic so you can audit whether activation was needed. Falls back to a",
+        "structured error if the app never came frontmost — the action is aborted rather than",
+        "silently mis-routed. `cel_perceive` emits `focus_changed` events that let you detect this.",
         "",
         "## Key Patterns",
         "",
@@ -349,8 +354,21 @@ export async function startStdioServer(cel?: Cel): Promise<void> {
     if (instance.isNativeAvailable) {
       // Boot Rust Cortex via NAPI — always-on perception starts immediately.
       // The mental model is warm before Claude's first tool call.
-      instance.bootCortex();
-      console.error("Rust Cortex booted — perception active");
+      //
+      // Deferred to the next event loop tick (`setImmediate`) so the MCP
+      // `initialize` handshake from the host can complete BEFORE we block
+      // on the synchronous napi `bootCortex` call (~2s on cold cache).
+      // Without this defer, the host's MCP client times out the
+      // handshake and gives up — the server runs fine but Claude Code
+      // sees "Failed to connect" and the cel tools never appear.
+      setImmediate(() => {
+        try {
+          instance.bootCortex();
+          console.error("Rust Cortex booted — perception active");
+        } catch (err) {
+          console.error("Rust Cortex boot failed:", err);
+        }
+      });
     } else {
       console.error("Schema-only mode: cel-napi unavailable, Cortex boot skipped");
     }

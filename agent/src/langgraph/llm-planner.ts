@@ -73,6 +73,9 @@ export class CelLlmPlanner implements CellarLangGraphPlanner {
       budget: this.options.budget,
       perception: input.frame.perception,
       caps: input.frame.caps,
+      adapterFacts: input.frame.adapter_facts,
+      cortexAnomalies: input.frame.cortex_anomalies,
+      cortexFreshness: input.frame.cortex_freshness,
     });
     return this.cel.canonicalDecideNext(
       view,
@@ -92,6 +95,9 @@ export class CelLlmPlanner implements CellarLangGraphPlanner {
       budget: this.options.budget,
       perception: input.frame.perception,
       caps: input.frame.caps,
+      adapterFacts: input.frame.adapter_facts,
+      cortexAnomalies: input.frame.cortex_anomalies,
+      cortexFreshness: input.frame.cortex_freshness,
     });
     return this.cel.canonicalVerifyDone(
       view,

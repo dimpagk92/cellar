@@ -99,6 +99,18 @@ pub enum PlannedAction {
     /// Native accessibility action — more reliable than coordinate clicks for desktop apps.
     /// Uses macOS AXUIElementPerformAction under the hood.
     AxAction {
+        /// AX hash id from the same perception snapshot that produced
+        /// the plan. May be missing (empty / null) when the planner
+        /// only knows the visible label — the cortex falls back to
+        /// `label` + `role_hint` resolution in that case.
+        ///
+        /// Lenient deserialization accepts `null` from the LLM (some
+        /// models emit `"target_id": null` when they want label-only
+        /// dispatch) and treats it as an empty string. Without this,
+        /// the whole turn parse-errors with
+        /// `invalid type: null, expected a string` and the run dies
+        /// before the runner gets a chance to fall back.
+        #[serde(default, deserialize_with = "deserialize_string_or_value")]
         target_id: String,
         /// The action to perform: "click" (AXPress), "activate" (AXConfirm),
         /// "increment", "decrement", "show_menu"
@@ -106,11 +118,12 @@ pub enum PlannedAction {
         /// Label hint for fallback element resolution. AX IDs are hashes
         /// that include bounds + depth and therefore change whenever the
         /// UI mutates between plan time and dispatch time. If the cortex
-        /// can't find `target_id` in the live AX tree, it falls back to
-        /// searching for the first visible element whose role matches
-        /// `role_hint` (if provided) and whose label equals `label`.
-        /// Planner must populate this from the same perception snapshot
-        /// that produced the target_id.
+        /// can't find `target_id` in the live AX tree (or `target_id`
+        /// is missing entirely), it falls back to searching for the
+        /// first visible element whose role matches `role_hint` (if
+        /// provided) and whose label equals `label`. Planner must
+        /// populate this from the same perception snapshot that
+        /// produced the target_id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -454,6 +467,81 @@ mod target_ids_tests {
                 assert_eq!(cell_refs, vec!["A1", "B2"]);
             }
             _ => panic!("expected ReadCells"),
+        }
+    }
+
+    #[test]
+    fn ax_action_accepts_null_target_id_as_empty_string() {
+        // Some models emit `"target_id": null` when they only know
+        // the visible label and want the runtime to resolve. The
+        // previous contract treated this as a fatal parse error
+        // (`invalid type: null, expected a string`), killing the
+        // entire turn before the label-fallback dispatcher could
+        // run. Lenient deserialization converts null to an empty
+        // string; the cortex dispatcher already handles empty
+        // target_id by going straight to label resolution.
+        let raw = r#"{
+            "type": "ax_action",
+            "target_id": null,
+            "action": "click",
+            "label": "Export to Notes",
+            "role_hint": "button"
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::AxAction {
+                target_id,
+                action,
+                label,
+                role_hint,
+            } => {
+                assert_eq!(target_id, "");
+                assert_eq!(action, "click");
+                assert_eq!(label.as_deref(), Some("Export to Notes"));
+                assert_eq!(role_hint.as_deref(), Some("button"));
+            }
+            _ => panic!("expected AxAction"),
+        }
+    }
+
+    #[test]
+    fn ax_action_accepts_missing_target_id_field_entirely() {
+        // Defensive: if the planner omits the field rather than
+        // explicitly sending null, the `#[serde(default)]` falls
+        // back to `String::default()` (empty string), same
+        // dispatch path.
+        let raw = r#"{
+            "type": "ax_action",
+            "action": "click",
+            "label": "Submit"
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::AxAction {
+                target_id, label, ..
+            } => {
+                assert_eq!(target_id, "");
+                assert_eq!(label.as_deref(), Some("Submit"));
+            }
+            _ => panic!("expected AxAction"),
+        }
+    }
+
+    #[test]
+    fn ax_action_still_accepts_explicit_target_id_string() {
+        // Regression guard: the lenient path must not break the
+        // normal case where the planner emits a real id.
+        let raw = r#"{
+            "type": "ax_action",
+            "target_id": "ax:AXButton/0x1234",
+            "action": "click"
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::AxAction { target_id, .. } => {
+                assert_eq!(target_id, "ax:AXButton/0x1234");
+            }
+            _ => panic!("expected AxAction"),
         }
     }
 }

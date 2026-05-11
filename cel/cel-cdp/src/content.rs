@@ -102,6 +102,19 @@ pub struct DomElement {
     pub input_type: Option<String>,
     pub value: Option<String>,
     pub placeholder: Option<String>,
+    /// HTML `id` attribute, when set. The most stable, semantically
+    /// meaningful selector that scenarios commonly target — e.g.
+    /// `target_contains: "submit"` matches `id="submit-btn"`. Without
+    /// this field the browser-adapter would have to fall back to less
+    /// stable signals (`backend_node_id` flips per page-load, text
+    /// shifts with content updates).
+    #[serde(default)]
+    pub dom_id: Option<String>,
+    /// HTML `name` attribute. Form fields almost always have a `name`
+    /// (it is what a form POST sends as the key) so it is the
+    /// second-best identifier after `dom_id` for inputs.
+    #[serde(default)]
+    pub dom_name: Option<String>,
     /// Bounding rectangle (viewport-relative).
     pub bounds: Option<ElementBounds>,
     /// Incrementing ID for element identification.
@@ -316,6 +329,11 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
                             input_type: el.type || null,
                             value: el.value !== undefined ? (el.value || '').slice(0, MAX_TEXT) || null : null,
                             placeholder: el.placeholder || null,
+                            // HTML id / name carry author-controlled semantic identity —
+                            // critical for stable dom:* element_ids. Empty string normalises
+                            // to null so the Rust side can use Option semantics cleanly.
+                            dom_id: el.id || null,
+                            dom_name: el.getAttribute && el.getAttribute('name') || null,
                             bounds: rect,
                             backend_node_id: nodeCounter,
                             aria_role: role,
@@ -497,6 +515,8 @@ mod tests {
                 input_type: None,
                 value: None,
                 placeholder: None,
+                dom_id: Some("submit-btn".into()),
+                dom_name: None,
                 bounds: Some(ElementBounds {
                     x: 10,
                     y: 20,

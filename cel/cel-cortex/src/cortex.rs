@@ -431,6 +431,21 @@ impl Cortex {
         client.get_url().await.ok()
     }
 
+    /// Capture a JPEG screenshot of the CDP-bound page when one is
+    /// wired. Returns `None` if there is no CDP client, the call fails,
+    /// or the response is malformed — callers should fall back to a
+    /// macOS display capture in that case so screenshot capability
+    /// degrades rather than disappears.
+    ///
+    /// This is the path that lets headless-Chrome eval scenarios photograph
+    /// the rendered page rather than whatever macOS window happens to be
+    /// in front (which is usually an editor or terminal during background
+    /// runs).
+    pub async fn cdp_screenshot(&self) -> Option<Vec<u8>> {
+        let client = self.cdp_client.as_ref()?;
+        client.capture_screenshot().await.ok()
+    }
+
     /// Is the cortex currently running?
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
@@ -634,9 +649,23 @@ impl Cortex {
                             Ok(elements) => {
                                 let adapter_name = adapter.driver.manifest().name.clone();
                                 let confidence = adapter.driver.manifest().context.confidence;
+                                // Adapter manifests can declare a preferred truth surface
+                                // (e.g. "browser_dom" for the Rust browser adapter,
+                                // "document_model" for Numbers). When that's "browser_dom"
+                                // we tag elements as `Cdp` so SourceSummary / dashboards /
+                                // anomaly detection can tell DOM-backed perception apart
+                                // from generic native-API perception. Other surfaces fold
+                                // into `NativeApi` for back-compat with adapters that
+                                // pre-date the distinction (Numbers/Excel/SAP/Bloomberg).
+                                let source = if adapter.driver.manifest().context.truth_surface
+                                    == "browser_dom"
+                                {
+                                    cel_context::ContextSource::Cdp
+                                } else {
+                                    cel_context::ContextSource::NativeApi
+                                };
                                 for mut el in elements {
-                                    // Tag element with adapter source
-                                    el.source = cel_context::ContextSource::NativeApi;
+                                    el.source = source.clone();
                                     el.confidence = confidence;
                                     element_adapter_index
                                         .insert(el.id.clone(), adapter_name.clone());
@@ -1147,6 +1176,34 @@ impl Cortex {
     /// target prefix + browser focus, not on element type, and
     /// legitimate browser-chrome AX ids don't come up in web-content
     /// goals in practice.
+    /// Run a CDP `Runtime.evaluate` and return the result as a
+    /// JSON-encoded string (the shape the caller's `data` field
+    /// expects). Prefers the SHARED `self.cdp_client` so the agent's
+    /// many `cdp_eval` / `navigate` / `extract_with_fallback` calls
+    /// reuse one WebSocket instead of opening a fresh one per
+    /// action — which is what was exhausting Chrome's connection
+    /// table mid-eval.
+    ///
+    /// On the shared client the call goes through
+    /// `evaluate_resilient`, which auto-reconnects once if Chrome
+    /// has dropped the underlying WebSocket. Falls back to opening
+    /// a per-action client only when no shared client is bound.
+    async fn cdp_eval_via_shared_or_focused(&self, expression: &str) -> Result<String, String> {
+        if let Some(client) = self.cdp_client.as_ref() {
+            return match client.evaluate_resilient(expression).await {
+                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                Err(e) => Err(format!("CDP eval failed: {e}")),
+            };
+        }
+        match cel_cdp::connect_to_focused_app().await {
+            Some(c) => match c.evaluate(expression).await {
+                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                Err(e) => Err(format!("CDP eval failed: {e}")),
+            },
+            None => Err("No CDP target available".into()),
+        }
+    }
+
     fn refuse_ax_on_browser_page(&self, target_id: &str, action: &str) -> Option<String> {
         self.cdp_client.as_ref()?;
         if !target_id.starts_with("ax:") {
@@ -1410,36 +1467,48 @@ impl Cortex {
                 // Primary: try the planner-supplied target_id. AX ids
                 // are bounds-hashed and therefore fragile across tree
                 // mutations (animations, focus shifts, popovers).
-                match try_ax_action(target_id, action) {
-                    Ok(true) => ActionResult::ok(),
-                    Ok(false) | Err(_) => {
-                        // Fallback: if the LLM supplied a `label`, ask
-                        // the live AX tree to resolve role+label → id
-                        // and try again. This recovers from the common
-                        // stale-hash failure mode without the planner
-                        // needing to re-plan.
-                        if let Some(lbl) = label.as_deref() {
-                            if let Some(resolved) = resolve_ax_by_label(lbl, role_hint.as_deref()) {
-                                if try_ax_action(&resolved, action).unwrap_or(false) {
-                                    tracing::info!(
-                                        target_id = %target_id,
-                                        resolved = %resolved,
-                                        label = %lbl,
-                                        "ax_action fell back to label resolution"
-                                    );
-                                    return Ok(ActionResult::ok());
-                                }
-                            }
-                        }
-                        ActionResult::fail(format!(
-                            "AX action \"{action}\" failed on \"{target_id}\"{}",
-                            label
-                                .as_ref()
-                                .map(|l| format!(" (label=\"{l}\" also not found)"))
-                                .unwrap_or_default()
-                        ))
+                //
+                // Skip the primary attempt when target_id is empty —
+                // the planner explicitly emitted `null` / left it
+                // missing (handled leniently in cel-contracts), which
+                // means it only knows the visible label. Calling AX
+                // with an empty id wastes a round trip and produces a
+                // confusing `failed on ""` in the error message.
+                if !target_id.is_empty() {
+                    if let Ok(true) = try_ax_action(target_id, action) {
+                        return Ok(ActionResult::ok());
                     }
                 }
+                // Fallback: if the LLM supplied a `label`, ask the
+                // live AX tree to resolve role+label → id and try
+                // again. Recovers from the common stale-hash failure
+                // mode AND from the planner emitting target_id=null
+                // with label only.
+                if let Some(lbl) = label.as_deref() {
+                    if let Some(resolved) = resolve_ax_by_label(lbl, role_hint.as_deref()) {
+                        if try_ax_action(&resolved, action).unwrap_or(false) {
+                            tracing::info!(
+                                target_id = %target_id,
+                                resolved = %resolved,
+                                label = %lbl,
+                                "ax_action fell back to label resolution"
+                            );
+                            return Ok(ActionResult::ok());
+                        }
+                    }
+                }
+                let target_repr = if target_id.is_empty() {
+                    "<missing>".to_string()
+                } else {
+                    format!("\"{target_id}\"")
+                };
+                ActionResult::fail(format!(
+                    "AX action \"{action}\" failed on {target_repr}{}",
+                    label
+                        .as_ref()
+                        .map(|l| format!(" (label=\"{l}\" also not found)"))
+                        .unwrap_or_default()
+                ))
             }
             PlannedAction::ActivateApp { app_name } => {
                 let result = activate_app_with_verification(app_name)?;
@@ -1573,20 +1642,7 @@ impl Cortex {
                 // of whether the LLM used set_value, cdp_eval, or whatever
                 // selector it built internally.
                 let full_expression = format!("{CEL_SELECT_PATCH_PRELUDE}\n{expression}");
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let client = cel_cdp::connect_to_focused_app().await;
-                        match client {
-                            Some(c) => match c.evaluate(&full_expression).await {
-                                Ok(result) => {
-                                    Ok(serde_json::to_string(&result).unwrap_or_default())
-                                }
-                                Err(e) => Err(format!("CDP eval failed: {e}")),
-                            },
-                            None => Err("No CDP target available".into()),
-                        }
-                    })
-                }) {
+                match self.cdp_eval_via_shared_or_focused(&full_expression).await {
                     Ok(result) => ActionResult {
                         success: true,
                         error: None,
@@ -1605,20 +1661,7 @@ impl Cortex {
                     sanitized
                 );
                 let full_expression = format!("{CEL_SELECT_PATCH_PRELUDE}\n{expression}");
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let client = cel_cdp::connect_to_focused_app().await;
-                        match client {
-                            Some(c) => match c.evaluate(&full_expression).await {
-                                Ok(result) => {
-                                    Ok(serde_json::to_string(&result).unwrap_or_default())
-                                }
-                                Err(e) => Err(format!("CDP eval failed: {e}")),
-                            },
-                            None => Err("No CDP target available".into()),
-                        }
-                    })
-                }) {
+                match self.cdp_eval_via_shared_or_focused(&full_expression).await {
                     Ok(result) => ActionResult {
                         success: true,
                         error: None,
@@ -1701,10 +1744,19 @@ impl Cortex {
         let mut diagnostics: Vec<String> = Vec::with_capacity(selectors.len());
         for sel in selectors {
             let expr = build_extract_expression(sel);
+            // Same shared-client preference as `cdp_eval_via_shared_or_focused` —
+            // every selector probe in this loop fans out to a new
+            // CDP call, and on a 4-selector fallback list with N
+            // extractions per scenario that quickly piles up.
             let eval = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    let client = cel_cdp::connect_to_focused_app().await;
-                    match client {
+                    if let Some(client) = self.cdp_client.as_ref() {
+                        return client
+                            .evaluate_resilient(&expr)
+                            .await
+                            .map_err(|e| e.to_string());
+                    }
+                    match cel_cdp::connect_to_focused_app().await {
                         Some(c) => c.evaluate(&expr).await.map_err(|e| e.to_string()),
                         None => Err("No CDP target available".into()),
                     }
@@ -2403,15 +2455,21 @@ fn check_cdp_ok(res: serde_json::Value, op: &'static str) -> crate::adapter::Act
     }
 }
 
-/// Build JS that finds an element by backend_node_id (from the interactive
-/// element index we wrote into the cortex model) and clicks it. Uses a
-/// best-effort path: try matching `data-cel-backend-id` first, then walk
-/// interactive elements by matching role + text/aria-label + index.
+/// Build JS that finds an element by id_part (extracted from a `dom:role:id`
+/// element_id) and clicks it. Tries four resolution paths in order:
+///   1. `document.getElementById(idPart)` — fast path when the planner
+///      passes an HTML id verbatim (e.g. `dom:button:submit-btn` →
+///      `getElementById("submit-btn")`). Most common case after PR #66's
+///      prompt change steered the planner toward typed `dom:*` actions.
+///   2. Numeric → 0-based index into the visible-candidate list.
+///   3. Substring search over ALL identifying attributes concatenated
+///      (id + name + innerText + value + aria-label). The previous
+///      first-truthy-wins chain hid `id`/`name` whenever any other
+///      attribute was set, which caused `set_value dom:input:name` to
+///      miss inputs that did have `name="name"` because `placeholder`
+///      ("John Doe") was tested first. The concat fixes that whole class
+///      of false-negatives.
 fn build_click_js(role: &str, id_part: &str) -> String {
-    // For elements indexed by integer position in the interactive list, we
-    // walk all matching-role elements and pick the one whose 0-based index
-    // among visible interactive elements equals id_part (when parseable as
-    // integer). Otherwise we treat id_part as a text/aria-label substring.
     let role_js = serde_json::to_string(role).unwrap_or_else(|_| "\"button\"".into());
     let id_js = serde_json::to_string(id_part).unwrap_or_else(|_| "\"\"".into());
     format!(
@@ -2430,17 +2488,40 @@ fn build_click_js(role: &str, id_part: &str) -> String {
             const sels = tagFor(role).join(',');
             const candidates = Array.from(document.querySelectorAll(sels))
                 .filter(el => el.offsetParent !== null);
-            // numeric → index into the visible candidate list
             let target = null;
-            const asNum = parseInt(idPart, 10);
-            if (!isNaN(asNum) && String(asNum) === idPart) {{
-                target = candidates[asNum] || null;
+            // 1. Exact HTML id match — the most common case once the
+            //    planner emits dom:* element_ids derived from id="...".
+            //    Restricted to safe id chars so an injected idPart can't
+            //    drop a CSS-injection payload into `getElementById`.
+            if (typeof idPart === 'string' && /^[A-Za-z][\w:.-]*$/.test(idPart)) {{
+                const byId = document.getElementById(idPart);
+                if (byId && candidates.includes(byId)) {{
+                    target = byId;
+                }}
             }}
-            // text/aria fallback
+            // 2. Numeric → index into visible candidates (back-compat
+            //    with index-based dom:* ids the older browser walker
+            //    produced before PR #49 added id/name capture).
+            if (!target) {{
+                const asNum = parseInt(idPart, 10);
+                if (!isNaN(asNum) && String(asNum) === idPart) {{
+                    target = candidates[asNum] || null;
+                }}
+            }}
+            // 3. Substring search over a CONCATENATION of identifying
+            //    attributes (was: first-truthy-wins which silently
+            //    dropped id/name when innerText/value were also set).
             if (!target) {{
                 const needle = String(idPart).toLowerCase();
                 target = candidates.find(el => {{
-                    const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').toLowerCase();
+                    const parts = [
+                        el.id,
+                        el.name,
+                        el.innerText,
+                        el.value,
+                        el.getAttribute('aria-label'),
+                    ];
+                    const t = parts.filter(Boolean).join(' ').toLowerCase();
                     return t.includes(needle);
                 }}) || null;
             }}
@@ -2471,14 +2552,40 @@ fn build_set_value_js(role: &str, id_part: &str, value: &str) -> String {
             const candidates = Array.from(document.querySelectorAll(sels))
                 .filter(el => el.offsetParent !== null);
             let target = null;
-            const asNum = parseInt(idPart, 10);
-            if (!isNaN(asNum) && String(asNum) === idPart) {{
-                target = candidates[asNum] || null;
+            // 1. Exact HTML id match — fast path for `dom:input:email`
+            //    style ids the planner emits after PR #66's prompt
+            //    update. Restricted to safe id chars so an injected
+            //    idPart can't reach a CSS-injection sink.
+            if (typeof idPart === 'string' && /^[A-Za-z][\w:.-]*$/.test(idPart)) {{
+                const byId = document.getElementById(idPart);
+                if (byId && candidates.includes(byId)) {{
+                    target = byId;
+                }}
             }}
+            // 2. Numeric → index into visible candidates (back-compat).
+            if (!target) {{
+                const asNum = parseInt(idPart, 10);
+                if (!isNaN(asNum) && String(asNum) === idPart) {{
+                    target = candidates[asNum] || null;
+                }}
+            }}
+            // 3. Substring search over CONCATENATION of identifying
+            //    attributes. Was: first-truthy-wins which always picked
+            //    `placeholder` for inputs, hiding `name`/`id`. So
+            //    `set_value dom:input:name` would search "John Doe" for
+            //    the string "name" — never matching the input that did
+            //    have `name="name"`. The concat surfaces every signal.
             if (!target) {{
                 const needle = String(idPart).toLowerCase();
                 target = candidates.find(el => {{
-                    const t = (el.placeholder || el.name || el.id || el.getAttribute('aria-label') || '').toLowerCase();
+                    const parts = [
+                        el.id,
+                        el.name,
+                        el.placeholder,
+                        el.value,
+                        el.getAttribute('aria-label'),
+                    ];
+                    const t = parts.filter(Boolean).join(' ').toLowerCase();
                     return t.includes(needle);
                 }}) || null;
             }}
@@ -3298,6 +3405,17 @@ mod tests {
         let cortex = Cortex::new("test-1".into());
         assert_eq!(cortex.id, "test-1");
         assert!(!cortex.is_running());
+    }
+
+    #[tokio::test]
+    async fn cdp_screenshot_returns_none_when_no_client_bound() {
+        // The runner relies on this short-circuit: when no CDP client is
+        // wired (numbers/native-app scenarios, mock harness), the CDP
+        // path must yield None so the caller falls back to the macOS
+        // display capture instead of hanging on a non-existent client.
+        let cortex = Cortex::new("no-cdp".into());
+        assert!(!cortex.has_cdp_client());
+        assert!(cortex.cdp_screenshot().await.is_none());
     }
 
     // ─── build_set_value_js: <select> handling (eval-smoke Fix) ───────

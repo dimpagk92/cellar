@@ -27,6 +27,7 @@ cel-cdp = { workspace = true }
 cel-cortex = { workspace = true }
 cel-signals = { workspace = true }
 adapter-common = { workspace = true }
+adapter-browser = { workspace = true }
 adapter-numbers = { workspace = true }
 cel-goal-runner = { workspace = true }
 cellar-worker = { path = "../../cellar-worker" }

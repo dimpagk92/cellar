@@ -39,53 +39,6 @@ struct ChoiceMessage {
     content: String,
 }
 
-/// Wire types for the Anthropic Messages API.
-#[derive(serde::Serialize)]
-struct AnthropicRequest {
-    model: String,
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    messages: Vec<AnthropicMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
-}
-
-#[derive(serde::Serialize)]
-struct AnthropicMessage {
-    role: String,
-    content: Vec<AnthropicContent>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "type")]
-enum AnthropicContent {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "image")]
-    Image { source: AnthropicImageSource },
-}
-
-#[derive(serde::Serialize)]
-struct AnthropicImageSource {
-    #[serde(rename = "type")]
-    source_type: String,
-    media_type: String,
-    data: String,
-}
-
-#[derive(serde::Deserialize)]
-struct AnthropicResponse {
-    content: Option<Vec<AnthropicResponseContent>>,
-}
-
-#[derive(serde::Deserialize)]
-struct AnthropicResponseContent {
-    #[serde(rename = "type")]
-    content_type: String,
-    text: Option<String>,
-}
-
 type MockFn =
     std::sync::Arc<dyn Fn(Vec<ChatMessage>, u32) -> Result<String, LlmError> + Send + Sync>;
 
@@ -167,15 +120,15 @@ impl LlmClient {
         &self.model
     }
 
-    /// Whether this client targets the Anthropic Messages API.
-    fn is_anthropic(&self) -> bool {
-        self.config.provider == ProviderKind::Anthropic
-    }
-
-    /// Send a chat completion request with retry on rate limits.
-    /// Retries up to 3 times with exponential backoff (1s, 2s, 4s) on HTTP 429.
-    /// When a mock function is installed via [`LlmClient::new_with_fn`], it is called
-    /// instead and no HTTP request is made.
+    /// Send a chat completion request via the OpenAI-compatible chat completions
+    /// API. Works against any provider that speaks that protocol — OpenAI,
+    /// Gemini (`/v1beta/openai/chat/completions`), Anthropic
+    /// (`/v1/chat/completions` compat shim), Ollama, and any custom endpoint.
+    ///
+    /// Retries up to 3 times with exponential backoff (1s, 2s, 4s) on HTTP 429
+    /// and 529 (Anthropic overloaded). When a mock function is installed via
+    /// [`LlmClient::new_with_fn`], it is called instead and no HTTP request is
+    /// made.
     pub async fn chat(
         &self,
         messages: Vec<ChatMessage>,
@@ -187,11 +140,7 @@ impl LlmClient {
         let mut last_err = LlmError::RequestFailed("no attempts made".into());
         for attempt in 0..3u32 {
             let msgs = messages.clone();
-            let result = if self.is_anthropic() {
-                self.chat_anthropic(msgs, max_tokens).await
-            } else {
-                self.chat_openai(msgs, max_tokens).await
-            };
+            let result = self.chat_openai(msgs, max_tokens).await;
             match result {
                 Ok(response) => return Ok(response),
                 Err(LlmError::HttpError {
@@ -223,10 +172,20 @@ impl LlmClient {
         Err(last_err)
     }
 
-    /// OpenAI-compatible chat completions path.
-    /// Also used by Gemini (via its OpenAI-compatible endpoint).
-    /// Both OpenAI and Gemini support `response_format: { type: "json_object" }`
-    /// for structured JSON output, eliminating most parse failures.
+    /// OpenAI-compatible chat completions path. Single code path for every
+    /// supported provider (OpenAI, Gemini, Anthropic compat shim, Ollama,
+    /// custom). Two small per-provider quirks live inline:
+    ///
+    /// * **Anthropic OpenAI-compat** rejects `response_format: { type:
+    ///   "json_object" }` (only accepts `json_schema` with a strict schema).
+    ///   We omit the field for `api.anthropic.com` and rely on the system
+    ///   prompt for JSON coercion — Sonnet honors that reliably.
+    /// * **Anthropic OAuth tokens** (`sk-ant-oat-…`) need an extra
+    ///   `anthropic-beta: oauth-2025-04-20` header alongside `Authorization:
+    ///   Bearer`. Standard `sk-ant-api…` keys just need Bearer.
+    ///
+    /// Reasoning models (OpenAI o-series) use `max_completion_tokens` and
+    /// don't support `response_format`.
     async fn chat_openai(
         &self,
         messages: Vec<ChatMessage>,
@@ -238,13 +197,18 @@ impl LlmClient {
             || self.model.starts_with("o3")
             || self.model.starts_with("o4");
 
+        // Anthropic's OpenAI-compat endpoint doesn't accept response_format=json_object.
+        // Detect by hostname so the user can point CEL_LLM_BASE_URL at any
+        // Anthropic-compatible URL (e.g. a proxy) and still get the right behavior.
+        let endpoint_is_anthropic = self.endpoint.contains("api.anthropic.com");
+
         let request = ChatRequest {
             model: self.model.clone(),
             messages,
             max_tokens: if is_reasoning { None } else { Some(max_tokens) },
             max_completion_tokens: if is_reasoning { Some(max_tokens) } else { None },
-            response_format: if is_reasoning {
-                None // reasoning models don't support response_format
+            response_format: if is_reasoning || endpoint_is_anthropic {
+                None
             } else {
                 Some(ResponseFormat {
                     r#type: "json_object".to_string(),
@@ -259,11 +223,16 @@ impl LlmClient {
 
         let api_key = self.config.api_key.as_deref().unwrap_or("");
 
-        let resp = self
+        let mut req = self
             .http
             .post(&self.endpoint)
             .header("Authorization", format!("Bearer {}", api_key))
-            .json(&request)
+            .json(&request);
+        if api_key.starts_with("sk-ant-oat") {
+            req = req.header("anthropic-beta", "oauth-2025-04-20");
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| LlmError::RequestFailed(e.to_string()))?;
@@ -284,125 +253,6 @@ impl LlmClient {
             .and_then(|c| c.into_iter().next())
             .map(|c| c.message.content)
             .unwrap_or_default())
-    }
-
-    /// Anthropic Messages API path.
-    async fn chat_anthropic(
-        &self,
-        messages: Vec<ChatMessage>,
-        max_tokens: u32,
-    ) -> Result<String, LlmError> {
-        let api_key = self.config.api_key.as_deref().unwrap_or("");
-
-        // Extract system message (Anthropic uses a top-level `system` field)
-        let mut system_prompt: Option<String> = None;
-        let mut user_messages = Vec::new();
-
-        for msg in messages {
-            if msg.role == "system" {
-                // Concatenate system messages
-                let text = msg
-                    .content
-                    .into_iter()
-                    .filter_map(|c| match c {
-                        crate::ContentPart::Text { text } => Some(text),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                system_prompt = Some(match system_prompt {
-                    Some(existing) => format!("{}\n{}", existing, text),
-                    None => text,
-                });
-            } else {
-                // Convert ContentParts to Anthropic format
-                let content = msg
-                    .content
-                    .into_iter()
-                    .map(|c| match c {
-                        crate::ContentPart::Text { text } => AnthropicContent::Text { text },
-                        crate::ContentPart::ImageUrl { image_url } => {
-                            // Parse data URL: data:image/png;base64,<data>
-                            let (media_type, data) = parse_data_url(&image_url.url);
-                            AnthropicContent::Image {
-                                source: AnthropicImageSource {
-                                    source_type: "base64".to_string(),
-                                    media_type,
-                                    data,
-                                },
-                            }
-                        }
-                    })
-                    .collect();
-
-                user_messages.push(AnthropicMessage {
-                    role: msg.role,
-                    content,
-                });
-            }
-        }
-
-        // Prefill the assistant response with `{` to strongly encourage JSON output.
-        // This is the standard Anthropic technique for structured output — the model
-        // continues from the prefilled token, producing valid JSON without preamble.
-        user_messages.push(AnthropicMessage {
-            role: "assistant".to_string(),
-            content: vec![AnthropicContent::Text {
-                text: "{".to_string(),
-            }],
-        });
-
-        let request = AnthropicRequest {
-            model: self.model.clone(),
-            max_tokens,
-            system: system_prompt,
-            messages: user_messages,
-            temperature: self.config.temperature,
-        };
-
-        // OAuth tokens (sk-ant-oat-…) need Authorization: Bearer + the
-        // oauth-2025-04-20 beta header. Standard API keys (sk-ant-api-…
-        // or sk-ant-…) use x-api-key. Detect by the OAuth-specific prefix.
-        let mut req = self
-            .http
-            .post(&self.endpoint)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request);
-        if api_key.starts_with("sk-ant-oat") {
-            req = req
-                .header("authorization", format!("Bearer {api_key}"))
-                .header("anthropic-beta", "oauth-2025-04-20");
-        } else {
-            req = req.header("x-api-key", api_key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| LlmError::RequestFailed(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::HttpError { status, body });
-        }
-
-        let anthropic_resp: AnthropicResponse = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::ParseError(e.to_string()))?;
-
-        // Prepend the `{` we used as the assistant prefill, since Anthropic
-        // continues from that token and does not include it in the response.
-        let body = anthropic_resp
-            .content
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|c| c.content_type == "text")
-            .filter_map(|c| c.text)
-            .collect::<Vec<_>>()
-            .join("");
-        Ok(format!("{{{}", body))
     }
 
     /// Send a text-only chat completion (system + user prompt).
@@ -502,18 +352,6 @@ impl LlmClient {
     }
 }
 
-/// Parse a data URL into (media_type, base64_data).
-fn parse_data_url(url: &str) -> (String, String) {
-    // Format: data:image/png;base64,<data>
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((header, data)) = rest.split_once(',') {
-            let media_type = header.strip_suffix(";base64").unwrap_or(header).to_string();
-            return (media_type, data.to_string());
-        }
-    }
-    ("image/png".to_string(), url.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,11 +368,13 @@ mod tests {
         };
         let client = LlmClient::new(config).unwrap();
         assert_eq!(client.model(), "gpt-4o");
-        assert!(!client.is_anthropic());
     }
 
     #[test]
     fn test_client_anthropic() {
+        // Anthropic now goes through the same OpenAI-compat code path. The
+        // endpoint resolves to /v1/chat/completions and the model defaults to
+        // claude-sonnet-4. No special dispatch logic anymore.
         let config = LlmProviderConfig {
             provider: ProviderKind::Anthropic,
             endpoint: None,
@@ -545,7 +385,6 @@ mod tests {
         };
         let client = LlmClient::new(config).unwrap();
         assert_eq!(client.model(), "claude-sonnet-4-20250514");
-        assert!(client.is_anthropic());
     }
 
     #[test]
@@ -573,26 +412,5 @@ mod tests {
         };
         let client = LlmClient::new(config).unwrap();
         assert_eq!(client.model(), "llama3");
-    }
-
-    #[test]
-    fn test_parse_data_url() {
-        let (media, data) = parse_data_url("data:image/png;base64,abc123");
-        assert_eq!(media, "image/png");
-        assert_eq!(data, "abc123");
-    }
-
-    #[test]
-    fn test_parse_data_url_jpeg() {
-        let (media, data) = parse_data_url("data:image/jpeg;base64,xyz");
-        assert_eq!(media, "image/jpeg");
-        assert_eq!(data, "xyz");
-    }
-
-    #[test]
-    fn test_parse_data_url_fallback() {
-        let (media, data) = parse_data_url("raw_base64_data");
-        assert_eq!(media, "image/png");
-        assert_eq!(data, "raw_base64_data");
     }
 }

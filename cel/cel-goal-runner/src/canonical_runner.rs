@@ -69,6 +69,22 @@ pub trait StepExecutor: Send + Sync {
         empty_context()
     }
 
+    /// Force a fresh cortex tick + return the resulting perception.
+    /// Used by the canonical runner BEFORE `verify_done` so the
+    /// post-action UI state is captured before the LLM grades the
+    /// Done claim. Without this, `verify_done` sees the perception
+    /// from BEFORE the batch ran — and correctly rejects every Done
+    /// whose side-effect (form-submission success message, modal
+    /// opening, status flipping) only appeared in the page AFTER the
+    /// last batch dispatched.
+    ///
+    /// Default: just calls `perceive()` (no force-refresh). Production
+    /// `CortexStepExecutor` overrides this to invoke
+    /// `cortex.refresh_now()` first, then perceive.
+    async fn perceive_fresh(&self) -> ScreenContext {
+        self.perceive().await
+    }
+
     /// Optional screenshot (PNG) for vision-capable planners.
     async fn screenshot_png(&self) -> Option<Vec<u8>> {
         None
@@ -283,11 +299,33 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
 
         loop {
             if steps_used >= limits.max_steps {
-                return budget_exhausted("max_steps", &last_batch_purpose, steps_used);
+                return self
+                    .budget_exhausted_with_outcome_check(
+                        "max_steps",
+                        goal,
+                        &last_batch_purpose,
+                        steps_used,
+                        &shared_memory,
+                        goal_embedding.as_deref(),
+                        limits.workflow_id_for_memory.as_deref(),
+                        memory_store,
+                    )
+                    .await;
             }
             let elapsed_ms = start.elapsed().as_millis() as u64;
             if elapsed_ms >= limits.timeout_ms {
-                return budget_exhausted("timeout_ms", &last_batch_purpose, steps_used);
+                return self
+                    .budget_exhausted_with_outcome_check(
+                        "timeout_ms",
+                        goal,
+                        &last_batch_purpose,
+                        steps_used,
+                        &shared_memory,
+                        goal_embedding.as_deref(),
+                        limits.workflow_id_for_memory.as_deref(),
+                        memory_store,
+                    )
+                    .await;
             }
 
             let perception = self.executor.perceive().await;
@@ -449,27 +487,106 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                 }
             };
 
+            // Fail-with-success rewrite. The planner sometimes emits
+            // `Fail` with a reason that explicitly acknowledges the
+            // goal is complete — e.g. "The '+ Add Task' button was
+            // already clicked successfully in step 1 … the goal has
+            // been accomplished". That's a Done-vs-Fail confusion: the
+            // agent's reasoning is correct (goal achieved) but it
+            // picked the wrong terminal move.
+            //
+            // When the Fail reason contains success-acknowledging
+            // language AND `history` already has at least one
+            // successful action, rewrite to `Done` and let the
+            // standard verify_done path arbitrate. Same template as
+            // the mid-run Clarify guard from PR #73 — the runtime
+            // catches the misclassified terminal and gives the
+            // intended-success outcome a chance to succeed instead of
+            // dead-ending the run.
+            //
+            // verify_done is the safety check: if the reason is
+            // self-contradictory (claims success but evidence doesn't
+            // support it), the rewritten Done gets rejected and the
+            // agent gets a `runtime rejected Done: ...` history entry
+            // on the next turn — same as if it had emitted Done
+            // directly.
+            let next = match next {
+                NextMove::Fail { reason }
+                    if looks_like_success_acknowledgement(&reason)
+                        && history.iter().any(|r| r.succeeded) =>
+                {
+                    warn!(
+                        reason = %reason,
+                        "Fail rewritten to Done — reasoning acknowledges goal completion"
+                    );
+                    NextMove::Done {
+                        summary: reason,
+                        extracted_data: serde_json::Value::Null,
+                    }
+                }
+                other => other,
+            };
+
             match next {
                 NextMove::Done {
                     summary,
                     extracted_data,
                 } => {
                     // Runtime Done-validation: before returning
-                    // success, ask the planner to grade its own claim
-                    // against fresh perception + screenshot. The
-                    // prompt for the grader is stricter than the
-                    // planner's own self-check (required parts of
-                    // multi-part goals, rejects partial credit, etc.),
-                    // so a Done that slips through the planner rules
-                    // still gets caught if the UI doesn't match.
+                    // success, grade the claim against POST-action
+                    // perception. The perception we captured at the
+                    // top of THIS turn pre-dates the planner's last
+                    // batch — so any side-effect that batch produced
+                    // (form submission success message, modal opening,
+                    // status flipping, navigation) would be invisible
+                    // to verify_done.
                     //
-                    // On reject we don't terminate — we record the
-                    // rejection as a failed attempt so the next
-                    // decide_next sees it in history and either does
-                    // more work or emits Fail with an honest reason.
+                    // Force-refresh the cortex tick + re-read so the
+                    // grader sees what's actually on screen RIGHT NOW.
+                    // Without this, even-successful Dones got rejected
+                    // because the perception verify_done received was
+                    // pre-action. With it, the grader can compare the
+                    // claim ("the form was submitted") to the
+                    // current page state ("#success-message visible").
+                    //
+                    // Also re-screenshot — the vision grader benefits
+                    // from seeing the post-action page state too.
+                    let fresh_perception = self.executor.perceive_fresh().await;
+                    let fresh_screenshot = self.executor.screenshot_png().await;
+                    let fresh_caps = {
+                        let mut c = self.executor.capabilities().await;
+                        c.steps_used = steps_used;
+                        c.max_steps = limits.max_steps;
+                        c
+                    };
+                    let fresh_anomalies = self.executor.cortex_anomalies().await;
+                    let fresh_freshness = self.executor.cortex_freshness().await;
+                    let fresh_adapter_facts =
+                        self.executor.adapter_facts(goal, &fresh_perception).await;
+                    let fresh_view = build_planning_view(&PlanningViewInputs {
+                        goal,
+                        budget: &PlanningBudget::default(),
+                        perception: &fresh_perception,
+                        caps: &fresh_caps,
+                        memory_store: memory_store.map(|m| m as &dyn cel_store::CortexMemoryStore),
+                        workflow_id: limits.workflow_id_for_memory.as_deref(),
+                        knowledge_store: memory_store.map(|m| m as &dyn cel_store::KnowledgeStore),
+                        goal_embedding,
+                        recent_events_store: memory_store
+                            .map(|m| m as &dyn cel_store::RecentEventStore),
+                        cortex_anomalies: Some(fresh_anomalies.as_slice()),
+                        cortex_freshness: fresh_freshness.as_ref(),
+                        adapter_facts: Some(fresh_adapter_facts.as_slice()),
+                    });
                     let verdict = self
                         .planner
-                        .verify_done(goal, &summary, &shared_memory, &view, screenshot.as_deref())
+                        .verify_done(
+                            goal,
+                            &summary,
+                            &shared_memory,
+                            &fresh_view,
+                            fresh_screenshot.as_deref(),
+                        )
                         .await;
                     match verdict {
                         Ok(v) if v.verified => {
@@ -540,6 +657,50 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                         failing_step: "<planner fail>".into(),
                         attempts: vec![reason],
                     });
+                }
+                NextMove::Clarify { question } => {
+                    // Clarify is the legitimate response when the goal
+                    // is ambiguous or destructive AND no action has
+                    // been dispatched yet — the agent declines BEFORE
+                    // touching state. Mid-run Clarify is something
+                    // different: the agent acted, hit a snag, and is
+                    // escalating to the user instead of finishing
+                    // honestly. The runtime rejects it the same way
+                    // verify_done rejects an unsupported Done — push
+                    // a synthetic AttemptRecord with the rejection
+                    // reason, bump steps_used, and continue. The
+                    // planner sees on the next turn that Clarify was
+                    // refused and has to commit to Done (if the goal
+                    // is in fact complete given the actions so far)
+                    // or Fail (with a specific reason).
+                    if history.is_empty() {
+                        info!(question = %question, "Planner signaled Clarify");
+                        return GoalOutcome::Refused { summary: question };
+                    }
+                    warn!(
+                        question = %question,
+                        history_len = history.len(),
+                        "Clarify rejected — agent has already dispatched actions this run"
+                    );
+                    history.push(AttemptRecord {
+                        step_purpose: "clarify_rejected".into(),
+                        action: PlannedAction::Fail {
+                            reason: question.clone(),
+                        },
+                        succeeded: false,
+                        error: Some(
+                            "runtime rejected Clarify: this run already has prior steps. \
+                             Clarify is reserved for the FIRST turn — before any action — \
+                             when the goal is genuinely ambiguous or destructive. After \
+                             acting, your options are Done (if the goal is in fact complete \
+                             given the actions taken) or Fail (with a specific reason). \
+                             Re-examine the current perception and pick one."
+                                .into(),
+                        ),
+                        data: serde_json::Value::Null,
+                    });
+                    steps_used += 1;
+                    continue;
                 }
                 NextMove::Batch { purpose, steps } => {
                     last_batch_purpose = purpose.clone();
@@ -786,6 +947,115 @@ fn budget_exhausted(kind: &str, last_purpose: &str, steps_used: u32) -> GoalOutc
     })
 }
 
+impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
+    /// Budget-exhaustion handler with one final outcome check.
+    ///
+    /// When `max_steps` / `timeout_ms` is hit before the planner
+    /// emits a terminal move, the previous behaviour was an immediate
+    /// `GoalOutcome::Failed`. That under-counts agent successes
+    /// where the actions actually achieved the goal but the agent
+    /// kept going (e.g. an auto-refreshing queue where the agent
+    /// chases each new "topmost" target instead of recognising the
+    /// first approval already accomplished the task).
+    ///
+    /// This path captures fresh perception + screenshot once and
+    /// asks `verify_done` whether the original goal is satisfied by
+    /// the current page state. If yes → `GoalOutcome::Succeeded`.
+    /// If no, or verify_done errors → `GoalOutcome::Failed` (the
+    /// previous behaviour). The agent never gets credit for goals
+    /// it didn't accomplish — verify_done is the same conservative
+    /// grader the per-Done path already uses.
+    #[allow(clippy::too_many_arguments)]
+    async fn budget_exhausted_with_outcome_check(
+        &self,
+        kind: &str,
+        goal: &str,
+        last_purpose: &str,
+        steps_used: u32,
+        shared_memory: &serde_json::Value,
+        goal_embedding: Option<&[u8]>,
+        workflow_id: Option<&str>,
+        memory_store: Option<&std::sync::Mutex<cel_store::CelStore>>,
+    ) -> GoalOutcome {
+        let fresh_perception = self.executor.perceive_fresh().await;
+        let fresh_screenshot = self.executor.screenshot_png().await;
+        let mut fresh_caps = self.executor.capabilities().await;
+        fresh_caps.steps_used = steps_used;
+        fresh_caps.max_steps = steps_used;
+        let fresh_anomalies = self.executor.cortex_anomalies().await;
+        let fresh_freshness = self.executor.cortex_freshness().await;
+        let fresh_adapter_facts = self.executor.adapter_facts(goal, &fresh_perception).await;
+        let fresh_view = build_planning_view(&PlanningViewInputs {
+            goal,
+            budget: &PlanningBudget::default(),
+            perception: &fresh_perception,
+            caps: &fresh_caps,
+            memory_store: memory_store.map(|m| m as &dyn cel_store::CortexMemoryStore),
+            workflow_id,
+            knowledge_store: memory_store.map(|m| m as &dyn cel_store::KnowledgeStore),
+            goal_embedding,
+            recent_events_store: memory_store.map(|m| m as &dyn cel_store::RecentEventStore),
+            cortex_anomalies: Some(fresh_anomalies.as_slice()),
+            cortex_freshness: fresh_freshness.as_ref(),
+            adapter_facts: Some(fresh_adapter_facts.as_slice()),
+        });
+        // Pass the original GOAL as both the "claim" and the criterion
+        // — the grader is checking whether the goal was achieved by
+        // current page state, not whether some agent-narrated summary
+        // is supported. Same prompt shape, just no agent narration to
+        // discount.
+        let summary = format!(
+            "Budget exhausted after {steps_used} steps without an explicit Done. \
+             Final outcome check: was the original goal '{goal}' achieved by the \
+             current page state?"
+        );
+        let verdict = self
+            .planner
+            .verify_done(
+                goal,
+                &summary,
+                shared_memory,
+                &fresh_view,
+                fresh_screenshot.as_deref(),
+            )
+            .await;
+        match verdict {
+            Ok(v) if v.verified => {
+                info!(
+                    kind = %kind,
+                    steps_used,
+                    reason = %v.reason,
+                    "Budget exhausted but final outcome check verified goal achieved — Succeeded"
+                );
+                GoalOutcome::Succeeded {
+                    summary: format!(
+                        "Goal achieved by step {steps_used} ({kind} budget reached): {}",
+                        v.reason
+                    ),
+                    extracted_data: shared_memory.clone(),
+                }
+            }
+            Ok(v) => {
+                warn!(
+                    kind = %kind,
+                    steps_used,
+                    reason = %v.reason,
+                    "Budget exhausted; final outcome check rejected — Failed"
+                );
+                budget_exhausted(kind, last_purpose, steps_used)
+            }
+            Err(err) => {
+                tracing::error!(
+                    kind = %kind,
+                    error = %err,
+                    "Budget-exhaustion outcome check failed to run — Failed (no fail-open here)"
+                );
+                budget_exhausted(kind, last_purpose, steps_used)
+            }
+        }
+    }
+}
+
 /// WK4: open the cortex memory store once if both opt-in fields are set.
 ///
 /// Wraps in `Mutex<CelStore>` so the resulting handle satisfies the
@@ -986,6 +1256,20 @@ async fn write_outcome_memory_if_enabled(
                 summary_text,
                 payload,
             )
+        }
+        GoalOutcome::Refused { .. } => {
+            // Refused outcomes describe a non-event (the agent
+            // deliberately declined to act on an ambiguous prompt).
+            // There's no execution trace to learn from and the
+            // clarification question is goal-specific — persisting it
+            // would just pollute future memory recall. Skip the write
+            // entirely and let the caller surface the question to the
+            // user inline.
+            tracing::debug!(
+                workflow_id,
+                "Refused outcome: skipping memory write (no execution trace to persist)"
+            );
+            return;
         }
     };
 
@@ -1271,6 +1555,108 @@ fn hash_action(action: &PlannedAction) -> u64 {
 /// be the right move in Numbers. Banning them globally traps the
 /// agent (seen in the crypto scenario where the agent Failed because
 /// it had concluded arrow keys were off-limits).
+/// Recognise `Fail` reasons whose text explicitly says the goal is
+/// complete. Conservative — only flags the patterns the May 2026
+/// prototype-subset measurement actually produced, so legitimate
+/// "this is impossible" Fails keep terminating cleanly.
+///
+/// Examples that match (all from real Sonnet output):
+/// * "The goal has been accomplished."
+/// * "The goal has already been accomplished - the button was clicked
+///    and the modal appeared as the expected result."
+/// * "The button was already clicked successfully in step 1 (history
+///    shows 'ok' status). The modal dialog 'Add New Task' is now open
+///    on screen, which confirms the button click worked."
+///
+/// Examples that DON'T match (legitimate Fails):
+/// * "Cannot locate the button after 6 attempts" (no success language)
+/// * "I tried three approaches and none worked" (no completion claim)
+/// * "Permission denied opening the file" (impossible-given-state)
+fn looks_like_success_acknowledgement(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    // Direct success phrases — explicit completion claims.
+    if lower.contains("goal has been accomplished")
+        || lower.contains("goal has already been accomplished")
+        || lower.contains("goal accomplished")
+        || lower.contains("goal is complete")
+        || lower.contains("goal is achieved")
+        || lower.contains("goal achieved")
+        || lower.contains("task completed successfully")
+        || lower.contains("the task is done")
+    {
+        return true;
+    }
+    // "X has already been Y-ed successfully" — agent admits the
+    // action it was supposed to take has ALREADY happened (and the
+    // outcome is visible). Example from May 11:
+    //   "The 'Export to Notes' button has already been clicked and
+    //    the page shows 'Action completed. Exported ticket details
+    //    to Notes.' … the ticket has already been successfully
+    //    exported."
+    let already_did_it = (lower.contains("already been clicked")
+        || lower.contains("already been submitted")
+        || lower.contains("already been exported")
+        || lower.contains("already been completed")
+        || lower.contains("already been filled")
+        || lower.contains("already successfully")
+        || lower.contains("already been successfully"))
+        && (lower.contains("page shows")
+            || lower.contains("page displays")
+            || lower.contains("action completed")
+            || lower.contains("modal")
+            || lower.contains("success message")
+            || lower.contains("now visible"));
+    if already_did_it {
+        return true;
+    }
+    // Compound pattern: agent narrates a successful action AND that
+    // the expected post-state is visible. Example from May 11:
+    //   "the button was already clicked successfully … modal dialog
+    //    is now open on screen, which confirms the button click
+    //    worked".
+    let success_action = lower.contains("clicked successfully")
+        || lower.contains("submitted successfully")
+        || lower.contains("clicked the")
+        || lower.contains("submission succeeded");
+    let observed_outcome = lower.contains("modal")
+        || lower.contains("success message")
+        || lower.contains("dialog is now open")
+        || lower.contains("is now visible")
+        || lower.contains("now displays");
+    let confirmation = lower.contains("confirm")
+        || lower.contains("history shows 'ok")
+        || lower.contains("history confirms");
+    if success_action && observed_outcome && confirmation {
+        return true;
+    }
+    // "Yet the modal is still open" — Sonnet's misclassification
+    // where the reason describes the goal-state being observable
+    // (observed_outcome) and the agent's interaction surface
+    // (click / cdp_eval) but treats the lack of further state-
+    // change as failure rather than recognising the modal opening
+    // WAS the goal. Real examples from May 11:
+    //   "The goal has been attempted 3 times with different
+    //    approaches (cdp_eval twice, click once), all returning
+    //    'ok' status, yet the modal dialog remains open in the
+    //    screenshot."
+    //   "I've attempted 5 different CDP-based click actions
+    //    targeting this button, all reporting success. … The
+    //    modal shown in the screenshot ('Add New Task') suggests
+    //    a click DID work at some point."
+    //
+    // The outer call site requires
+    // `history.iter().any(|r| r.succeeded)` before rewriting, so a
+    // Fail like "I couldn't click after 3 tries" (no successful
+    // history actions) stays Failed. And `verify_done` arbitrates
+    // the rewritten Done — if the modal isn't actually open, the
+    // grader rejects. Net: we lean permissive on the heuristic;
+    // the safety nets above (history-has-success) and below
+    // (verify_done) catch false positives.
+    let click_or_eval_in_reason =
+        lower.contains("cdp_eval") || lower.contains("click");
+    observed_outcome && click_or_eval_in_reason
+}
+
 fn should_ban_on_repeat(action: &PlannedAction) -> bool {
     match action {
         PlannedAction::Key { .. } | PlannedAction::KeyCombo { .. } | PlannedAction::Wait { .. } => {
@@ -1371,12 +1757,70 @@ impl StepExecutor for CortexStepExecutor {
         guard.current_context.clone()
     }
 
+    async fn perceive_fresh(&self) -> ScreenContext {
+        // Force the cortex to complete a tick BEFORE we read perception
+        // so the snapshot reflects state as of now, not as of the last
+        // 200ms tick boundary. The 750ms timeout matches the eval
+        // post-run snapshot pattern in `cel-eval/src/runner.rs` — long
+        // enough to absorb a sluggish AX query or a recent navigation,
+        // short enough that a hung cortex doesn't trap the verify path.
+        //
+        // Why this exists: `verify_done` was being called with stale
+        // perception captured at the TOP of the turn — BEFORE the
+        // planner's last batch dispatched. A successful click that
+        // produces `#success-message` AFTER the action returned would
+        // never show up in the perception verify_done sees, so the
+        // grader rejected even-successful Dones. Forcing a refresh
+        // here is the structural fix; the prompt-rule "verify
+        // side-effects" added in PR #72 is redundant with this.
+        if let Err(err) = self.cortex.refresh_now(Some(750)).await {
+            tracing::debug!(
+                error = %err,
+                "perceive_fresh: cortex.refresh_now failed; falling back to cached perception"
+            );
+        }
+        self.perceive().await
+    }
+
     async fn screenshot_png(&self) -> Option<Vec<u8>> {
+        // When CDP is bound, the screenshot MUST come from the browser
+        // page or not at all. Falling back to macOS display capture
+        // would photograph whatever window happens to be foreground —
+        // typically the user's actual Chrome with personal tabs (Gmail,
+        // Instagram, banking) or the editor showing their code. The
+        // LLM then sees that content and either acts on it (correctness
+        // bug — the planner thinks it's "in the browser" but on the
+        // wrong page) or surfaces it in reasoning traces (privacy bug
+        // — the user's desktop state leaks into the model context).
+        //
+        // Both failures observed live: in the May 2026 smoke run the
+        // agent's Fail reason cited "Instagram story / Gmail tabs" —
+        // none of which existed in the headless eval target — because
+        // a transient `Page.captureScreenshot` timeout dropped through
+        // to `cel_display::create_capture()` and grabbed the user's
+        // real Chrome window. Returning None here makes the planner
+        // operate without vision for that turn (still has perception)
+        // rather than operate on someone else's screen.
+        if self.cortex.has_cdp_client() {
+            return self.cortex.cdp_screenshot().await;
+        }
+        // No CDP bound — non-browser scenario (Numbers, native apps,
+        // desktop-only goals). Resize + JPEG-encode the macOS display
+        // capture to keep the payload under common LLM image-size caps
+        // (Anthropic: 5 MB, OpenAI: ~20 MB but charges by tokens that
+        // scale with pixel count). Full-res Retina PNG routinely blows
+        // past 5 MB; the resize is what prevents
+        // `image exceeds 5 MB maximum` HTTP 400 from Claude.
+        //
+        // 1568px max dim + JPEG 80 are common defaults that match
+        // OpenAI's "high detail" guidance and stay well under Claude's
+        // cap (~150-300 KB typical output).
         tokio::task::spawn_blocking(|| {
             let mut capture = cel_display::create_capture();
             capture.init().ok()?;
             let frame = capture.capture_frame().ok()?;
-            cel_display::encode_png(&frame).ok()
+            let resized = cel_display::resize_frame(&frame, 1568, 1568).ok()?;
+            cel_display::encode_jpeg(&resized, 80).ok()
         })
         .await
         .ok()
@@ -1687,6 +2131,230 @@ mod tests {
         match outcome {
             GoalOutcome::Failed(r) => assert!(r.attempts[0].contains("impossible")),
             other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn planner_clarify_produces_refused_outcome() {
+        // Clarify is terminal like Fail, but maps to GoalOutcome::Refused
+        // (not Failed) and carries the planner's question verbatim in
+        // `summary`. Locks in the contract from
+        // docs/canonical-agent-plan.md.
+        let planner = ScriptedPlanner::new(vec![NextMove::Clarify {
+            question: "Which item should I delete?".into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Delete it", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Refused { summary } => {
+                assert_eq!(summary, "Which item should I delete?");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_run_clarify_is_rejected_and_replayed_to_done() {
+        // Clarify is only legitimate as the FIRST move — before any
+        // action has been dispatched. If the agent acts and then
+        // emits Clarify, it's escalating to the user instead of
+        // committing to Done/Fail. The runner rejects the mid-run
+        // Clarify (synthetic AttemptRecord + continue, same shape as
+        // verify_done rejection) so the planner gets one more chance
+        // to finalise. Here the next move is Done, which the runner
+        // accepts. Without the guard, the run would terminate as
+        // Refused after step 1 and never reach Done.
+        let planner = ScriptedPlanner::new(vec![
+            batch("acknowledge", vec![step("ok:clicked")]),
+            NextMove::Clarify {
+                question: "Should I export to Notes too?".into(),
+            },
+            NextMove::Done {
+                summary: "ticket acknowledged".into(),
+                extracted_data: serde_json::Value::Null,
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("acknowledge the ticket", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Succeeded { summary, .. } => {
+                assert_eq!(summary, "ticket acknowledged");
+            }
+            other => panic!("expected Succeeded after mid-run Clarify rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_turn_clarify_still_refuses_when_history_empty() {
+        // Defensive: confirm the first-turn Clarify path still
+        // produces Refused. The guard only fires when history is
+        // non-empty.
+        let planner = ScriptedPlanner::new(vec![NextMove::Clarify {
+            question: "Which row?".into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Delete it", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Refused { summary } => assert_eq!(summary, "Which row?"),
+            other => panic!("expected Refused on first-turn Clarify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn looks_like_success_acknowledgement_recognises_real_traces() {
+        // All four of these are real Sonnet 4.5 outputs from the
+        // May 11 prototype-subset measurement that surfaced the
+        // Done-vs-Fail confusion this rewrite addresses.
+        assert!(looks_like_success_acknowledgement(
+            "The '+ Add Task' button was already clicked successfully in step 1 \
+             (history shows 'ok' status). The modal dialog 'Add New Task' is now \
+             open on screen, which confirms the button click worked. The goal \
+             has been accomplished."
+        ));
+        assert!(looks_like_success_acknowledgement(
+            "The goal has already been accomplished - the button was clicked and \
+             the modal appeared as the expected result."
+        ));
+        assert!(looks_like_success_acknowledgement(
+            "The 'Export to Notes' button has already been clicked and the page \
+             shows 'Action completed. Exported ticket details to Notes.' Seven \
+             attempts have been made to click it again, but the button either \
+             no longer responds or is disabled after the first export. The UI \
+             appears designed for single-use export, and the ticket has already \
+             been successfully exported."
+        ));
+        // "Yet the modal remains open" — Sonnet's misclassification
+        // where the reason describes the goal-state being visible
+        // AND prior CDP actions returned ok, but treats the lack of
+        // further state-change as failure. The modal opening WAS
+        // the goal.
+        assert!(looks_like_success_acknowledgement(
+            "The goal has been attempted 3 times with different approaches \
+             (cdp_eval twice, click once), all returning 'ok' status, yet \
+             the modal dialog remains open in the screenshot. The perception \
+             shows APP: Claude with only AX elements, indicating the browser \
+             is not frontmost. Since cdp_bound=true, the CDP actions should \
+             work regardless of foreground state, but after 3 successful \
+             executions with no observable state change, the '+ Add Task' \
+             button appears non-functional or the clicks are not reaching \
+             the target."
+        ));
+        // Variant of the same misclassification with different
+        // language — "all reporting success" instead of "returning
+        // 'ok' status", "click DID work" instead of "history shows
+        // 'ok'". The action_result_ok signals shift from run to
+        // run; the heuristic anchors on observed_outcome +
+        // click/cdp_eval mention and trusts verify_done as the
+        // safety gate.
+        assert!(looks_like_success_acknowledgement(
+            "I've attempted 5 different CDP-based click actions targeting \
+             this button, all reporting success. However, the live perception \
+             shows APP: Claude with no web content elements visible. … The \
+             modal shown in the screenshot ('Add New Task') suggests a click \
+             DID work at some point, but I have no current perception of that \
+             state to confirm or act upon."
+        ));
+    }
+
+    #[test]
+    fn looks_like_success_acknowledgement_does_not_match_real_failures() {
+        // Conservative: legitimate "I can't do this" Fails must keep
+        // terminating cleanly, not get rewritten into Done.
+        assert!(!looks_like_success_acknowledgement(
+            "Cannot locate the Acknowledge button after 6 attempts using \
+             different approaches (CDP click, ax_action with label fallback, \
+             keyboard shortcut). The step budget is exhausted."
+        ));
+        assert!(!looks_like_success_acknowledgement(
+            "CDP connection to Chrome has been lost and all browser \
+             interactions fail with 'closed connection' errors. Cannot \
+             click Export to Notes or perform any other CDP-dependent \
+             actions."
+        ));
+        assert!(!looks_like_success_acknowledgement(
+            "Permission denied: AppleScript automation for Numbers not \
+             authorized. User must grant permission in System Settings."
+        ));
+        assert!(!looks_like_success_acknowledgement(
+            "The Full Name field cannot be filled with 'Alice'. Two \
+             attempts have failed: set_value with target_id 'dom:input:full-name' \
+             was banned after failing with 'no-match'."
+        ));
+    }
+
+    #[tokio::test]
+    async fn fail_with_success_reasoning_rewrites_to_done() {
+        // Planner emits a successful action then Fails with a reason
+        // that explicitly admits the goal is complete. The runner
+        // should rewrite to Done and the standard verify_done path
+        // arbitrates. With the scripted executor (no LLM-backed
+        // verify_done) the Done verifies-fail-open and the run ends
+        // Succeeded, which is what we'd want under a conservative
+        // grader: the agent's reasoning was right; the terminal move
+        // wasn't.
+        let planner = ScriptedPlanner::new(vec![
+            batch("click", vec![step("ok:clicked")]),
+            NextMove::Fail {
+                reason: "The button was clicked successfully and the modal dialog \
+                         is now open on screen, which confirms the click worked. \
+                         The goal has been accomplished."
+                    .into(),
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Click + Add Task", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Succeeded { summary, .. } => {
+                assert!(
+                    summary.contains("goal has been accomplished"),
+                    "expected the rewritten Done summary to carry the original Fail reason; got {summary}",
+                );
+            }
+            other => panic!("expected Succeeded after Fail-rewrite, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legitimate_fail_still_terminates_failed() {
+        // Defensive: regression guard. A genuine "I can't do this"
+        // Fail must keep producing GoalOutcome::Failed.
+        let planner = ScriptedPlanner::new(vec![
+            batch("try", vec![step("err:permission denied")]),
+            NextMove::Fail {
+                reason: "Permission denied opening the file. User must grant \
+                         access via System Settings."
+                    .into(),
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("open file", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Failed(report) => {
+                assert!(
+                    report.attempts[0].contains("Permission denied"),
+                    "expected the original Fail reason; got {:?}",
+                    report.attempts
+                );
+            }
+            other => panic!("expected Failed for legitimate Fail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_with_success_reasoning_but_no_history_is_kept_as_fail() {
+        // Defensive: only rewrite when `history` proves the agent
+        // actually did something. A Fail that talks about "goal
+        // accomplished" without any prior successful action is
+        // probably a hallucination — keep it as Failed.
+        let planner = ScriptedPlanner::new(vec![NextMove::Fail {
+            reason: "The goal has been accomplished without me doing anything."
+                .into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("x", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Failed(_) => {}
+            other => panic!("expected Failed for first-turn Fail, got {other:?}"),
         }
     }
 

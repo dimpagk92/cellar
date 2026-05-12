@@ -57,6 +57,29 @@ CEL uses four tools organized by intent:
 
 Plus 5 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`).
 
+The server can also expose screenshots as MCP resources. Screenshot resources
+are disabled by default because any connected MCP client can read them once they
+are enabled. Only turn them on for trusted local clients and sessions:
+
+```bash
+CELLAR_ENABLE_SCREEN_RESOURCES=1 cellar mcp
+```
+
+| Resource | Contents |
+|----------|----------|
+| `cellar://screen/current` | Fresh PNG screenshot of the primary display |
+| `cellar://screen/{app_name}` | Fresh PNG screenshot for a visible app window |
+
+Use resources when your MCP client can display or subscribe to resource content directly.
+Use `cel_see` `screenshot` when you specifically need the screenshot inside a tool call result.
+
+Resource reads are uncached and capture a fresh PNG on each request. PNG payloads
+can be multiple MB over stdio, so prefer targeted reads and avoid polling unless
+your client handles large resource payloads well. `cellar://screen/current`
+captures the primary display. App resources use window IDs from the native
+capture backend (`listCaptureWindows`) and do not fall back to accessibility
+window IDs or a full-screen screenshot if a matching window cannot be captured.
+
 ---
 
 ## cel_see — Read the Screen

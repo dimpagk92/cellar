@@ -32,6 +32,18 @@ pub fn capture_screen() -> napi::Result<napi::bindgen_prelude::Buffer> {
     Ok(png.into())
 }
 
+/// Capture a window by platform capture ID and return as PNG bytes.
+#[napi]
+pub fn capture_window(window_id: u32) -> napi::Result<napi::bindgen_prelude::Buffer> {
+    let mut capture = cel_display::create_capture();
+    let frame = capture
+        .capture_window(window_id)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let png =
+        cel_display::encode_png(&frame).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(png.into())
+}
+
 /// List available monitors. Returns JSON string.
 #[napi]
 pub fn list_monitors() -> napi::Result<String> {
@@ -49,6 +61,18 @@ pub fn list_windows() -> napi::Result<String> {
     let bus = cel_signals::create_signal_bus();
     let snap = bus.snapshot();
     serde_json::to_string(&snap.window_list).map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// List windows from the capture backend. Returns JSON string.
+///
+/// This exposes the same platform capture IDs that `capture_window` expects.
+#[napi]
+pub fn list_capture_windows() -> napi::Result<String> {
+    let capture = cel_display::create_capture();
+    let windows = capture
+        .list_windows()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    serde_json::to_string(&windows).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
 /// Create a resilient ContextReference from a ContextElement JSON.

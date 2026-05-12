@@ -6,6 +6,7 @@ import { celActSchema, handleCelAct } from "./tools/cel-act.js";
 import { celThinkSchema, handleCelThink } from "./tools/cel-think.js";
 import { celPerceiveSchema, handleCelPerceive } from "./tools/cel-perceive.js";
 import { registerPrompts } from "./prompts.js";
+import { registerScreenResources } from "./resources.js";
 
 type CdpTargetLike = {
   app_name?: string;
@@ -33,9 +34,17 @@ export function filterBrowserCdpTargets<T extends CdpTargetLike>(targets: T[]): 
   return targets.filter((target) => isBrowserCdpTarget(target));
 }
 
+export function screenResourcesEnabled(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const raw = env.CELLAR_ENABLE_SCREEN_RESOURCES;
+  return raw === "1" || raw?.toLowerCase() === "true" || raw?.toLowerCase() === "yes";
+}
+
 export function createCelMcpServer(cel?: Cel): McpServer {
   const instance = cel ?? new Cel();
   const degraded = !instance.isNativeAvailable;
+  const enableScreenResources = screenResourcesEnabled();
 
   if (degraded) {
     console.warn(
@@ -189,6 +198,15 @@ export function createCelMcpServer(cel?: Cel): McpServer {
       ].join("\n"),
     },
   );
+
+  if (enableScreenResources && !degraded) {
+    registerScreenResources(server, instance);
+  } else if (enableScreenResources) {
+    console.warn(
+      "[cellar-mcp] CELLAR_ENABLE_SCREEN_RESOURCES is set, but cel-napi is not available. " +
+        "Screenshot resources are disabled in schema-only mode.",
+    );
+  }
 
   server.registerTool(
     "cel_see",

@@ -116,8 +116,10 @@ export interface CelNative {
   axRequestPermission(): boolean;
   getContext(): string;
   captureScreen(): Buffer;
+  captureWindow(windowId: number): Buffer;
   listMonitors(): string;
   listWindows(): string;
+  listCaptureWindows(): string;
   mouseMove(x: number, y: number): void;
   click(x: number, y: number): void;
   rightClick(x: number, y: number): void;
@@ -573,6 +575,14 @@ export class Cel implements
     return this.native.captureScreen();
   }
 
+  /** Capture a specific window as PNG buffer. */
+  captureWindow(windowId: number): Buffer {
+    if (!this.native) {
+      throw new Error("Native module not available");
+    }
+    return this.native.captureWindow(windowId);
+  }
+
   /** List available monitors. */
   listMonitors(): MonitorInfo[] {
     if (!this.native) return [];
@@ -583,6 +593,12 @@ export class Cel implements
   listWindows(): WindowInfo[] {
     if (!this.native) return [];
     return JSON.parse(this.native.listWindows());
+  }
+
+  /** List windows with IDs compatible with captureWindow(). */
+  listCaptureWindows(): WindowInfo[] {
+    if (!this.native) return [];
+    return JSON.parse(this.native.listCaptureWindows());
   }
 
   // --- Input ---

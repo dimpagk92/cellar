@@ -1,0 +1,23 @@
+[package]
+name = "cellar-webhook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cellar-types.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+reqwest = { workspace = true, features = ["json"] }
+tracing.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+# `test-util` enables `#[tokio::test(start_paused = true)]` so the dispatcher
+# tests don't burn wall-clock time on exponential backoffs.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "test-util"] }
+serde_json.workspace = true

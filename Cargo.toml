@@ -16,8 +16,15 @@ members = [
     "cel/cel-signals",
     "cel/cel-cortex",
     "cel/cel-goal-runner",
+    "cel/cel-memory",
+    "cel/cel-memory-sqlite",
     "cel/cel-napi",
     "cellar-worker",
+    "cellar-types",
+    "cel-cortex-daemon",
+    "cel-act-gateway",
+    "cellar-ipc",
+    "cellar-webhook",
     "adapters/adapter-common",
     "adapters/browser-rs",
     "adapters/calendar",
@@ -46,6 +53,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "1"
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 # CEL internal crates
 cel-llm = { path = "cel/cel-llm" }
 cel-display = { path = "cel/cel-display" }
@@ -61,7 +70,16 @@ cel-planner = { path = "cel/cel-planner" }
 cel-cortex = { path = "cel/cel-cortex" }
 cel-goal-runner = { path = "cel/cel-goal-runner" }
 cel-cdp = { path = "cel/cel-cdp" }
+cel-memory = { path = "cel/cel-memory" }
+cel-memory-sqlite = { path = "cel/cel-memory-sqlite" }
 cel-signals = { path = "cel/cel-signals" }
+
+# Cellar app crates (v1)
+cellar-types = { path = "cellar-types" }
+cel-cortex-daemon = { path = "cel-cortex-daemon" }
+cel-act-gateway = { path = "cel-act-gateway" }
+cellar-ipc = { path = "cellar-ipc" }
+cellar-webhook = { path = "cellar-webhook" }
 
 adapter-common = { path = "adapters/adapter-common" }
 adapter-browser = { path = "adapters/browser-rs" }

@@ -1,0 +1,21 @@
+[package]
+name = "cel-act-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cel-memory = { path = "../cel/cel-memory" }
+cellar-types = { path = "../cellar-types" }
+chrono = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+uuid = { workspace = true, features = ["v7", "serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true }

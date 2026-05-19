@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel, type CanonicalStep, type ContextElement, type PerceptionFrame, type ScreenContext } from "@cellar/agent";
+import { Cel, type CanonicalStep, type ContextElement, type PerceptionFrame, type ScreenContext } from "@cellar/agent/runtime";
 
 interface NumbersSmokeOptions {
   write?: string[];

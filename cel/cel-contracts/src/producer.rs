@@ -2,7 +2,7 @@
 //!
 //! One method, one decision: given the goal, the full history of what the
 //! agent has done so far, the live perception + screenshot, return the next
-//! move (a batch of steps, or Done, or Fail).
+//! move (a batch of steps, or Done, or Fail, or Clarify).
 //!
 //! Lives in cel-contracts so cortex/runner can describe the contract without
 //! depending on cel-planner and so any planner runtime (LangGraph, Mastra,
@@ -52,6 +52,10 @@ pub trait PlanProducer: Send + Sync {
     ///   `GoalOutcome::Succeeded`.
     /// * `NextMove::Fail { reason }` — terminate as
     ///   `GoalOutcome::Failed`.
+    /// * `NextMove::Clarify { question }` — refuse to act because the
+    ///   goal is too ambiguous or destructive without confirmation;
+    ///   terminate as `GoalOutcome::Refused` with `question` in the
+    ///   summary.
     ///
     /// Errors propagate to the runner as a planner-layer failure
     /// (e.g. LLM down, parse failure) and terminate the run.
@@ -86,6 +90,7 @@ pub trait PlanProducer: Send + Sync {
         Ok(DoneVerdict {
             verified: true,
             reason: String::new(),
+            next_action_hint: None,
         })
     }
 }
@@ -99,4 +104,47 @@ pub struct DoneVerdict {
     /// Human-readable reason — shown to the planner as the failure
     /// record on rejection, empty string when verified.
     pub reason: String,
+    /// Optional categorical signal from the grader to the planner about
+    /// what to do next when `verified = false`. Closes the gap where
+    /// the planner reads a free-form `reason` like "Send Message
+    /// button still present and accessible" and infers "I should
+    /// verify state" rather than the right action ("re-click submit").
+    /// Defaults to `None` for back-compat: graders that don't emit a
+    /// hint behave exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action_hint: Option<NextActionHint>,
+}
+
+/// Categorical recovery suggestion from the verify_done grader to the
+/// planner. The grader looks at the rejection's root cause and emits
+/// the most useful next move, so the planner doesn't have to infer it
+/// from the prose `reason`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NextActionHint {
+    /// The agent's last action looks correct in shape but the page
+    /// didn't react — re-running it should fire. Most common when a
+    /// click handler dropped its event due to a transient state
+    /// (modal closing animation, focus loss, race with re-render).
+    /// Planner contract: if the previous AttemptRecord's hint is
+    /// `RetryLastAction`, the next batch should re-emit that exact
+    /// action — possibly with `expect_after` if it lacked one — and
+    /// NOT emit a "verify state" batch (the runtime already verified
+    /// it didn't happen).
+    RetryLastAction,
+    /// The agent's last action targeted the right intent but the
+    /// approach is wrong — same goal, different shape (e.g. switch
+    /// from `click` to `cdp_eval`-with-trusted-event, or fall back to
+    /// a key shortcut).
+    DifferentAction,
+    /// The action shape is right but the `target_id` is wrong — the
+    /// element it landed on isn't the one the goal needs. Most
+    /// common when the planner hallucinated a `dom:role:slug` from
+    /// the visible label and dispatch landed on a different
+    /// candidate.
+    DifferentTarget,
+    /// The grader believes the goal is genuinely unachievable from
+    /// here — emit Fail rather than burning more budget. Use
+    /// sparingly; the planner can ignore this and try once more.
+    GiveUp,
 }

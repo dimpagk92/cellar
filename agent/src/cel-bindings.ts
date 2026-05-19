@@ -29,8 +29,11 @@ import type { BrowserBridge } from "./interfaces/browser-bridge.js";
 import type { EventSource } from "./interfaces/event-source.js";
 import type {
   AttemptRecord,
+  AdapterFactRef,
   CanonicalStep,
   CanonicalStepResult,
+  CortexAnomaly,
+  CortexFreshnessAssessment,
   CortexMemory,
   DoneVerdict,
   MemoryKind,
@@ -115,7 +118,7 @@ export interface CelNative {
   axPermissionGranted(): boolean;
   axRequestPermission(): boolean;
   getContext(): string;
-  captureScreen(): Buffer;
+  captureScreen(displayId?: number): Buffer;
   captureWindow(windowId: number): Buffer;
   listMonitors(): string;
   listWindows(): string;
@@ -255,6 +258,9 @@ export interface CelNative {
     budgetJson?: string | null,
     perceptionJson?: string | null,
     capsJson?: string | null,
+    adapterFactsJson?: string | null,
+    cortexAnomaliesJson?: string | null,
+    cortexFreshnessJson?: string | null,
   ): Promise<string>;
   /** PR1b: signature changed to take view JSON instead of perception+caps. */
   canonicalDecideNext(
@@ -567,12 +573,20 @@ export class Cel implements
     return JSON.parse(resultJson);
   }
 
-  /** Capture a screenshot as PNG buffer. */
-  captureScreen(): Buffer {
+  /**
+   * Capture a screenshot as PNG buffer.
+   *
+   * @param displayId Optional monitor id (from `listMonitors()`). When
+   *   omitted, captures the display containing the frontmost app's key
+   *   window — important on multi-monitor setups where the primary
+   *   display may be empty wallpaper while the user is working on a
+   *   secondary screen.
+   */
+  captureScreen(displayId?: number): Buffer {
     if (!this.native) {
       throw new Error("Native module not available");
     }
-    return this.native.captureScreen();
+    return this.native.captureScreen(displayId);
   }
 
   /** Capture a specific window as PNG buffer. */
@@ -1270,9 +1284,11 @@ export class Cel implements
    *    Uses the booted Cortex internally to read fresh perception + caps,
    *    then builds the view. Errors if the cortex isn't running.
    *
-   *  - **Stateless**: caller supplies both `perception` and `caps`. Skips
-   *    the cortex; useful for the eval harness, replay tooling, or any
-   *    caller that already has a perception snapshot.
+   *  - **Stateless**: caller supplies both `perception` and `caps`. Useful
+   *    for the eval harness, replay tooling, or any caller that already
+   *    has a perception snapshot.
+   *    Optional adapter/anomaly/freshness fields can be supplied with the
+   *    frame; otherwise a booted cortex is queried for those signals.
    *
    * `budget` is optional; defaults sized to keep prompts under common
    * LLM context windows.
@@ -1283,12 +1299,15 @@ export class Cel implements
       budget?: PlanningBudget;
       perception?: ScreenContext;
       caps?: RuntimeCaps;
+      adapterFacts?: AdapterFactRef[];
+      cortexAnomalies?: CortexAnomaly[];
+      cortexFreshness?: CortexFreshnessAssessment | null;
     } = {},
   ): Promise<PlanningView> {
     if (!this.native) {
       throw new Error("Native CEL module not available");
     }
-    const { budget, perception, caps } = options;
+    const { budget, perception, caps, adapterFacts, cortexAnomalies, cortexFreshness } = options;
     if ((perception && !caps) || (!perception && caps)) {
       throw new Error(
         "canonicalBuildPlanningView: stateless mode requires BOTH perception and caps (or pass neither for stateful mode)",
@@ -1300,6 +1319,9 @@ export class Cel implements
         budget ? JSON.stringify(budget) : null,
         perception ? JSON.stringify(sanitizeContextForRust(perception)) : null,
         caps ? JSON.stringify(caps) : null,
+        adapterFacts ? JSON.stringify(adapterFacts) : null,
+        cortexAnomalies ? JSON.stringify(cortexAnomalies) : null,
+        cortexFreshness === undefined ? null : JSON.stringify(cortexFreshness),
       ),
     );
   }

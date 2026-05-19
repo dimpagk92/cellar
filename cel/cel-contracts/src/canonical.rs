@@ -46,6 +46,22 @@ pub enum NextMove {
     },
     /// Give up — goal can't be completed given the state.
     Fail { reason: String },
+    /// Refuse to act — the goal is too ambiguous or destructive to
+    /// attempt safely, and the planner is asking the user for
+    /// clarification instead of guessing.
+    ///
+    /// Terminal like `Fail`, but distinct in intent: the agent isn't
+    /// stuck, it's deliberately declining to act on insufficient
+    /// information. Surfaced as `GoalOutcome::Refused` with `question`
+    /// in the summary so the eval harness, CLI, and MCP server can
+    /// display it back to the user without rendering it as an error.
+    ///
+    /// Use cases (see `NEXT_MOVE_SYSTEM_PROMPT` for the prompt rule):
+    /// - "Delete it" with no clear referent on screen.
+    /// - "Send the email" with no recipient identified.
+    /// - Destructive prompts (delete / overwrite / send / pay) without
+    ///   explicit confirmation in the goal text.
+    Clarify { question: String },
 }
 
 /// Snapshot of what tools / channels the runtime has wired up this
@@ -103,6 +119,15 @@ pub struct AttemptRecord {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub data: serde_json::Value,
+    /// Categorical recovery hint promoted from the verify_done grader
+    /// (or other runtime checks) up into the AttemptRecord so the
+    /// planner sees it as a top-level field rather than buried in the
+    /// `error` string. None for ordinary action-failure attempts;
+    /// populated for `verify_done`-rejected Done attempts and similar
+    /// runtime-grader rejections. See [`crate::NextActionHint`] for
+    /// the variants and their planner-side contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_action_hint: Option<crate::NextActionHint>,
 }
 
 /// One executable unit inside a batch.
@@ -224,6 +249,23 @@ pub enum GoalOutcome {
     /// The agent gave up. `report` names which sub-goal and step died,
     /// and carries the last three error messages.
     Failed(FailureReport),
+
+    /// The agent refused to act because the goal was too ambiguous or
+    /// destructive to attempt safely, and asked the user for
+    /// clarification instead.
+    ///
+    /// Terminal like `Failed` but semantically distinct: the agent
+    /// isn't broken, the goal is. `summary` carries the clarification
+    /// question — verbatim what the planner emitted in
+    /// [`NextMove::Clarify`]. Callers (CLI, MCP server, eval harness)
+    /// render it back to the user as a prompt, not an error.
+    Refused {
+        /// The clarification question (or refusal explanation) the
+        /// planner produced. Free-form text; the runner does not
+        /// re-format it. Callers may choose to wrap it in a "the agent
+        /// asked: …" frame.
+        summary: String,
+    },
 }
 
 /// Structured explanation for why the agent stopped before success.
@@ -346,6 +388,35 @@ mod tests {
         assert!(serde_json::to_string(&err)
             .unwrap()
             .contains("\"status\":\"err\""));
+    }
+
+    #[test]
+    fn clarify_next_move_round_trips_through_json() {
+        // The planner emits `{"kind":"clarify","question":"..."}`; lock
+        // down the serde tag so a rename can't silently break the
+        // prompt contract.
+        let mv = NextMove::Clarify {
+            question: "What should I delete?".into(),
+        };
+        let json = serde_json::to_string(&mv).unwrap();
+        assert!(json.contains("\"kind\":\"clarify\""));
+        assert!(json.contains("\"question\":\"What should I delete?\""));
+        let back: NextMove = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, NextMove::Clarify { .. }));
+    }
+
+    #[test]
+    fn refused_outcome_serializes_with_summary() {
+        // Eval harness, CLI, and MCP server all consume the JSON tag —
+        // they discriminate on `"status":"refused"`. Lock it down.
+        let outcome = GoalOutcome::Refused {
+            summary: "Which item should I delete? Please clarify.".into(),
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(json.contains("\"status\":\"refused\""));
+        assert!(json.contains("clarify"));
+        let back: GoalOutcome = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, GoalOutcome::Refused { .. }));
     }
 
     #[test]

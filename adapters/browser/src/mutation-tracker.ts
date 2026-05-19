@@ -8,7 +8,7 @@
  */
 
 import type { Page } from "playwright";
-import type { ContextElement } from "@cellar/agent";
+import type { ContextElement } from "@cellar/agent/runtime";
 import { extractDOM, extractDOMLightweight, type RawDOMElement, type Evaluator } from "./dom-extractor.js";
 import { mapElements } from "./element-mapper.js";
 import { sanitizeElements } from "./sanitizer.js";

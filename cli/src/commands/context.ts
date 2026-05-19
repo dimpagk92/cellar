@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel, normalizeCortexModel, type MentalModel, type ScreenContext } from "@cellar/agent";
+import { Cel, normalizeCortexModel, type MentalModel, type ScreenContext } from "@cellar/agent/runtime";
 
 interface ContextOptions {
   json?: boolean;

@@ -684,9 +684,20 @@ impl MacAccessibility {
         let role_str = get_ax_string(element, "AXRole").unwrap_or_default();
         let role = map_role(&role_str, None);
 
-        let label = get_ax_string(element, "AXTitle")
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| get_ax_string(element, "AXDescription"));
+        // For row-like containers (Finder list view, Mail message list,
+        // Music tracks, System Settings list panes) the user-meaningful
+        // text — filename, subject, track name — lives in AXValue or
+        // AXDescription, NOT AXTitle. The default AXTitle-first cascade
+        // returned `null` for every Finder row, which made list-view
+        // workflows impossible without per-row `cel_see focused` calls.
+        // Prefer the row-friendly cascade for these roles.
+        let label = if is_row_like_role(&role_str) {
+            row_label_cascade(element)
+        } else {
+            get_ax_string(element, "AXTitle")
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| get_ax_string(element, "AXDescription"))
+        };
 
         // Filter out empty text elements and spacers early
         if role_str == "AXStaticText" && label.as_deref().is_none_or(|l| l.trim().is_empty()) {
@@ -1830,6 +1841,87 @@ fn get_ax_state_fast(element: AXUIElementRef, role: &str) -> ElementState {
         expanded,
         checked,
     }
+}
+
+/// Roles whose user-meaningful text lives outside `AXTitle` — usually in
+/// `AXValue` (Finder list rows, Mail message rows, Music tracks) or
+/// `AXDescription`. The default `AXTitle ?? AXDescription` cascade returns
+/// `null` for these because rows simply don't expose AXTitle. List-view
+/// agent workflows are impossible without per-row labels, so we run a
+/// dedicated cascade for these roles in `build_element`.
+fn is_row_like_role(role: &str) -> bool {
+    matches!(role, "AXRow" | "AXCell" | "AXOutlineRow" | "AXListRow")
+}
+
+/// Cascade attempted for row-like roles. Order matters: `AXLabel` is the
+/// most explicit (rare on macOS but used by some Catalyst apps), `AXValue`
+/// holds the subject / track name on Mail / Music respectively,
+/// `AXDescription` is a fallback for rows that expose metadata, `AXTitle`
+/// is the legacy default, and `AXFilename` is Finder-specific.
+///
+/// **Finder list view falls through all five.** Finder hangs the
+/// filename on a deeply-nested `AXStaticText` inside the row's first
+/// `AXCell`, not on the `AXRow` / `AXCell` itself. As a final fallback
+/// we walk up to two levels of children looking for a text-bearing
+/// element. Two levels covers `AXRow → AXCell → AXStaticText` which is
+/// where Finder, Mail, Music, and Photos all keep the row label.
+///
+/// Returns `None` only if every attribute on every reachable child is
+/// empty — preserves the `null` semantic for genuinely unlabelled rows
+/// (separators, decorative spacers).
+fn row_label_cascade(element: AXUIElementRef) -> Option<String> {
+    if let Some(s) = direct_label_cascade(element) {
+        return Some(s);
+    }
+    descendant_label_cascade(element, 2)
+}
+
+/// Try the cascade attributes on a single element, no recursion.
+fn direct_label_cascade(element: AXUIElementRef) -> Option<String> {
+    for attr in [
+        "AXLabel",
+        "AXValue",
+        "AXDescription",
+        "AXTitle",
+        "AXFilename",
+    ] {
+        if let Some(s) = get_ax_string(element, attr).filter(|s| !s.trim().is_empty()) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Walk up to `depth` levels of `AXChildren` looking for a child whose
+/// direct cascade returns non-empty. Bounded to the first 8 children per
+/// level to avoid pathological cases on rows with many columns.
+fn descendant_label_cascade(element: AXUIElementRef, depth: usize) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+    let kids_cf = get_ax_attribute(element, "AXChildren")?;
+    let kids_ref = kids_cf.as_CFTypeRef();
+    if unsafe { core_foundation::array::CFArrayGetTypeID() }
+        != unsafe { core_foundation::base::CFGetTypeID(kids_ref) }
+    {
+        return None;
+    }
+    let arr: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_get_rule(kids_ref as core_foundation::array::CFArrayRef) };
+    let n = arr.len().min(8);
+    for i in 0..n {
+        let child_ref = arr.get(i).map(|c| c.as_CFTypeRef() as AXUIElementRef)?;
+        if child_ref.is_null() {
+            continue;
+        }
+        if let Some(s) = direct_label_cascade(child_ref) {
+            return Some(s);
+        }
+        if let Some(s) = descendant_label_cascade(child_ref, depth - 1) {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// Check if a role is interactive (worth querying actions for).

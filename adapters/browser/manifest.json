@@ -1,0 +1,21 @@
+{
+  "_note": "Shared partial manifest for the browser-perception adapter pair. Loaded as a fragment via adapter.json's manifest_extends field — not a complete adapter manifest on its own. Each implementation (adapters/browser/, adapters/browser-rs/) layers its own runtime-specific adapter.json over this. See docs/adapters-cel-agents.md § 'Browser perception'.",
+  "name": "browser",
+  "platform": ["macos", "linux", "windows"],
+  "app_patterns": [
+    "(?i)google chrome",
+    "(?i)chromium",
+    "(?i)brave",
+    "(?i)arc",
+    "(?i)edge",
+    "(?i)firefox",
+    "(?i)safari"
+  ],
+  "context": {
+    "confidence": 0.88,
+    "truth_surface": "browser_dom"
+  },
+  "verification": {
+    "truth_surface": "browser_dom"
+  }
+}

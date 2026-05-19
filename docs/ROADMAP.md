@@ -2,7 +2,7 @@
 
 Forward-looking plan for Cellar and the CEL runtime. Living document — priorities shift as we learn from users and customers. Supersedes scattered issue wishlists.
 
-Last updated: 2026-04-24.
+Last updated: 2026-05-14.
 
 ## How to read this doc
 
@@ -20,7 +20,7 @@ The three-layer architecture (see [`adapters-cel-agents.md`](./adapters-cel-agen
 | Pillar | Question it answers | Detail doc |
 |---|---|---|
 | **Adapters** | What app-specific truth can CEL expose? | [adapter-roadmap.md](./adapter-roadmap.md), [adapter-catalog.md](./adapter-catalog.md), [adapter-sdk.md](./adapter-sdk.md) |
-| **CEL / crates** | What must the core platform own? | [TODO-replan-architecture.md](./TODO-replan-architecture.md), [canonical-agent-plan.md](./canonical-agent-plan.md), [rust-port-plan.md](./rust-port-plan.md) |
+| **CEL / crates** | What trust/execution contracts must the core platform own? | [trust-execution-layer.md](./trust-execution-layer.md), [TODO-replan-architecture.md](./TODO-replan-architecture.md), [canonical-agent-plan.md](./canonical-agent-plan.md), [rust-port-plan.md](./rust-port-plan.md) |
 | **Agents** | Which runtimes can drive CEL today? | [agent-integration-roadmap.md](./agent-integration-roadmap.md), [agents/README.md](./agents/README.md) |
 | **Evals / leaderboard** | How do we prove it works across agents? | [eval-leaderboard.md](./eval-leaderboard.md), [eval-harness.md](./eval-harness.md) |
 
@@ -61,6 +61,7 @@ Shipped as of April 2026.
 |---|---|
 | Local execution on macOS with AX, CDP, screen capture, input injection | `cel/cel-goal-runner/`, `cel/cel-accessibility/` |
 | MCP server exposing `cel_see` / `cel_act` / `cel_think` / `cel_perceive` | `mcp-server/` |
+| `cel_act` execution receipts over MCP | `mcp-server/src/tools/cel-act.ts` |
 | Multi-provider LLM support — OpenAI, Anthropic, Gemini, HuggingFace | `cel/cel-llm/src/config.rs` |
 | **Ollama provider** (local Gemma 4 E4B by default) | `ProviderKind::Ollama` |
 | **Interactive first-run setup** (`cellar init`) | `cli/src/commands/init.ts` |
@@ -219,6 +220,7 @@ Every agent runtime in [`agents/README.md`](./agents/README.md) should be able t
 
 - Keep one working cookbook per major agent (Claude Code, Cursor, LangGraph, Mastra, Codex, n8n, raw MCP).
 - Publish eval numbers for at least two agent frameworks driving the same task set, to prove CEL is not secretly planner-specific.
+- Require healthcheck, receipts, and independent verification in external-agent proof transcripts.
 - Maintain the "agent boundary" contract: any MCP-speaking client should work without CEL knowing which framework it is.
 
 Priority list, integration gaps, and cookbook status: [agent-integration-roadmap.md](./agent-integration-roadmap.md).
@@ -228,6 +230,7 @@ Priority list, integration gaps, and cookbook status: [agent-integration-roadmap
 Evals exist to prove CEL and adapter capabilities — not to reward any single planner. Goals:
 
 - Run agent-agnostic scenarios on a public leaderboard, with per-agent submissions clearly tagged.
+- Flag environment-invalid runs separately from product failures before comparing pass rates.
 - Require at least one full submission cycle (multiple agents, multiple runs, reproducible manifest) before declaring "leaderboard open."
 - Keep runtime-specific evals boxed off in their own folders and clearly labeled as secondary.
 

@@ -1,0 +1,46 @@
+{
+  "_note": "ProcessDriver manifest. Build the binary with `cargo build --release -p adapter-messages`. Reads ~/Library/Messages/chat.db read-only — host process needs Full Disk Access.",
+  "name": "messages",
+  "display_name": "Apple Messages (read-only)",
+  "app_patterns": ["(?i)^messages$"],
+  "platform": ["macos"],
+  "runtime": "process",
+  "entrypoint": "../../target/release/adapter-messages",
+  "context": {
+    "element_types": [],
+    "refresh_ms": 5000,
+    "confidence": 0.95,
+    "truth_surface": "document_model"
+  },
+  "lifecycle": {
+    "requires_frontmost": false,
+    "background_refresh": true,
+    "bootstrap_on_activate": false
+  },
+  "verification": {
+    "truth_surface": "document_model"
+  },
+  "actions": {
+    "list_threads": {
+      "params": { "limit": "number? (default 20)" },
+      "description": "List recent message threads with last-message snippet + participants. Read-only.",
+      "returns_data": true
+    },
+    "read_thread": {
+      "params": {
+        "thread_id": "string (chat.guid)",
+        "limit": "number? (default 50)"
+      },
+      "description": "Read recent messages in a thread (oldest-first in result). Read-only.",
+      "returns_data": true
+    },
+    "search": {
+      "params": {
+        "query": "string (substring)",
+        "limit": "number? (default 20)"
+      },
+      "description": "Substring search against message text across all threads. Read-only.",
+      "returns_data": true
+    }
+  }
+}

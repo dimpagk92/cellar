@@ -19,7 +19,14 @@ members = [
     "cel/cel-napi",
     "cellar-worker",
     "adapters/adapter-common",
+    "adapters/browser-rs",
+    "adapters/calendar",
+    "adapters/cel-adapter-runtime",
+    "adapters/mail",
+    "adapters/messages",
+    "adapters/notes",
     "adapters/numbers",
+    "adapters/reminders",
 ]
 
 [workspace.package]
@@ -39,7 +46,6 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "1"
 async-trait = "0.1"
-
 # CEL internal crates
 cel-llm = { path = "cel/cel-llm" }
 cel-display = { path = "cel/cel-display" }
@@ -56,8 +62,16 @@ cel-cortex = { path = "cel/cel-cortex" }
 cel-goal-runner = { path = "cel/cel-goal-runner" }
 cel-cdp = { path = "cel/cel-cdp" }
 cel-signals = { path = "cel/cel-signals" }
+
 adapter-common = { path = "adapters/adapter-common" }
+adapter-browser = { path = "adapters/browser-rs" }
+adapter-calendar = { path = "adapters/calendar" }
+adapter-mail = { path = "adapters/mail" }
+adapter-messages = { path = "adapters/messages" }
+adapter-notes = { path = "adapters/notes" }
 adapter-numbers = { path = "adapters/numbers" }
+adapter-reminders = { path = "adapters/reminders" }
+cel-adapter-runtime = { path = "adapters/cel-adapter-runtime" }
 
 # Tauri
 tauri = { version = "2", features = [] }

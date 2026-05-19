@@ -1,0 +1,21 @@
+[package]
+name = "adapter-browser"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "CEL native (Rust) browser adapter — DOM perception via the cel-cdp transport"
+
+[dependencies]
+# AdapterDriver trait, ContextElement, ContextSource. Same dep pattern
+# as adapters/numbers — until the adapter-SDK reconciles `adapter-common`
+# with `cel-cortex::AdapterDriver`, native adapters depend on cel-cortex
+# directly.
+cel-cortex = { workspace = true }
+cel-context = { workspace = true }
+cel-accessibility = { workspace = true }
+cel-cdp = { workspace = true }
+cel-contracts = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

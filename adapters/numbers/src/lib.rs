@@ -60,6 +60,8 @@ impl NumbersAdapter {
                 platform: vec![String::from("macos")],
                 runtime: String::from("native"),
                 entrypoint: None,
+                manifest_alias: None,
+                manifest_extends: None,
                 context: ContextDeclaration {
                     element_types: vec![String::from("table"), String::from("table_cell")],
                     refresh_ms: 200,
@@ -215,11 +217,17 @@ impl NumbersAdapter {
         let readbacks =
             cel_input::write_numbers_cells(sheet.as_deref(), table.as_deref(), &writes, verify)
                 .map_err(|err| AdapterError::ExecutionFailed(err.to_string()))?;
-        Ok(json!({
-            "app": "Numbers",
-            "writes": writes
+        let entries: Vec<Value> = if verify {
+            if readbacks.len() != writes.len() {
+                return Err(AdapterError::ExecutionFailed(format!(
+                    "Numbers returned {} readbacks for {} writes — contract violation",
+                    readbacks.len(),
+                    writes.len()
+                )));
+            }
+            writes
                 .iter()
-                .zip(readbacks.iter().chain(std::iter::repeat(&String::new())))
+                .zip(readbacks.iter())
                 .map(|(write, readback)| {
                     json!({
                         "ref": write.cell_ref,
@@ -227,14 +235,30 @@ impl NumbersAdapter {
                         "readback": readback,
                     })
                 })
-                .collect::<Vec<_>>(),
+                .collect()
+        } else {
+            writes
+                .iter()
+                .map(|write| {
+                    json!({
+                        "ref": write.cell_ref,
+                        "requested": write.value,
+                    })
+                })
+                .collect()
+        };
+        Ok(json!({
+            "app": "Numbers",
+            "verified": verify,
+            "writes": entries,
         }))
     }
 
     #[cfg(target_os = "macos")]
     fn verify_cells_result(&self, params: &Value) -> Result<ActionResult, AdapterError> {
-        let reads = self.read_cells_payload(params)?;
         let requested = parse_cell_writes(params)?;
+        let read_params = read_params_for_verification(params, &requested);
+        let reads = self.read_cells_payload(&read_params)?;
         let actual_reads = reads
             .get("reads")
             .and_then(Value::as_array)
@@ -360,6 +384,9 @@ impl AdapterDriver for NumbersAdapter {
         if action != "write_cells" {
             return Ok(None);
         }
+        if params.get("verify").and_then(Value::as_bool) == Some(false) {
+            return Ok(None);
+        }
 
         #[cfg(target_os = "macos")]
         {
@@ -382,6 +409,66 @@ impl AdapterDriver for NumbersAdapter {
             false
         }
     }
+
+    async fn facts_for_planning_view(
+        &self,
+        _goal: &str,
+        _context: &cel_context::ScreenContext,
+    ) -> Vec<cel_contracts::AdapterFactRef> {
+        if !self.connected {
+            return Vec::new();
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            self.preview_payload()
+                .ok()
+                .and_then(numbers_preview_fact)
+                .into_iter()
+                .collect()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Vec::new()
+        }
+    }
+}
+
+fn numbers_preview_fact(preview: Value) -> Option<cel_contracts::AdapterFactRef> {
+    let preview_range = preview
+        .get("preview_range")
+        .and_then(Value::as_str)
+        .unwrap_or("A1:F6")
+        .to_string();
+    let non_empty_cells = preview
+        .get("cells")
+        .and_then(Value::as_array)
+        .map(|cells| {
+            cells
+                .iter()
+                .filter(|cell| {
+                    cell.get("value")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .map(|value| !value.is_empty())
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let non_empty_count = non_empty_cells.len();
+
+    Some(cel_contracts::AdapterFactRef {
+        id: Some(format!("numbers:preview:{preview_range}")),
+        adapter: "numbers".into(),
+        kind: "table_preview".into(),
+        payload: json!({
+            "preview_range": preview_range,
+            "non_empty_cells": non_empty_cells,
+            "non_empty_count": non_empty_count,
+        }),
+    })
 }
 
 fn numbers_actions() -> HashMap<String, ActionDeclaration> {
@@ -421,10 +508,14 @@ fn numbers_actions() -> HashMap<String, ActionDeclaration> {
                     (String::from("sheet"), String::from("string?")),
                     (String::from("table"), String::from("string?")),
                     (String::from("writes"), String::from("cell_write[]")),
-                    (String::from("verify"), String::from("boolean")),
+                    (String::from("verify"), String::from("boolean?")),
                 ]),
                 description: String::from(
-                    "Write deterministic cell values into the Numbers document model",
+                    "Write deterministic cell values into the Numbers document model. \
+                     `verify` defaults to true: the adapter reads each written cell back via \
+                     AppleScript and the framework runs `verify_cells` after `execute`. Set \
+                     `verify: false` to skip both readbacks — faster, but the payload won't \
+                     include the `readback` field and no mismatch will be detected.",
                 ),
                 mutates_state: true,
                 requires_verification: true,
@@ -472,6 +563,22 @@ fn string_array_field(params: &Value, key: &str) -> Result<Vec<String>, AdapterE
 }
 
 #[cfg(target_os = "macos")]
+fn read_params_for_verification(params: &Value, writes: &[CellWrite]) -> Value {
+    let cell_refs: Vec<Value> = writes
+        .iter()
+        .map(|write| Value::String(write.cell_ref.clone()))
+        .collect();
+    let mut out = match params {
+        Value::Object(map) => Value::Object(map.clone()),
+        _ => json!({}),
+    };
+    if let Value::Object(map) = &mut out {
+        map.insert(String::from("cell_refs"), Value::Array(cell_refs));
+    }
+    out
+}
+
+#[cfg(target_os = "macos")]
 fn parse_cell_writes(params: &Value) -> Result<Vec<CellWrite>, AdapterError> {
     let writes = params
         .get("writes")
@@ -511,21 +618,24 @@ fn cells_match(expected: &str, actual: &str) -> bool {
         return true;
     }
 
-    let parse_number = |value: &str| -> Option<f64> {
-        let cleaned = value
-            .chars()
-            .filter(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+'))
-            .collect::<String>();
-        if cleaned.is_empty() {
-            None
-        } else {
-            cleaned.parse::<f64>().ok()
-        }
-    };
-
-    match (parse_number(norm_expected), parse_number(norm_actual)) {
+    match (
+        parse_lenient_number(norm_expected),
+        parse_lenient_number(norm_actual),
+    ) {
         (Some(left), Some(right)) => (left - right).abs() <= 0.000_001,
         _ => false,
+    }
+}
+
+fn parse_lenient_number(value: &str) -> Option<f64> {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !matches!(ch, '$' | '€' | '£' | '¥' | ',' | ' ' | '\u{00A0}'))
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        cleaned.parse::<f64>().ok()
     }
 }
 
@@ -596,6 +706,26 @@ mod tests {
     }
 
     #[test]
+    fn preview_fact_carries_compact_document_model_truth() {
+        let fact = numbers_preview_fact(json!({
+            "preview_range": "A1:F6",
+            "cells": [
+                { "ref": "A1", "value": "Ticker" },
+                { "ref": "B1", "value": "" },
+                { "ref": "A2", "value": "BTC" }
+            ]
+        }))
+        .expect("preview fact");
+
+        assert_eq!(fact.id.as_deref(), Some("numbers:preview:A1:F6"));
+        assert_eq!(fact.adapter, "numbers");
+        assert_eq!(fact.kind, "table_preview");
+        assert_eq!(fact.payload["non_empty_count"], 2);
+        assert_eq!(fact.payload["non_empty_cells"][0]["ref"], "A1");
+        assert_eq!(fact.payload["non_empty_cells"][1]["ref"], "A2");
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn parse_cell_writes_requires_cell_ref_and_value() {
         let params = json!({
@@ -614,6 +744,179 @@ mod tests {
     fn cells_match_accepts_numeric_canonicalization() {
         assert!(cells_match("108432.50", "108432.5"));
         assert!(cells_match("$108,432.50", "108432.5"));
+        assert!(cells_match("€1,000.50", "1000.5"));
+        assert!(cells_match("-42", "-42.0"));
         assert!(!cells_match("BTC", "ETH"));
+    }
+
+    #[test]
+    fn cells_match_rejects_partial_digit_extractions() {
+        // Old parser stripped letters and would have matched "abc123" against "123".
+        assert!(!cells_match("abc123", "123"));
+        assert!(!cells_match("12abc", "12"));
+        // Accounting parens are not interpreted as negative — parse should fail outright.
+        assert!(!cells_match("(42)", "-42"));
+        assert!(!cells_match("(42)", "42"));
+        // Multiple decimal points should not parse.
+        assert!(!cells_match("1.2.3", "1.23"));
+        // Stray hyphens beyond a leading sign should not parse.
+        assert!(!cells_match("1-2-3", "123"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn read_params_for_verification_injects_cell_refs_from_writes() {
+        let params = json!({
+            "sheet": "Sheet 1",
+            "table": "Table 1",
+            "writes": [
+                { "cell_ref": "A1", "value": "BTC" },
+                { "cell_ref": "B2", "value": "ETH" }
+            ],
+            "verify": true
+        });
+        let writes = parse_cell_writes(&params).expect("writes parse");
+        let read_params = read_params_for_verification(&params, &writes);
+
+        assert_eq!(read_params["sheet"], "Sheet 1");
+        assert_eq!(read_params["table"], "Table 1");
+        let refs = read_params["cell_refs"]
+            .as_array()
+            .expect("cell_refs array");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0], "A1");
+        assert_eq!(refs[1], "B2");
+
+        let parsed_refs = string_array_field(&read_params, "cell_refs")
+            .expect("string_array_field accepts derived cell_refs");
+        assert_eq!(parsed_refs, vec!["A1".to_string(), "B2".to_string()]);
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn verify_action_skips_when_verify_false() {
+        let adapter = NumbersAdapter::new();
+        let params = json!({
+            "writes": [{ "cell_ref": "A1", "value": "test" }],
+            "verify": false
+        });
+        let result = ActionResult {
+            success: true,
+            error: None,
+            data: None,
+        };
+        let verdict = adapter
+            .verify_action("write_cells", &params, &result)
+            .await
+            .expect("verify_action should not error when opting out");
+        assert!(
+            verdict.is_none(),
+            "verify_action must return None when caller sets verify: false"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(target_os = "macos")]
+    async fn verify_action_skips_for_non_write_actions() {
+        let adapter = NumbersAdapter::new();
+        let params = json!({ "cell_refs": ["A1"] });
+        let result = ActionResult {
+            success: true,
+            error: None,
+            data: None,
+        };
+        let verdict = adapter
+            .verify_action("read_cells", &params, &result)
+            .await
+            .expect("verify_action should ignore non-write actions");
+        assert!(verdict.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "live: opens Numbers and writes A1/B1. Run with `cargo test -p adapter-numbers -- --ignored`"]
+    #[cfg(target_os = "macos")]
+    async fn write_and_verify_against_live_numbers_doc() {
+        // Drop guard closes the document we just created — even if an assertion
+        // panics mid-test. Constructed only after creation succeeds so we never
+        // close a doc we didn't open.
+        struct NumbersDocCleanup;
+        impl Drop for NumbersDocCleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        "tell application \"Numbers\" to close front document saving no",
+                    ])
+                    .status();
+            }
+        }
+
+        let status = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"Numbers\" to make new document"])
+            .status()
+            .expect("osascript should be available on macOS");
+        assert!(status.success(), "failed to create Numbers document");
+        let _cleanup = NumbersDocCleanup;
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        let adapter = NumbersAdapter::new();
+
+        let verify_params = json!({
+            "writes": [{ "cell_ref": "A1", "value": "cel-roundtrip" }],
+            "verify": true
+        });
+        let write_result = adapter
+            .execute("write_cells", verify_params.clone())
+            .await
+            .expect("write_cells should succeed against open Numbers doc");
+        assert!(
+            write_result.success,
+            "write reported failure: {:?}",
+            write_result.error
+        );
+        let payload = write_result.data.as_ref().expect("write payload present");
+        assert_eq!(payload["verified"], true);
+        let readback = payload["writes"][0]["readback"]
+            .as_str()
+            .expect("verify=true payload should include a readback string");
+        assert!(
+            cells_match("cel-roundtrip", readback),
+            "readback mismatch: got {readback:?}"
+        );
+
+        let verdict = adapter
+            .verify_action("write_cells", &verify_params, &write_result)
+            .await
+            .expect("verify_action must not error when readback matches")
+            .expect("verify_action must return Some when verify=true");
+        assert!(
+            verdict.success,
+            "verify_action reported mismatch: {:?}",
+            verdict.error
+        );
+
+        let no_verify_params = json!({
+            "writes": [{ "cell_ref": "B1", "value": "skip-verify" }],
+            "verify": false
+        });
+        let unverified = adapter
+            .execute("write_cells", no_verify_params.clone())
+            .await
+            .expect("write_cells should succeed with verify=false");
+        let unverified_payload = unverified.data.as_ref().expect("payload present");
+        assert_eq!(unverified_payload["verified"], false);
+        let first_entry = &unverified_payload["writes"][0];
+        assert!(
+            first_entry.get("readback").is_none(),
+            "verify=false should omit readback, got: {first_entry}"
+        );
+        let skipped = adapter
+            .verify_action("write_cells", &no_verify_params, &unverified)
+            .await
+            .expect("verify_action should not error when opted out");
+        assert!(
+            skipped.is_none(),
+            "verify_action must return None when verify=false"
+        );
     }
 }

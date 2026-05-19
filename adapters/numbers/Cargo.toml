@@ -12,8 +12,12 @@ description = "CEL adapter for Apple Numbers via AppleScript (macOS-only)"
 # adapter-SDK work in docs/adapter-sdk.md. Keeping the cel-cortex dep
 # here avoids reimplementing two traits while that lands.
 cel-cortex = { workspace = true }
+cel-contracts = { workspace = true }
 cel-context = { workspace = true }
 cel-accessibility = { workspace = true }
 cel-input = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

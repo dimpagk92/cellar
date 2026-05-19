@@ -37,12 +37,37 @@ type PromptDefinition = {
   build: (args: Record<string, string | undefined>) => GetPromptResult;
 };
 
+function normalizeNumbersCells(cellsJson: string): { writesJson: string; cellRefsJson: string } {
+  try {
+    const parsed = JSON.parse(cellsJson) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("expected object");
+    }
+    const writes = Object.entries(parsed as Record<string, unknown>).map(([cell_ref, value]) => ({
+      cell_ref,
+      value: String(value ?? ""),
+    }));
+    if (writes.length === 0) {
+      throw new Error("empty object");
+    }
+    return {
+      writesJson: JSON.stringify(writes),
+      cellRefsJson: JSON.stringify(writes.map((w) => w.cell_ref)),
+    };
+  } catch {
+    return {
+      writesJson: '[{"cell_ref":"A1","value":"value"}]',
+      cellRefsJson: '["A1"]',
+    };
+  }
+}
+
 const PROMPTS: PromptDefinition[] = [
   {
     name: "cellar/setup-task",
     title: "Start a multi-step automation",
     description:
-      "Boot Cortex with a goal and walk through the recommended perceive → see → act → feed loop. Use for any task that takes more than 3 observations.",
+      "Boot Cortex with a goal and walk through the recommended perceive -> act -> verify -> receipt loop. Use for any task that takes more than 3 observations.",
     argsSchema: {
       goal: z.string().describe("Natural-language goal — e.g. 'fill out the expense form in Concur'"),
     },
@@ -55,10 +80,52 @@ const PROMPTS: PromptDefinition[] = [
             `I want to use Cellar to: ${goal}\n\nFollow the recommended Cortex loop:\n` +
               `1. Call cel_perceive { mode: "start", goal: "${goal}", enable_suggestions: true }\n` +
               `2. Call cel_perceive { mode: "read" } to see the current mental model + suggestions\n` +
-              `3. Pick the first action and execute via cel_act\n` +
+              `3. Pick the first action and execute via cel_act; keep its receipt\n` +
               `4. Call cel_perceive { mode: "feed", action: "<verb>", target: "<id>" } to verify\n` +
               `5. Repeat 2–4. Use cel_perceive { mode: "checkpoint" } at phase boundaries.\n` +
-              `6. End with cel_perceive { mode: "stop" } to flush the run summary.`,
+              `6. End with cel_perceive { mode: "stop" } to flush the run summary.\n` +
+              `7. Final answer should cite receipts plus verifying evidence; receipts prove dispatch, not completion.`,
+          ),
+        ],
+      };
+    },
+  },
+
+  {
+    name: "cellar/healthcheck",
+    title: "Check CEL readiness before acting",
+    description:
+      "Runs a read-only readiness check for the CEL trust surface: native availability, AX/screenshot context, windows, monitors, and browser CDP.",
+    argsSchema: {
+      target_app: z
+        .string()
+        .optional()
+        .describe("Optional app expected to receive actions later, e.g. 'Numbers' or 'Google Chrome'"),
+    },
+    build: (args) => {
+      const target = args.target_app ?? "<optional target app>";
+      return {
+        description: "Read-only CEL healthcheck",
+        messages: [
+          userMsg(
+            `Run a read-only Cellar healthcheck before mutating anything. Do not click, type, navigate, write cells, or focus-lock during this check.\n\n` +
+              `Use these observations:\n` +
+              `1. cel_see { mode: "windows" } — confirm the expected app/window is visible. Expected target: ${target}\n` +
+              `2. cel_see { mode: "monitors" } — capture display bounds and scale_factor for coordinate sanity.\n` +
+              `3. cel_see { mode: "context", filter: { detail: "summary" } } — prove AX/screen context is available and note observation_id.\n` +
+              `4. cel_see { mode: "cdp_status" } — prove whether a CDP-enabled browser target is available.\n\n` +
+              `Report in this exact shape:\n` +
+              `{\n` +
+              `  "ready": true | false,\n` +
+              `  "native": "available" | "schema_only_or_failed",\n` +
+              `  "ax": "available" | "permission_missing_or_empty",\n` +
+              `  "screens": { "monitors": <count>, "scale_factors": [...] },\n` +
+              `  "cdp": "available" | "unavailable" | "not_needed",\n` +
+              `  "target_app": { "expected": "${target}", "visible": true | false | null },\n` +
+              `  "observation_id": "<id or null>",\n` +
+              `  "blockers": []\n` +
+              `}\n\n` +
+              `If any tool call returns a schema-only/native-module error, mark ready=false and put the error in blockers. If CDP is unavailable but the task is not browser-related, cdp may be "not_needed".`,
           ),
         ],
       };
@@ -138,7 +205,7 @@ const PROMPTS: PromptDefinition[] = [
             `Extract the table currently visible on screen${appHint}.\n\n` +
               `Strategy:\n` +
               `1. cel_see { mode: "context", filter: { element_types: ["table", "row", "cell", "outline"], detail: "compact" } }\n` +
-              `2. If the app is Numbers, prefer cel_act { action: "read_cells", range: "A1:Z100" } — deterministic, bypasses AX guessing\n` +
+              `2. If the app is Numbers and you know the cells, prefer cel_act { action: "read_cells", cell_refs: ["A1","B1","A2","B2"] } — deterministic, bypasses AX guessing\n` +
               `3. If the app is a browser, cel_see { mode: "cdp_page" } returns the full page text including table cells from the DOM\n` +
               `4. Group cells by row, return as JSON: { headers: [...], rows: [[...], ...] }\n\n` +
               `Watch for: virtualised rows that aren't in the AX tree (scroll first), merged cells (split by AX position), header detection (row 0 vs. role="columnheader").`,
@@ -164,6 +231,7 @@ const PROMPTS: PromptDefinition[] = [
     build: (args) => {
       const sheet = args.sheet ?? "<active sheet>";
       const cells = args.cells ?? '{"A1":"value"}';
+      const normalized = normalizeNumbersCells(cells);
       return {
         description: "Write cells to Numbers via structured app truth",
         messages: [
@@ -171,9 +239,42 @@ const PROMPTS: PromptDefinition[] = [
             `Write the following cells to Numbers (sheet: ${sheet}):\n${cells}\n\n` +
               `Use the deterministic path:\n` +
               `1. cel_see { mode: "windows" } — confirm a Numbers document is open and capture its window id\n` +
-              `2. cel_act { action: "write_cells", sheet: "${sheet}", cells: ${cells}, verify: true } — atomic write with readback\n` +
-              `3. If verify reports a mismatch, the document was probably read-only or the sheet name was wrong — re-check via cel_act { action: "read_cells", range: "A1:Z10" }\n\n` +
+              `2. cel_act { action: "write_cells", sheet: "${sheet}", writes: ${normalized.writesJson}, verify: true } — atomic write with readback\n` +
+              `3. cel_act { action: "read_cells", sheet: "${sheet}", cell_refs: ${normalized.cellRefsJson} } — independent readback for the final answer\n` +
+              `4. If verify reports a mismatch, the document was probably read-only or the sheet/table name was wrong — re-check the visible window and retry with explicit sheet/table names.\n\n` +
+              `Report the cel_act receipt(s), the readback values, and whether verification passed.\n\n` +
               `Why this beats AX typing: Numbers renders cells via Core Graphics, which is invisible to the accessibility tree. Typing into the visible cell often lands in the wrong cell or silently no-ops. write_cells goes through the document model.`,
+          ),
+        ],
+      };
+    },
+  },
+
+  {
+    name: "cellar/diagnose-focus",
+    title: "Diagnose where a keystroke or click landed",
+    description:
+      "Walks through the focus-routing path when a cel_act type/key/click appears to have done nothing or landed in the wrong window. Combines target_app validation, the cortex feed wrong-app diagnostic, and the system-frontmost reading.",
+    argsSchema: {
+      target_app: z
+        .string()
+        .optional()
+        .describe(
+          "App that should have received the event (e.g. 'Finder', 'Numbers', 'Google Chrome'). Optional — if omitted the prompt walks through identifying the intended target.",
+        ),
+    },
+    build: (args) => {
+      const target = args.target_app ?? "<the target app>";
+      return {
+        description: "Diagnose focus routing for a misfired cel_act",
+        messages: [
+          userMsg(
+            `A previous cel_act dispatched but appears to have done nothing or landed in the wrong window. Walk the focus-routing path:\n\n` +
+              `1. **Read the system frontmost.** Run \`osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true'\` (or check a recent cel_perceive read's currentContext.app). If the frontmost is NOT "${target}", the keystroke landed there — that's the immediate cause.\n` +
+              `2. **Re-fire with target_app.** Re-issue the original cel_act with \`target_app: "${target}"\`. The action variants (type / key_press / key_combo / click / right_click / double_click / mouse_move / scroll / drag) all accept it — the helper activates the app and waits up to 1500ms for it to be macOS-frontmost before firing. The result string carries a \`(focus: ...)\` diagnostic so you can audit whether activation was needed.\n` +
+              `3. **Inspect the cortex's view.** If a cel_perceive session is active, call \`cel_perceive { mode: "feed", action: "<verb>" }\`. The response includes \`landedInWrongApp: { expected, actual }\` when the action visibly changed nothing AND the cortex's tracked app disagrees with the OS frontmost — that's confirmation the routing was bad rather than the action being a no-op.\n` +
+              `4. **If the app never comes frontmost,** target_app raises a structured "Action aborted" error rather than silently typing into the wrong window. The error names the actual frontmost so you know who stole focus (typically the MCP host's own window covering everything).\n\n` +
+              `Common root causes: a host like Claude Desktop in full-screen covering the target app; a previous bash round-trip that re-fronted the host; a Numbers/Pages document open in a different Space.`,
           ),
         ],
       };

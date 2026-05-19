@@ -3,7 +3,7 @@ import {
   Cel,
   getCanonicalCdpState,
   normalizeCortexModel,
-} from "@cellar/agent";
+} from "@cellar/agent/runtime";
 
 export const statusCommand = new Command("status")
   .description("Show CEL runtime status")

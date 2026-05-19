@@ -7,7 +7,7 @@ import type {
   ReadResourceResult,
   Resource,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Cel, WindowInfo } from "@cellar/agent";
+import type { Cel, WindowInfo } from "@cellar/agent/runtime";
 
 export const CURRENT_SCREEN_RESOURCE_URI = "cellar://screen/current";
 export const APP_SCREEN_RESOURCE_TEMPLATE = "cellar://screen/{app_name}";

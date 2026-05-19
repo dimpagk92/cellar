@@ -1,4 +1,4 @@
-.PHONY: build build-rust build-ts build-cortex build-napi build-mcp-sidecar test test-all test-rust test-ts test-cortex test-cortex-napi test-cortex-mcp test-e2e test-real-extraction lint lint-rust lint-rust-fmt lint-rust-clippy lint-ts fmt fmt-rust clean dev-tauri build-tauri
+.PHONY: build build-rust build-ts build-cortex build-napi build-adapters build-mcp-sidecar test test-all test-rust test-ts test-cortex test-cortex-napi test-cortex-mcp test-cortex-mcp-navigate test-cortex-mcp-navigate-payload test-cortex-adapters test-e2e test-real-extraction lint lint-rust lint-rust-fmt lint-rust-clippy lint-ts fmt fmt-rust clean dev-tauri build-tauri
 
 build: build-rust build-ts
 
@@ -57,6 +57,13 @@ build-napi:
 	cargo build --release -p cel-napi
 	cp target/release/libcel_napi.dylib cel/cel-napi/cel-napi.darwin-arm64.node
 
+# Build all ProcessDriver adapter binaries. The cortex discovers them at
+# runtime via each `adapters/<name>/adapter.json`; the entrypoint there
+# points at `../../target/release/adapter-<name>`. Run this whenever you
+# add a new adapter or change one's lib code.
+build-adapters:
+	cargo build --release -p adapter-mail -p adapter-calendar -p adapter-reminders -p adapter-messages
+
 build-mcp-sidecar: build-napi
 	cd mcp-server && pnpm build
 	mkdir -p app/src-tauri/binaries
@@ -77,6 +84,24 @@ test-cortex-napi:
 
 test-cortex-mcp:
 	node tests/cortex/mcp-protocol.mjs
+
+test-cortex-mcp-navigate:
+	node tests/cortex/mcp-act-navigate.mjs
+
+test-cortex-mcp-navigate-payload:
+	node tests/cortex/mcp-act-navigate-payload.mjs
+
+# Smoke-test the four ProcessDriver productivity adapters end-to-end via
+# MCP. Requires Automation permission for the apps (Mail / Calendar /
+# Reminders) and Full Disk Access for Messages. Set
+# CEL_TEST_REMINDERS_LIST=<list> if the default "Reminders" list does not
+# exist on the test machine.
+test-cortex-adapters: build-napi build-adapters
+	cd mcp-server && pnpm build
+	node tests/cortex/mcp-adapter-mail.mjs
+	node tests/cortex/mcp-adapter-calendar.mjs
+	node tests/cortex/mcp-adapter-reminders.mjs
+	node tests/cortex/mcp-adapter-messages.mjs
 
 dev-tauri:
 	cd app && pnpm tauri dev

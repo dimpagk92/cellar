@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { Cel, ensureDedicatedCdpBrowser } from "@cellar/agent";
+import { Cel, ensureDedicatedCdpBrowser } from "@cellar/agent/runtime";
 import { celSeeSchema, handleCelSee } from "./tools/cel-see.js";
 import { celActSchema, handleCelAct } from "./tools/cel-act.js";
 import { celThinkSchema, handleCelThink } from "./tools/cel-think.js";
@@ -48,7 +48,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
 
   if (degraded) {
     console.warn(
-      "[cellar-mcp] cel-napi not available — running in schema-only mode. " +
+      "[cel-mcp] cel-napi not available — running in schema-only mode. " +
       "Tool definitions are exposed but real calls return errors. " +
       "Install on macOS for full functionality: https://github.com/dimpagk92/cellar",
     );
@@ -60,7 +60,7 @@ export function createCelMcpServer(cel?: Cel): McpServer {
       {
         type: "text" as const,
         text:
-          "Cellar MCP server is running in schema-only mode (no cel-napi native module). " +
+          "CEL MCP server is running in schema-only mode (no cel-napi native module). " +
           "Real tool calls require a macOS host with the cel-napi binary built. " +
           "See https://github.com/dimpagk92/cellar#installation",
       },
@@ -75,40 +75,44 @@ export function createCelMcpServer(cel?: Cel): McpServer {
     },
     {
       instructions: [
-        "CEL (Computer Experience Layer) gives you native control of the user's macOS desktop.",
-        "It reads the screen via the macOS Accessibility API and optionally Chrome DevTools Protocol.",
+        "CEL (Computer Experience Layer) is the trust and execution layer for AI-operated computers.",
+        "It gives agents reliable eyes, hands, verification hooks, and receipts over the user's macOS desktop.",
+        "It reads the screen via macOS Accessibility, Chrome DevTools Protocol, screenshots, and adapters.",
         "",
-        "## Default Workflow: Perceive → See → Act → Think",
+        "## Default Workflow: See → Act → Verify → Receipt",
         "",
-        "For ANY task that will take more than 3 observations, start with `cel_perceive start`.",
-        "The Cortex maintains a warm mental model with diffs, stability classification, and",
-        "focus-trail tracking. Polling `cel_see context` on every step throws away that signal",
-        "and forces you to re-parse the entire AX tree.",
+        "Keep planning in the MCP host by default. Use CEL for device truth and action dispatch.",
+        "Every mutating action should be followed by direct evidence: adapter readback, CDP/AX state,",
+        "or a fresh observation. `cel_act` returns an execution receipt you can cite in the final answer.",
+        "",
+        "For long or volatile tasks, start `cel_perceive`. The Cortex keeps a warm mental model",
+        "with diffs, stability classification, and focus-trail tracking. Polling `cel_see context`",
+        "on every step throws away that signal and forces you to re-parse the entire AX tree.",
         "",
         "### Recommended loop (multi-step tasks):",
-        "1. **cel_perceive start** — Boot Cortex with your goal. enable_suggestions=true (default)",
-        "   gives you next-action hints on each read.",
-        "2. **cel_perceive read** — Instant mental-model snapshot. Cortex keeps it warm via background events.",
+        "1. **cel_perceive start** — Boot Cortex with your goal when the task spans phases.",
+        "2. **cel_perceive read** — Instant mental-model snapshot kept warm by background events.",
         "3. **cel_act** — Execute actions. Prefer `ax_action` over `click`, `set_value` over `type`,",
-        "   `cdp_eval` over coordinate clicks for browser DOM.",
-        "4. **cel_perceive feed** — Report action + expected outcome. Cortex verifies via screen diff.",
-        "5. **cel_think observe** — Record what worked / what broke. Use priority='high' for anything",
-        "   that should change future runs. Feeds `search_knowledge` for later sessions.",
-        "6. Repeat 2–5. Use **cel_perceive checkpoint** between task phases.",
-        "7. **cel_perceive stop** when done — returns a run summary.",
+        "   `write_cells` / `read_cells` for Numbers, and CDP or browser adapters for DOM work.",
+        "4. **Verify** — Use adapter readback, `cel_perceive feed`, `cel_see wait_for_*`, or a fresh",
+        "   `cel_see context` to prove the expected state changed.",
+        "5. **Checkpoint** — Use `cel_perceive checkpoint` between task phases; use `cel_think observe`",
+        "   only for durable knowledge you explicitly want to store.",
+        "6. Repeat 2–5, then **cel_perceive stop** when done.",
         "",
         "### Light path (≤3 observations, one-shot task):",
         "1. **cel_see** mode 'context' — get current screen.",
         "2. **cel_act** — do the thing.",
-        "3. **cel_see** mode 'context' again — verify.",
+        "3. **cel_see** mode 'context' or adapter readback — verify.",
+        "4. Report the action receipt and the verifying evidence.",
         "",
         "If you find yourself on the light path for more than 3 cycles, switch to Cortex.",
         "",
         "## Host-vs-Cortex Planning",
         "",
         "If the MCP host is a strong reasoning model (Claude, GPT-4+), keep PLANNING in the host.",
-        "Use `cel_perceive` / `cel_see` / `cel_act` as eyes + hands. Only use `cel_think run_goal`",
-        "when you want to fully delegate the loop (fire-and-forget).",
+        "Use `cel_perceive` / `cel_see` / `cel_act` as eyes + hands + verification. Only use",
+        "`cel_think run_goal` when you intentionally want CEL to own a delegated loop.",
         "",
         "## AX-Hostile Apps — Prefer Structured App Truth",
         "",
@@ -138,12 +142,17 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "",
         "## Focus Stability",
         "",
-        "Keyboard actions (`type`, `key_combo`, `key_press`) go to the **frontmost** app. If the host",
-        "process (e.g. Claude Desktop, Codex) is in a full-screen window covering the target app,",
-        "a click into the target's pixel area will front it BUT subsequent keystrokes may snap back.",
+        "Keyboard actions (`type`, `key_combo`, `key_press`) and coord-based actions",
+        "(`click`, `right_click`, `double_click`, `mouse_move`, `scroll`, `drag`) all dispatch via",
+        "CGEventPost, which routes to the **frontmost** app. If the host process (e.g. Claude Desktop,",
+        "Codex) is in a full-screen window covering the target app, a click into the target's pixel",
+        "area will front it BUT subsequent events may snap back.",
         "",
-        "If you hit focus instability: shell out to `osascript -e 'tell app \"<Name>\" to activate'`",
-        "before sending keys. `cel_perceive` emits `focus_changed` events that let you detect this.",
+        "Pass `target_app: \"<Name>\"` on any of these actions and CEL will activate the app and wait",
+        "for it to be frontmost (~50–600ms typical) before firing. The result string includes a",
+        "`(focus: ...)` diagnostic so you can audit whether activation was needed. Falls back to a",
+        "structured error if the app never came frontmost — the action is aborted rather than",
+        "silently mis-routed. `cel_perceive` emits `focus_changed` events that let you detect this.",
         "",
         "## Key Patterns",
         "",
@@ -151,6 +160,8 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "  context (parent, position, sibling count) changes. For ANY cross-observation reference,",
         "  call `cel_see make_reference` to get a resilient handle first, then use it in `cel_act`.",
         "- Batch up to 4 related non-UI-changing actions in one `cel_act` call. Re-observe between batches.",
+        "- `cel_act` returns `receipt` / `receipts` with dispatch_path, verification requirement,",
+        "  timing, and evidence hints. Treat a receipt as proof of dispatch, not proof of task completion.",
         "- `cel_see wait_for_element` / `wait_for_idle` after actions that trigger UI changes.",
         "- `cel_see context` response includes an `observation_id` and writes the full snapshot to",
         "  `~/.cellar/observations/<id>.json`. Load it later with `cel_see` mode `observation`",
@@ -160,8 +171,11 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "",
         "## Browser Interactions (CDP)",
         "",
+        "- To change the page URL, use `cel_act navigate { url }`. This translates to a Page.navigate",
+        "  call over CDP and navigates in place. Do NOT use `cdp_eval` with `window.location.href` —",
+        "  it can leave stray about:blank tabs in the user's window.",
         "- When the focused app is a browser with CDP enabled, use `cel_act cdp_eval` for DOM work",
-        "  (forms, cookie banners, iframes, overlays invisible to AX).",
+        "  (forms, cookie banners, iframes, overlays invisible to AX) — but NOT for URL changes.",
         "- `cel_see cdp_status` to check availability; `cel_see cdp_page` for full page text.",
         "- `cel_see context` response includes `cdp_available: true` when a browser target is connected.",
         "",
@@ -184,9 +198,11 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "## Decision Guide",
         "",
         "- AX-hostile app (Numbers/Pages/Keynote) → structured app truth first; use `write_cells` / `read_cells` where available",
+        "- Change browser URL → `cel_act navigate`",
         "- Browser DOM task → `cel_act cdp_eval`",
         "- Multi-step task → `cel_perceive` session from step 1",
         "- Quick one-shot screen check → `cel_see` mode 'context'",
+        "- Need durable run knowledge → `cel_think observe` / `store_knowledge`",
         "- Fire-and-forget delegation → `cel_think run_goal`",
         "",
         "## Requirements",
@@ -198,15 +214,6 @@ export function createCelMcpServer(cel?: Cel): McpServer {
       ].join("\n"),
     },
   );
-
-  if (enableScreenResources && !degraded) {
-    registerScreenResources(server, instance);
-  } else if (enableScreenResources) {
-    console.warn(
-      "[cellar-mcp] CELLAR_ENABLE_SCREEN_RESOURCES is set, but cel-napi is not available. " +
-        "Screenshot resources are disabled in schema-only mode.",
-    );
-  }
 
   server.registerTool(
     "cel_see",
@@ -242,7 +249,9 @@ export function createCelMcpServer(cel?: Cel): McpServer {
       title: "CEL Act",
       description:
         "Execute actions on the screen: mouse clicks, keyboard input, accessibility actions, " +
-        "drag & drop, and direct value setting. Always use cel_see first to understand the screen.\n\n" +
+        "drag & drop, and direct value setting. Always use cel_see first to understand the screen. " +
+        "Returns `result` plus an execution `receipt` (or `results` plus `receipts` for batches) " +
+        "with dispatch path, verification requirement, timestamps, and evidence hints.\n\n" +
         "For click/move: provide (x, y) coordinates or a target_ref from cel_see make_reference.\n" +
         "For form filling: prefer set_value over type — faster and more reliable.\n" +
         "For buttons/checkboxes: prefer ax_action over click — uses native accessibility API.\n\n" +
@@ -255,11 +264,17 @@ export function createCelMcpServer(cel?: Cel): McpServer {
         "set_value — direct value injection on element_id: text for fields, 'true'/'false' for checkboxes.\n\n" +
         "Deterministic spreadsheet actions: write_cells (atomic Numbers cell writes with optional readback verification), " +
         "read_cells (read Numbers cell values from the document model instead of guessing from AX text).\n\n" +
-        "Other: scroll (dx,dy at optional x,y), drag (from_x,from_y to to_x,to_y), " +
+        "Other: scroll (dx,dy at optional x,y), drag (from_x,from_y to to_x,to_y).\n\n" +
+        "Browser (CDP): navigate (change the focused CEL tab's URL via Page.navigate — " +
+        "the preferred way to load a URL; navigates in place without spawning new tabs/windows). " +
         "cdp_eval (execute JavaScript in browser via CDP — best for cookie banners, iframes, " +
-        "overlays, and elements invisible to the accessibility tree).\n\n" +
+        "overlays, and elements invisible to the accessibility tree). " +
+        "Do NOT use cdp_eval to change the page URL (e.g. setting window.location.href) — " +
+        "use `navigate` instead, which avoids stray about:blank tabs.\n\n" +
         "Batching: pass array of 1-4 actions for sequential execution (100ms default delay). " +
-        "Re-observe with cel_see after each batch to avoid stale-state cascading failures.",
+        "Re-observe with cel_see after each batch to avoid stale-state cascading failures. " +
+        "Treat receipts as proof that CEL dispatched the action; prove task completion with " +
+        "adapter readback, CDP/AX state, or a fresh observation.",
       inputSchema: celActSchema,
     },
     degraded ? stubHandler : async (args) => handleCelAct(instance, args),
@@ -344,6 +359,15 @@ export function createCelMcpServer(cel?: Cel): McpServer {
 
   registerPrompts(server);
 
+  if (enableScreenResources && !degraded) {
+    registerScreenResources(server, instance);
+  } else if (enableScreenResources) {
+    console.warn(
+      "[cellar-mcp] CELLAR_ENABLE_SCREEN_RESOURCES is set, but cel-napi is not available. " +
+        "Screenshot resources are disabled in schema-only mode.",
+    );
+  }
+
   return server;
 }
 
@@ -367,8 +391,21 @@ export async function startStdioServer(cel?: Cel): Promise<void> {
     if (instance.isNativeAvailable) {
       // Boot Rust Cortex via NAPI — always-on perception starts immediately.
       // The mental model is warm before Claude's first tool call.
-      instance.bootCortex();
-      console.error("Rust Cortex booted — perception active");
+      //
+      // Deferred to the next event loop tick (`setImmediate`) so the MCP
+      // `initialize` handshake from the host can complete BEFORE we block
+      // on the synchronous napi `bootCortex` call (~2s on cold cache).
+      // Without this defer, the host's MCP client times out the
+      // handshake and gives up — the server runs fine but Claude Code
+      // sees "Failed to connect" and the cel tools never appear.
+      setImmediate(() => {
+        try {
+          instance.bootCortex();
+          console.error("Rust Cortex booted — perception active");
+        } catch (err) {
+          console.error("Rust Cortex boot failed:", err);
+        }
+      });
     } else {
       console.error("Schema-only mode: cel-napi unavailable, Cortex boot skipped");
     }

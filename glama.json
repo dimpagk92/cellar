@@ -1,4 +1,28 @@
 {
   "$schema": "https://glama.ai/mcp/schemas/server.json",
-  "maintainers": ["dimpagk92"]
+  "maintainers": ["dimpagk92"],
+  "description": "CEL — the trust and execution layer for AI-operated computers. Fuses accessibility trees, CDP, vision, network, and app-specific adapters into one structured device understanding, and exposes stable execution primitives, verification surfaces, and action receipts over MCP. Pluggable planner: bring LangGraph, Mastra, Claude Code, Cursor, Codex, GPT, Gemini, n8n, a raw MCP client, or CEL's built-in `cel_think` fallback.",
+  "repository": "https://github.com/dimpagk92/cellar",
+  "license": "MIT",
+  "categories": ["desktop-automation", "accessibility", "browser-automation", "agents"],
+  "platforms": ["macos", "linux"],
+  "transports": ["stdio"],
+  "tools": [
+    {
+      "name": "cel_see",
+      "description": "Read and observe the current screen state: structured UI elements, window lists, screenshots, CDP page content, accessibility element details, and screen change events. Always call before acting."
+    },
+    {
+      "name": "cel_act",
+      "description": "Execute actions on the screen — mouse clicks, keyboard input, accessibility actions, drag & drop, direct value setting, browser navigation. Returns an execution receipt with dispatch path, verification requirement, timestamps, and evidence hints."
+    },
+    {
+      "name": "cel_think",
+      "description": "CEL's cognitive layer: delegated autonomy (`run_goal`), planning, knowledge, run tracking, and LLM passthrough. Prefer host-side reasoning with `cel_see` + `cel_act`; use `run_goal` only when you want CEL to own the control loop."
+    },
+    {
+      "name": "cel_perceive",
+      "description": "Stateful perception engine (Cortex). Replaces repeated `cel_see` polling with a warm, continuously-updated mental model that ingests accessibility events in the background and surfaces diffs, anomalies, and stability signals on demand."
+    }
+  ]
 }

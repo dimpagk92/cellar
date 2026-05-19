@@ -20,8 +20,7 @@
  * License: MIT
  */
 
-import type { ContextElement, NetworkEvent, PlannedAction, ScreenContext } from "@cellar/agent";
-import type { Cel } from "@cellar/agent";
+import type { ContextElement, NetworkEvent, PlannedAction, ScreenContext, Cel } from "@cellar/agent/runtime";
 import { CdpClient, type CdpClientConfig } from "./cdp-client.js";
 import { extractDOMAllFrames, extractDOMLightweight, CLOSED_SHADOW_PATCH } from "./dom-extractor.js";
 import { mapElements } from "./element-mapper.js";
@@ -895,8 +894,19 @@ export class BrowserAdapter {
     return this.client.evaluate<T>(script); // final attempt, let it throw
   }
 
-  /** Navigate to a URL (enforces security watchdog). */
-  async navigate(url: string): Promise<void> {
+  /**
+   * Navigate to a URL (enforces security watchdog). Optional `waitUntil` /
+   * `timeout` thread through to Playwright's `page.goto` so canonical
+   * `cel_act navigate` callers can ask for `load` / `networkidle` /
+   * tighter timeouts without bouncing through the in-cortex CDP fallback.
+   */
+  async navigate(
+    url: string,
+    options?: {
+      waitUntil?: "load" | "domcontentloaded" | "networkidle" | "commit";
+      timeout?: number;
+    },
+  ): Promise<void> {
     // Security check before navigation
     if (!this.securityWatchdog.validateNavigation(url)) {
       const blocked = this.securityWatchdog.getBlocked();
@@ -906,7 +916,7 @@ export class BrowserAdapter {
 
     this.mutationTracker.reset();
     this.networkTap.clear();
-    await this.client.navigate(url);
+    await this.client.navigate(url, options);
   }
 
   /**

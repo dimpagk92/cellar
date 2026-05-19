@@ -1,0 +1,70 @@
+{
+  "_note": "ProcessDriver manifest. Build the binary with `cargo build --release -p adapter-reminders`.",
+  "name": "reminders",
+  "display_name": "Apple Reminders",
+  "app_patterns": ["(?i)^reminders$"],
+  "platform": ["macos"],
+  "runtime": "process",
+  "entrypoint": "../../target/release/adapter-reminders",
+  "context": {
+    "element_types": [],
+    "refresh_ms": 5000,
+    "confidence": 0.95,
+    "truth_surface": "document_model"
+  },
+  "lifecycle": {
+    "requires_frontmost": false,
+    "background_refresh": true,
+    "bootstrap_on_activate": false,
+    "response_timeout_ms": 45000
+  },
+  "verification": {
+    "truth_surface": "document_model"
+  },
+  "actions": {
+    "add": {
+      "params": {
+        "list": "string (exact list name)",
+        "title": "string",
+        "due": "string? (ISO-8601)",
+        "notes": "string?"
+      },
+      "description": "Create a reminder in a named list. Returns reminder_id (Apple Reminders URL-style id).",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "list": {
+      "params": {
+        "list": "string? (default: all lists)",
+        "completed": "boolean? (default false)",
+        "due_before": "string? (ISO-8601 cutoff)",
+        "limit": "number? (default 50)"
+      },
+      "description": "List reminders, default filter completed=false.",
+      "returns_data": true
+    },
+    "complete": {
+      "params": { "reminder_id": "string" },
+      "description": "Mark a reminder as completed.",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "update": {
+      "params": {
+        "reminder_id": "string",
+        "title": "string?",
+        "due": "string? (ISO-8601)",
+        "notes": "string?"
+      },
+      "description": "Update one or more fields of an existing reminder. Requires at least one field to change.",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "delete": {
+      "params": { "reminder_id": "string" },
+      "description": "Delete a reminder. PERMANENT — Reminders has no Recently Deleted folder.",
+      "mutates_state": true,
+      "returns_data": true
+    }
+  }
+}

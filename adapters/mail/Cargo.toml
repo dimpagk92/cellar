@@ -1,0 +1,29 @@
+[package]
+name = "adapter-mail"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "CEL adapter for Apple Mail via AppleScript (macOS-only)"
+
+[lib]
+path = "src/lib.rs"
+
+# ProcessDriver entrypoint. Built with `cargo build --release -p adapter-mail`
+# and discovered at runtime via adapters/mail/adapter.json (runtime: process,
+# entrypoint: ../../target/release/adapter-mail). No in-process registration
+# in cel-napi / cel-eval is required.
+[[bin]]
+name = "adapter-mail"
+path = "src/main.rs"
+
+[dependencies]
+cel-cortex = { workspace = true }
+cel-contracts = { workspace = true }
+cel-context = { workspace = true }
+cel-accessibility = { workspace = true }
+cel-adapter-runtime = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

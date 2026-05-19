@@ -8,7 +8,7 @@ import {
   screenResourceUriForApp,
 } from "../src/resources.js";
 import { screenResourcesEnabled } from "../src/server.js";
-import type { WindowInfo } from "@cellar/agent";
+import type { WindowInfo } from "@cellar/agent/runtime";
 
 function window(overrides: Partial<WindowInfo>): WindowInfo {
   return {

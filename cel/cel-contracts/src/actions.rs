@@ -19,12 +19,100 @@ where
     }
 }
 
+/// What the runtime should observe after an action lands to confirm the
+/// side-effect actually materialised.
+///
+/// Cortex polls the page (via CDP `Runtime.evaluate`) until the
+/// expectation holds or the timeout fires. The result is reported back
+/// in the action's `ActionResult` so the planner sees not just
+/// "dispatched ok" but "dispatched ok AND observed the expected change".
+///
+/// Closes the "click reported ok but page didn't react" gap:
+/// `e.preventDefault()` from a validation handler, a remounted DOM node
+/// the click landed on but is no longer wired up, an animation that
+/// swallowed the click — all previously reported `ok` and forced the
+/// planner to verify state from screenshots after the fact. With
+/// `expect_after` the runtime knows immediately the side-effect didn't
+/// materialise and surfaces an `EffectMissing` error to the planner.
+///
+/// All variants carry a `timeout_ms` with a sensible default
+/// (2_000 ms) — long enough for animations / debounced handlers, short
+/// enough not to add real latency on the happy path (most expectations
+/// resolve in one CDP round-trip when the action actually fired).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EffectExpectation {
+    /// A new element matching `selector` becomes visible
+    /// (`offsetParent !== null`). Use for "after submit, success
+    /// message appears", "after open, modal appears" patterns.
+    SelectorAppears {
+        selector: String,
+        #[serde(default = "default_effect_timeout_ms")]
+        timeout_ms: u64,
+    },
+    /// An element matching `selector` becomes invisible (detached or
+    /// `offsetParent === null`). Use for "after close, modal disappears",
+    /// "after delete, row goes away" patterns.
+    SelectorDisappears {
+        selector: String,
+        #[serde(default = "default_effect_timeout_ms")]
+        timeout_ms: u64,
+    },
+    /// An element matching `selector` contains the given text. Use for
+    /// state changes like "button label flips from 'Approve' to
+    /// 'Approved ✓'", or "row gains an 'Approved' status cell".
+    SelectorTextContains {
+        selector: String,
+        substring: String,
+        #[serde(default = "default_effect_timeout_ms")]
+        timeout_ms: u64,
+    },
+    /// The page DOM changed in any meaningful way after the action.
+    /// Compares a "before" snapshot (captured at dispatch entry) to a
+    /// "after" snapshot polled until either differs or the timeout
+    /// fires. The snapshot is small + cheap: visible text length,
+    /// interactive element count, and current URL.
+    ///
+    /// Use when the post-state isn't a single named selector but you
+    /// know the action SHOULD cause SOME visible change — e.g.:
+    ///   • a delete button that removes a row (count decreases),
+    ///   • a tab switch that swaps the entire content panel,
+    ///   • a submit that navigates to a thank-you page (URL changes),
+    ///   • a "load more" that appends results (text length grows).
+    ///
+    /// Strictly weaker than `SelectorAppears`/`Disappears`/`TextContains`
+    /// — those tell you EXACTLY what should change, this just tells
+    /// you SOMETHING did. Use the selector-based variants when you
+    /// have a verbatim `selector="..."` from perception; fall back
+    /// to `DomChanged` when you don't.
+    ///
+    /// False-positive risk: pages with timestamp tickers / animated
+    /// counters / live data feeds produce diffs every tick. The 2s
+    /// default timeout is short enough that most non-action-triggered
+    /// changes don't have time to land — but if you're on a chatty
+    /// page, prefer a selector-based variant if you can name one.
+    DomChanged {
+        #[serde(default = "default_effect_timeout_ms")]
+        timeout_ms: u64,
+    },
+}
+
+fn default_effect_timeout_ms() -> u64 {
+    2_000
+}
+
 /// The action the planner wants to execute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlannedAction {
     Click {
         target_id: String,
+        /// Optional post-state verification. When set, the runtime
+        /// polls the page after the click and reports the action as
+        /// failed if the expectation doesn't hold within `timeout_ms`.
+        /// Closes the "click reported ok but DOM didn't react" gap.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_after: Option<EffectExpectation>,
     },
     Type {
         /// Optional: if provided, clicks the element first then types.
@@ -44,6 +132,13 @@ pub enum PlannedAction {
     SetValue {
         target_id: String,
         value: String,
+        /// Optional post-state verification — see [`EffectExpectation`].
+        /// Most useful for `<select>` where setting the value should
+        /// flip an `aria-selected` attribute on the chosen option, or
+        /// for `<input type="text">` in framework-controlled forms
+        /// where the visible label should reflect the typed value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_after: Option<EffectExpectation>,
     },
     Scroll {
         dx: i32,
@@ -99,6 +194,18 @@ pub enum PlannedAction {
     /// Native accessibility action — more reliable than coordinate clicks for desktop apps.
     /// Uses macOS AXUIElementPerformAction under the hood.
     AxAction {
+        /// AX hash id from the same perception snapshot that produced
+        /// the plan. May be missing (empty / null) when the planner
+        /// only knows the visible label — the cortex falls back to
+        /// `label` + `role_hint` resolution in that case.
+        ///
+        /// Lenient deserialization accepts `null` from the LLM (some
+        /// models emit `"target_id": null` when they want label-only
+        /// dispatch) and treats it as an empty string. Without this,
+        /// the whole turn parse-errors with
+        /// `invalid type: null, expected a string` and the run dies
+        /// before the runner gets a chance to fall back.
+        #[serde(default, deserialize_with = "deserialize_string_or_value")]
         target_id: String,
         /// The action to perform: "click" (AXPress), "activate" (AXConfirm),
         /// "increment", "decrement", "show_menu"
@@ -106,15 +213,23 @@ pub enum PlannedAction {
         /// Label hint for fallback element resolution. AX IDs are hashes
         /// that include bounds + depth and therefore change whenever the
         /// UI mutates between plan time and dispatch time. If the cortex
-        /// can't find `target_id` in the live AX tree, it falls back to
-        /// searching for the first visible element whose role matches
-        /// `role_hint` (if provided) and whose label equals `label`.
-        /// Planner must populate this from the same perception snapshot
-        /// that produced the target_id.
+        /// can't find `target_id` in the live AX tree (or `target_id`
+        /// is missing entirely), it falls back to searching for the
+        /// first visible element whose role matches `role_hint` (if
+        /// provided) and whose label equals `label`. Planner must
+        /// populate this from the same perception snapshot that
+        /// produced the target_id.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role_hint: Option<String>,
+        /// Optional post-state verification — see [`EffectExpectation`].
+        /// Same shape as the equivalent field on `Click`/`SetValue`.
+        /// Mostly useful when the AX action lands on a browser DOM
+        /// element (the runtime routes those through CDP), so the page
+        /// state is observable via querySelector.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_after: Option<EffectExpectation>,
     },
     /// Activate (bring to front) a macOS application by name.
     /// Uses `open -a` under the hood — the most reliable app switching method.
@@ -136,12 +251,32 @@ pub enum PlannedAction {
         /// JavaScript expression to evaluate in the page context.
         expression: String,
     },
-    /// Convenience navigation action. LLMs gravitate toward `{"type":"navigate","url":"..."}`
-    /// even when the prompt asks for cdp_eval, so accept it as a first-class variant and
-    /// route it to the same reset_preferred_target + cdp_eval path inside the cortex.
+    /// Canonical navigation action. The cortex routes this through the
+    /// browser adapter (Playwright) when one is registered + active, and
+    /// otherwise falls back to in-cortex `cel_cdp::Page.navigate` plus a
+    /// `document.readyState` poll keyed by `wait_until`.
+    ///
+    /// All three control fields are optional with sensible defaults so
+    /// the legacy `{"type":"navigate","url":"..."}` payload still parses
+    /// unchanged. Aliases `href` / `to` on `url` survive too — LLMs
+    /// gravitate toward both.
     Navigate {
         #[serde(alias = "href", alias = "to")]
         url: String,
+        /// One of `"none"`, `"domcontentloaded"`, `"load"`, `"networkidle"`.
+        /// Unknown values are treated as the default. Default: `"domcontentloaded"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wait_until: Option<String>,
+        /// Upper bound for the lifecycle wait. Default: 30_000 ms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
+        /// When true (default), the cortex fallback runs a best-effort
+        /// cookie-banner / overlay-dismiss script after the page loads.
+        /// The TS browser adapter does this unconditionally inside its
+        /// own navigate handler (process-driver.ts) so this flag only
+        /// affects the in-cortex fallback path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dismiss_overlays: Option<bool>,
     },
     /// No-op: LLM sometimes puts notebook_writes inside the actions array.
     /// This variant absorbs that mistake gracefully instead of causing a parse error.
@@ -281,7 +416,7 @@ impl PlannedAction {
     /// same way.
     pub fn target_ids(&self) -> Vec<&str> {
         match self {
-            Self::Click { target_id }
+            Self::Click { target_id, .. }
             | Self::SetValue { target_id, .. }
             | Self::AxAction { target_id, .. } => vec![target_id.as_str()],
             Self::Type {
@@ -326,8 +461,126 @@ mod target_ids_tests {
     fn click_returns_its_target() {
         let a = PlannedAction::Click {
             target_id: "a11y:42".into(),
+            expect_after: None,
         };
         assert_eq!(a.target_ids(), vec!["a11y:42"]);
+    }
+
+    #[test]
+    fn click_without_expect_after_round_trips_omitting_field() {
+        // Back-compat: planners that don't know about `expect_after`
+        // still round-trip through the same JSON shape they always
+        // emitted (no field added on serialize, no field required on
+        // deserialize).
+        let raw = r#"{"type":"click","target_id":"dom:button:submit"}"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::Click {
+                target_id,
+                expect_after,
+            } => {
+                assert_eq!(target_id, "dom:button:submit");
+                assert!(expect_after.is_none());
+            }
+            _ => panic!("expected Click"),
+        }
+        let serialised = serde_json::to_string(&PlannedAction::Click {
+            target_id: "dom:button:submit".into(),
+            expect_after: None,
+        })
+        .unwrap();
+        // `skip_serializing_if = "Option::is_none"` keeps the JSON
+        // identical to the pre-`expect_after` shape.
+        assert!(!serialised.contains("expect_after"));
+    }
+
+    #[test]
+    fn click_with_selector_appears_expectation_round_trips() {
+        let raw = r##"{
+            "type": "click",
+            "target_id": "dom:button:submit",
+            "expect_after": {
+                "kind": "selector_appears",
+                "selector": "#success-message",
+                "timeout_ms": 3000
+            }
+        }"##;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::Click {
+                target_id,
+                expect_after:
+                    Some(EffectExpectation::SelectorAppears {
+                        selector,
+                        timeout_ms,
+                    }),
+            } => {
+                assert_eq!(target_id, "dom:button:submit");
+                assert_eq!(selector, "#success-message");
+                assert_eq!(timeout_ms, 3000);
+            }
+            other => panic!("expected Click with SelectorAppears, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_expectation_default_timeout_when_omitted() {
+        // `timeout_ms` has a serde default of 2000ms — the planner can
+        // omit it for the common case and only override when the page
+        // is known to be slow (heavy SPA render, lazy-loaded modal).
+        let raw = r##"{"kind": "selector_appears", "selector": "#x"}"##;
+        let e: EffectExpectation = serde_json::from_str(raw).unwrap();
+        match e {
+            EffectExpectation::SelectorAppears {
+                selector,
+                timeout_ms,
+            } => {
+                assert_eq!(selector, "#x");
+                assert_eq!(timeout_ms, 2_000);
+            }
+            other => panic!("expected SelectorAppears, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_expectation_all_four_variants_parse() {
+        let appears: EffectExpectation =
+            serde_json::from_str(r#"{"kind":"selector_appears","selector":".success"}"#).unwrap();
+        assert!(matches!(appears, EffectExpectation::SelectorAppears { .. }));
+        let disappears: EffectExpectation =
+            serde_json::from_str(r#"{"kind":"selector_disappears","selector":".modal.open"}"#)
+                .unwrap();
+        assert!(matches!(
+            disappears,
+            EffectExpectation::SelectorDisappears { .. }
+        ));
+        let text: EffectExpectation = serde_json::from_str(
+            r##"{"kind":"selector_text_contains","selector":"#status","substring":"Approved"}"##,
+        )
+        .unwrap();
+        assert!(matches!(
+            text,
+            EffectExpectation::SelectorTextContains { .. }
+        ));
+        // `dom_changed` is the diff-based fallback for actions whose
+        // post-state isn't a single named selector. No `selector`
+        // field — just an optional timeout.
+        let changed: EffectExpectation = serde_json::from_str(r#"{"kind":"dom_changed"}"#).unwrap();
+        match changed {
+            EffectExpectation::DomChanged { timeout_ms } => {
+                // Default timeout when omitted.
+                assert_eq!(timeout_ms, 2_000);
+            }
+            other => panic!("expected DomChanged, got {other:?}"),
+        }
+        let changed_custom: EffectExpectation =
+            serde_json::from_str(r#"{"kind":"dom_changed","timeout_ms":5000}"#).unwrap();
+        match changed_custom {
+            EffectExpectation::DomChanged { timeout_ms } => {
+                assert_eq!(timeout_ms, 5_000);
+            }
+            other => panic!("expected DomChanged with custom timeout, got {other:?}"),
+        }
     }
 
     #[test]
@@ -357,10 +610,12 @@ mod target_ids_tests {
                 },
                 PlannedAction::Click {
                     target_id: "a11y:ghost".into(),
+                    expect_after: None,
                 },
                 PlannedAction::SetValue {
                     target_id: "a11y:input".into(),
                     value: "v".into(),
+                    expect_after: None,
                 },
             ],
         };
@@ -373,6 +628,7 @@ mod target_ids_tests {
             actions: vec![PlannedAction::Batch {
                 actions: vec![PlannedAction::Click {
                     target_id: "a11y:deep".into(),
+                    expect_after: None,
                 }],
             }],
         };
@@ -454,6 +710,153 @@ mod target_ids_tests {
                 assert_eq!(cell_refs, vec!["A1", "B2"]);
             }
             _ => panic!("expected ReadCells"),
+        }
+    }
+
+    #[test]
+    fn ax_action_accepts_null_target_id_as_empty_string() {
+        // Some models emit `"target_id": null` when they only know
+        // the visible label and want the runtime to resolve. The
+        // previous contract treated this as a fatal parse error
+        // (`invalid type: null, expected a string`), killing the
+        // entire turn before the label-fallback dispatcher could
+        // run. Lenient deserialization converts null to an empty
+        // string; the cortex dispatcher already handles empty
+        // target_id by going straight to label resolution.
+        let raw = r#"{
+            "type": "ax_action",
+            "target_id": null,
+            "action": "click",
+            "label": "Export to Notes",
+            "role_hint": "button"
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::AxAction {
+                target_id,
+                action,
+                label,
+                role_hint,
+                ..
+            } => {
+                assert_eq!(target_id, "");
+                assert_eq!(action, "click");
+                assert_eq!(label.as_deref(), Some("Export to Notes"));
+                assert_eq!(role_hint.as_deref(), Some("button"));
+            }
+            _ => panic!("expected AxAction"),
+        }
+    }
+
+    #[test]
+    fn ax_action_accepts_missing_target_id_field_entirely() {
+        // Defensive: if the planner omits the field rather than
+        // explicitly sending null, the `#[serde(default)]` falls
+        // back to `String::default()` (empty string), same
+        // dispatch path.
+        let raw = r#"{
+            "type": "ax_action",
+            "action": "click",
+            "label": "Submit"
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::AxAction {
+                target_id, label, ..
+            } => {
+                assert_eq!(target_id, "");
+                assert_eq!(label.as_deref(), Some("Submit"));
+            }
+            _ => panic!("expected AxAction"),
+        }
+    }
+
+    #[test]
+    fn ax_action_still_accepts_explicit_target_id_string() {
+        // Regression guard: the lenient path must not break the
+        // normal case where the planner emits a real id.
+        let raw = r#"{
+            "type": "ax_action",
+            "target_id": "ax:AXButton/0x1234",
+            "action": "click"
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::AxAction { target_id, .. } => {
+                assert_eq!(target_id, "ax:AXButton/0x1234");
+            }
+            _ => panic!("expected AxAction"),
+        }
+    }
+
+    #[test]
+    fn navigate_legacy_payload_still_parses() {
+        // The pre-canonical wire shape — no wait/timeout/dismiss
+        // fields — must keep working unchanged. Every existing
+        // planner (LangGraph, internal tests, MCP clients on older
+        // SDKs) emits this; flipping to required fields would silently
+        // brick navigation.
+        let raw = r#"{"type":"navigate","url":"https://example.com"}"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::Navigate {
+                url,
+                wait_until,
+                timeout_ms,
+                dismiss_overlays,
+            } => {
+                assert_eq!(url, "https://example.com");
+                assert!(wait_until.is_none());
+                assert!(timeout_ms.is_none());
+                assert!(dismiss_overlays.is_none());
+            }
+            _ => panic!("expected Navigate"),
+        }
+    }
+
+    #[test]
+    fn navigate_extended_payload_parses_all_fields() {
+        let raw = r#"{
+            "type":"navigate",
+            "url":"https://example.com",
+            "wait_until":"load",
+            "timeout_ms":10000,
+            "dismiss_overlays":false
+        }"#;
+        let a: PlannedAction = serde_json::from_str(raw).unwrap();
+        match a {
+            PlannedAction::Navigate {
+                url,
+                wait_until,
+                timeout_ms,
+                dismiss_overlays,
+            } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(wait_until.as_deref(), Some("load"));
+                assert_eq!(timeout_ms, Some(10_000));
+                assert_eq!(dismiss_overlays, Some(false));
+            }
+            _ => panic!("expected Navigate"),
+        }
+    }
+
+    #[test]
+    fn navigate_url_aliases_href_and_to_still_work() {
+        // The original `Navigate` variant accepted `href` and `to`
+        // aliases on the URL field for LLM ergonomics. The extended
+        // variant inherits those aliases — pin both forms to catch
+        // an accidental drop during a future refactor.
+        for raw in [
+            r#"{"type":"navigate","href":"https://example.com"}"#,
+            r#"{"type":"navigate","to":"https://example.com"}"#,
+        ] {
+            let a: PlannedAction = serde_json::from_str(raw).expect(raw);
+            match a {
+                PlannedAction::Navigate { url, .. } => {
+                    assert_eq!(url, "https://example.com")
+                }
+                _ => panic!("expected Navigate for {raw}"),
+            }
         }
     }
 }

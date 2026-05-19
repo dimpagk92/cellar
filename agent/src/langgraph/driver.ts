@@ -2,8 +2,11 @@ import type { Cel } from "../cel-bindings.js";
 import type { ScreenContext, PageContent } from "../types.js";
 
 import type {
+  AdapterFactRef,
   CanonicalStep,
   CanonicalStepResult,
+  CortexAnomaly,
+  CortexFreshnessAssessment,
   PerceptionFrame,
   PlanningBudget,
   PlanningView,
@@ -28,6 +31,9 @@ export interface CellarLangGraphDriver {
       budget?: PlanningBudget;
       perception?: ScreenContext;
       caps?: RuntimeCaps;
+      adapterFacts?: AdapterFactRef[];
+      cortexAnomalies?: CortexAnomaly[];
+      cortexFreshness?: CortexFreshnessAssessment | null;
     },
   ): Promise<PlanningView>;
   getPageContent?(): Promise<PageContent | null>;
@@ -56,7 +62,14 @@ export class CelLangGraphDriver implements CellarLangGraphDriver {
 
   buildPlanningView(
     goal: string,
-    options?: { budget?: PlanningBudget; perception?: ScreenContext; caps?: RuntimeCaps },
+    options?: {
+      budget?: PlanningBudget;
+      perception?: ScreenContext;
+      caps?: RuntimeCaps;
+      adapterFacts?: AdapterFactRef[];
+      cortexAnomalies?: CortexAnomaly[];
+      cortexFreshness?: CortexFreshnessAssessment | null;
+    },
   ): Promise<PlanningView> {
     return this.cel.canonicalBuildPlanningView(goal, options);
   }

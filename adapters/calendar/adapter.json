@@ -1,0 +1,67 @@
+{
+  "_note": "ProcessDriver manifest. Build the binary with `cargo build --release -p adapter-calendar`.",
+  "name": "calendar",
+  "display_name": "Apple Calendar",
+  "app_patterns": ["(?i)^calendar$"],
+  "platform": ["macos"],
+  "runtime": "process",
+  "entrypoint": "../../target/release/adapter-calendar",
+  "context": {
+    "element_types": [],
+    "refresh_ms": 5000,
+    "confidence": 0.95,
+    "truth_surface": "document_model"
+  },
+  "lifecycle": {
+    "requires_frontmost": false,
+    "background_refresh": true,
+    "bootstrap_on_activate": false
+  },
+  "verification": {
+    "truth_surface": "document_model"
+  },
+  "actions": {
+    "create_event": {
+      "params": {
+        "calendar": "string (exact name)",
+        "title": "string",
+        "start": "string (ISO-8601)",
+        "end": "string (ISO-8601)",
+        "attendees": "string[]? (emails)",
+        "notes": "string?",
+        "location": "string?"
+      },
+      "description": "Create an event in the named calendar. Returns event_id (iCalendar UID). Attendees are added to metadata but Calendar.app does NOT send invitations via AppleScript.",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "list_events": {
+      "params": {
+        "calendar": "string? (default: all calendars)",
+        "start": "string (ISO-8601)",
+        "end": "string (ISO-8601)"
+      },
+      "description": "List events whose start date falls within [start, end).",
+      "returns_data": true
+    },
+    "update_event": {
+      "params": {
+        "event_id": "string (iCalendar UID)",
+        "title": "string?",
+        "start": "string? (ISO-8601)",
+        "end": "string? (ISO-8601)",
+        "notes": "string?",
+        "location": "string?"
+      },
+      "description": "Update one or more fields of an existing event. Requires at least one field to change.",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "delete_event": {
+      "params": { "event_id": "string" },
+      "description": "Delete an event by UID. IRREVERSIBLE from the adapter's perspective — recoverable only via Time Machine or iCloud archive backup.",
+      "mutates_state": true,
+      "returns_data": true
+    }
+  }
+}

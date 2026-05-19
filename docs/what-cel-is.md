@@ -4,19 +4,21 @@ This doc answers: what is CEL, and where does it fit next to Playwright, browser
 
 ## One-Sentence Definition
 
-**CEL is agent-agnostic infrastructure for computer use — perception, execution, and adapters — exposed as MCP tools.**
+**CEL is the trust and execution layer for AI-operated computers: agent-agnostic perception, execution, verification, receipts, and adapters exposed as stable tools.**
 
 That sentence carries most of the load:
 
+- *Trust and execution layer*: CEL should make it clear what an agent saw, where it dispatched an action, what verification is still required, and what evidence supports the result.
 - *Agent-agnostic*: CEL does not assume a specific planner. LangGraph, Mastra, Codex, Claude, Claude Code, Gemini, Cursor, n8n, and in-house runtimes are all first-class clients. See [adapters-cel-agents.md](adapters-cel-agents.md) for the three-layer architecture.
 - *Infrastructure*: not an end-user product. CEL is what agent platforms build on top of.
-- *Perception, execution, adapters*: the three capabilities CEL ships today.
+- *Perception, execution, verification, receipts, adapters*: the core capabilities CEL ships and hardens.
 - *MCP tools*: four tools — `cel_see`, `cel_act`, `cel_perceive`, `cel_think` (the last is optional). See [mcp-server.md](mcp-server.md).
 
 ## CEL Is
 
-- **Device understanding on macOS.** Accessibility (AX), Chrome DevTools Protocol (CDP), vision, input/focus/process signals, and audio are fused into one stable `ContextElement` stream. Any single stream lies; the fusion does not.
-- **A stable action surface.** `cel_act` exposes a canonical set of primitives (click, type, scroll, navigate, key, wait-for, etc.) that behave the same across adapters. Actions return a typed `ActionResult` with success/failure, latency, and anomaly flags.
+- **Device understanding on macOS.** Accessibility (AX), Chrome DevTools Protocol (CDP), vision, input/focus/process signals, and audio are fused into one stable `ContextElement` stream. Any single stream lies; the fusion is where trust improves.
+- **A stable action surface.** `cel_act` exposes a canonical set of primitives (click, type, scroll, navigate, key, wait-for, etc.) that behave the same across adapters. Actions return results plus execution receipts with dispatch path, timing, verification requirements, and evidence hints.
+- **A verification boundary.** CEL distinguishes "the input was dispatched" from "the task is complete." Agents should back final claims with adapter readback, CDP/AX state, screenshot evidence, Cortex diffs, or equivalent post-action observations.
 - **An adapter layer for app-specific truth.** AX is a generic substrate; adapters encode application-specific structured truth (a Numbers cell read is not a UI guess — it's a model read). First-party adapters today: `browser` (prod) plus stubs for `excel`, `bloomberg`, `metatrader`, `sap-gui`. Third parties can ship adapters outside this repo.
 - **A reference planner in-tree, optional.** `cel-goal-runner` and friends exist so the repo is runnable end-to-end, but they are clients of CEL, not CEL's identity. Replacing them with your own agent is the intended path.
 
@@ -31,9 +33,10 @@ That sentence carries most of the load:
 
 | Feature                 | CEL                         | Playwright          | browser-use         | Stagehand v3         | Anthropic computer-use | OpenClaw                  |
 |-------------------------|-----------------------------|---------------------|---------------------|----------------------|------------------------|---------------------------|
-| Scope                   | Desktop + browser (macOS)   | Browser only        | Browser only        | Browser only         | Desktop + browser      | Context/memory framework  |
+| Scope                   | Trusted desktop + browser (macOS) | Browser only        | Browser only        | Browser only         | Desktop + browser      | Context/memory framework  |
 | Agent-agnostic          | Yes                         | N/A (no agents)     | No (built-in loop)  | Partial (own planner)| Anthropic-model-specific | Yes                     |
 | Adapter extensibility   | Yes (third-party supported) | No (library API)    | No                  | Limited              | No                     | N/A                       |
+| Action receipts         | Yes                         | No                  | Partial logs        | Partial logs         | Proprietary            | N/A                       |
 | Local vs remote         | Local today; remote Phase 1 | Local               | Local               | Local / cloud        | Remote (Claude hosted) | Local                     |
 | License                 | Apache 2.0                  | Apache 2.0          | MIT                 | MIT                  | Proprietary            | Apache 2.0                |
 | Built-in planner        | Reference only, optional    | None                | Yes, opinionated    | Yes                  | Implicit in the model  | No (context layer)        |
@@ -51,19 +54,19 @@ That sentence carries most of the load:
 
 | CEL is a good fit when…                                              | CEL is the wrong tool when…                                        |
 |----------------------------------------------------------------------|--------------------------------------------------------------------|
-| You already have an agent and need device understanding on macOS.    | Your target is browser-only and script-level automation is enough. |
-| You want to plug in different planners without rewriting perception. | You need Windows or Linux desktop today (Linux comes in Phase 1).  |
+| You already have an agent and need trusted device execution on macOS. | Your target is browser-only and script-level automation is enough. |
+| You want receipts, verification, and pluggable planners.             | You need Windows or Linux desktop today (Linux comes in Phase 1).  |
 | You need native-app automation alongside browser automation.         | You want an opinionated, batteries-included browser agent.         |
 | You want an open, self-hostable runtime (not a hosted-only API).     | You're locked into a single LLM vendor and want their native stack.|
 | You plan to extend with third-party adapters (app-specific truth).   | You don't want to run any runtime locally at all.                  |
 
 ## The Thesis in One Paragraph
 
-Planning is commoditizing fast. Every frontier LLM can plan, and planning-focused wrappers are a crowded category with shrinking margins. Perception and execution on real devices are not commoditizing — they require per-OS, per-app engineering that does not fall out of a bigger model. CEL's durable surface is device mastery plus a stable, agent-agnostic API that outlasts any single framework or model. That is the same shape as Anthropic's computer-use (infrastructure + primitives) and OpenClaw (stable context/memory plumbing) — two recent peers that chose the same layer.
+Planning is commoditizing fast. Every frontier LLM can plan, and planning-focused wrappers are a crowded category with shrinking margins. Trustworthy perception and execution on real devices are not commoditizing - they require per-OS, per-app engineering, verification, and audit trails that do not fall out of a bigger model. CEL's durable surface is device mastery plus a stable, agent-agnostic trust loop that outlasts any single framework or model. That is the same shape as Anthropic's computer-use infrastructure, but CEL keeps the boundary self-hosted, adapter-extensible, and planner-neutral.
 
 ## What This Means For You
 
-- **If you already have an agent and need device understanding on macOS, CEL is the layer.** Drop it behind your planner over MCP, keep your orchestration, and stop writing per-app scrapers.
+- **If you already have an agent and need trusted device execution on macOS, CEL is the layer.** Drop it behind your planner over MCP, keep your orchestration, and stop writing per-app scrapers.
 - **If you're starting from scratch and want a batteries-included browser agent, CEL is probably too low-level.** Use browser-use or Stagehand and come back when you outgrow them.
 - **If you're building an agent platform**, CEL is the closest thing to an unopinionated substrate you can standardize on.
 
@@ -78,6 +81,7 @@ Planning is commoditizing fast. Every frontier LLM can plan, and planning-focuse
 ## Related Reading
 
 - [adapters-cel-agents.md](adapters-cel-agents.md) — the three-layer north star.
+- [trust-execution-layer.md](trust-execution-layer.md) — the trust loop and receipt contract.
 - [commercial-model.md](commercial-model.md) — how open-core funds this project.
 - [gtm-icp.md](gtm-icp.md) — who we think CEL is for first.
 - [eval-leaderboard.md](eval-leaderboard.md) — how we measure "works with any agent."

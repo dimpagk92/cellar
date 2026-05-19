@@ -12,7 +12,7 @@ Claude Code is a strong default client for CEL because:
 - it already owns tool calling, retries, stop conditions, and user approval
 - you do not need to bring your own LLM or planner wiring
 
-In this setup Claude Code owns the loop, and CEL is just another MCP server providing `cel_see`, `cel_act`, and `cel_perceive`. `cel_think` is available but should usually stay unused here — Claude Code already plans.
+In this setup Claude Code owns the loop, and CEL is the trust/execution server providing `cel_see`, `cel_act`, and `cel_perceive`. `cel_act` returns receipts; Claude Code should use those receipts plus post-action evidence in the final answer. `cel_think` is available but should usually stay unused here — Claude Code already plans.
 
 ## Setup
 
@@ -78,6 +78,14 @@ TODO: screenshot — macOS Accessibility panel with the host process toggled on.
 
 ## Minimal Example
 
+First run the built-in prompt:
+
+```
+/cellar/healthcheck target_app:"Numbers"
+```
+
+Proceed only if the healthcheck says native/AX are available. CDP can be `not_needed` for this Numbers task.
+
 Paste this into Claude Code's composer:
 
 ```
@@ -104,11 +112,11 @@ What Claude Code will do internally:
    }
    ```
 4. Call `cel_act` with `action: "read_cells"` for `["A1", "B1", "C1"]`.
-5. Compare and report.
+5. Compare and report the write receipt id(s), readback values, and verification status.
 
-TODO: screenshot — Claude Code transcript showing the see → act → read_cells round-trip.
+TODO: screenshot — Claude Code transcript showing the healthcheck -> see -> act -> read_cells round-trip.
 
-## The `see → act` Pattern
+## The `see -> act -> verify` Pattern
 
 Claude Code's tool-calling loop maps cleanly onto CEL's canonical loop:
 
@@ -117,13 +125,15 @@ loop:
   ctx = cel_see(mode="context")
   if goal_met(ctx): break
   step = plan(ctx)              # Claude Code's own planning — no cel_think
-  cel_act(step)                  # single action, or batch up to ~4
+  receipt = cel_act(step)        # single action, or batch up to ~4
+  evidence = verify(receipt)     # readback, CDP/AX state, or fresh context
 ```
 
 Two rules that keep this loop boring:
 
 1. **Re-observe between action batches.** Element IDs are ephemeral; a stale snapshot is the main source of flaky agents.
 2. **Prefer structured actions over coordinates.** `ax_action` beats `click(x,y)`; `set_value` beats typing; `write_cells` beats typing into Numbers cells one char at a time.
+3. **Cite receipts only with evidence.** A receipt proves CEL dispatched the action. The final claim still needs adapter readback, CDP/AX state, screenshot, or Cortex diff.
 
 ## Tips
 
@@ -131,6 +141,7 @@ Two rules that keep this loop boring:
 - **Use `make_reference` for long-lived targets.** When a button needs to be re-clicked after intermediate state changes, create a resilient reference once with `cel_see` `make_reference` and re-use it.
 - **Wait deterministically.** Prefer `cel_see` `wait_for_element` or `wait_for_idle` over `sleep`-then-retry. These are built for this.
 - **Use `cel_perceive` for multi-phase tasks.** If the task spans more than ~10 actions across phases, bootstrap a Cortex session (`cel_perceive` `start`) so the model stays warm between steps. Otherwise just use `cel_see`.
+- **Start with `/cellar/healthcheck`.** It catches schema-only MCP, missing AX permission, monitor scale mismatches, and missing CDP before Claude Code spends steps acting into an untrusted environment.
 - **Skip `cel_think` here.** Claude Code already plans better than the built-in planner in most cases. Reach for `cel_think` only when you want delegated autonomy.
 
 ## Known Gaps
@@ -139,10 +150,12 @@ Two rules that keep this loop boring:
 - `cel_act` `write_cells` / `read_cells` currently only ship a Numbers backend. Other spreadsheet apps fall back to generic AX.
 - Claude Code's MCP UI shows tools but does not currently surface per-tool schemas in-line; use [docs/mcp-server.md](../mcp-server.md) as the reference.
 - Some CDP modes (`cdp_eval`, `cdp_page`, `cdp_status`) require `cellar setup cdp` and a Chrome instance launched with remote debugging.
+- Receipts are returned over MCP today but are not yet persisted as a standalone run log unless the caller also records the transcript.
 
 ## See Also
 
 - [docs/agents/README.md](./README.md) — index of all agent cookbooks
 - [docs/adapters-cel-agents.md](../adapters-cel-agents.md) — the three-layer architecture
+- [docs/trust-execution-layer.md](../trust-execution-layer.md) — trust loop and receipt contract
 - [docs/mcp-server.md](../mcp-server.md) — full tool reference
 - [docs/agent-integration-roadmap.md](../agent-integration-roadmap.md) — Claude Code is P0

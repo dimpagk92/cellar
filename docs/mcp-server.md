@@ -2,9 +2,9 @@
 
 CEL exposes its capabilities as an [MCP](https://modelcontextprotocol.io/) server, making it available to Claude Code, Cursor, Codex, GPT-based tool callers, LangGraph runtimes, and any other MCP-compatible client.
 
-The MCP server is the main agent-facing boundary for the platform:
+The MCP server is the main agent-facing boundary for the platform and the primary trust/execution contract:
 
-- `CEL` owns perception, execution, context fusion, and adapter-backed truth
+- `CEL` owns perception, execution, context fusion, adapter-backed truth, verification surfaces, and action receipts
 - the MCP host owns planning by default
 - `cel_think` remains available as an optional built-in planner / memory layer when you explicitly want CEL to take over the loop
 
@@ -44,18 +44,18 @@ cellar mcp
 npx @modelcontextprotocol/inspector node mcp-server/dist/index.js
 ```
 
-## Surface: See → Act → Perceive + Optional Think
+## Surface: See -> Act -> Verify + Optional Perceive/Think
 
 CEL uses four tools organized by intent:
 
 | Tool | Purpose | Modes/Actions |
 |------|---------|---------------|
 | **cel_see** | Read screen state | 14 modes |
-| **cel_act** | Execute actions | native input, CDP, and deterministic app actions |
+| **cel_act** | Execute actions and return receipts | native input, CDP, and deterministic app actions |
 | **cel_think** | Optional built-in planning, memory, autonomous execution | 17 modes |
 | **cel_perceive** | Always-on perception (Cortex) | 8 modes |
 
-Plus 5 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`).
+Plus 7 [**prompts**](#prompts--reusable-quick-start-templates) — quick-start templates the host surfaces as commands (`cellar/setup-task`, `cellar/healthcheck`, `cellar/inspect-app`, `cellar/debug-hung-action`, `cellar/extract-table`, `cellar/run-numbers-write`, `cellar/diagnose-focus`).
 
 The server can also expose screenshots as MCP resources. Screenshot resources
 are disabled by default because any connected MCP client can read them once they
@@ -163,13 +163,14 @@ Returns the current screen state as structured JSON. Always use this **before** 
 
 ## cel_act — Execute Actions
 
-Click, type, scroll, drag, and interact via the native accessibility API.
+Click, type, scroll, drag, interact via the native accessibility API, or route through CDP/adapters. Every call returns an execution receipt.
 
 ### Key Patterns
 
 - **Prefer `ax_action` over `click`** for buttons/checkboxes — uses the native accessibility API, more reliable than coordinate-based clicking.
 - **Prefer `set_value` over `type`** for form fields — faster and more reliable, bypasses keyboard entirely. Use `cel_see` `is_settable` mode to check first.
 - **Prefer `write_cells` / `read_cells` over AX text guessing in Numbers** — these use the Numbers document model directly.
+- **Treat receipts as dispatch proof, not completion proof** — cite the receipt, then verify with adapter readback, CDP/AX state, screenshot, or Cortex diff.
 - For coordinate-based actions, provide `(x, y)` or a `target_ref` from `cel_see` `make_reference`.
 - Batch up to 4 actions, then re-observe with `cel_see` between batches.
 
@@ -191,6 +192,29 @@ Click, type, scroll, drag, and interact via the native accessibility API.
 | `cdp_eval` | `expression` | Execute JavaScript in browser via Chrome DevTools Protocol — best for cookie banners, iframes, overlays, and elements invisible to the accessibility tree |
 | `write_cells` | `app?, sheet?, table?, writes[], verify?` | Deterministic spreadsheet write via app model (currently Numbers) |
 | `read_cells` | `app?, sheet?, table?, cell_refs[]` | Deterministic spreadsheet read via app model (currently Numbers) |
+
+### Response Receipt
+
+Single-action calls return:
+
+```json
+{
+  "success": true,
+  "result": "Clicked target at (100, 200)",
+  "receipt": {
+    "id": "cel_act_click_l...",
+    "action": "click",
+    "status": "ok",
+    "dispatch_path": "native_input",
+    "mutates_state": true,
+    "requires_verification": true,
+    "verification": "caller_must_reobserve",
+    "evidence": [{ "kind": "dispatch_path", "value": "native_input" }]
+  }
+}
+```
+
+Batch calls return `results` and `receipts` arrays in the same order. Failed actions return `success: false` with an error receipt when the action was parseable.
 
 ### Examples
 
@@ -434,17 +458,24 @@ Prompts are returned regardless of cel-napi availability — they're static temp
 
 | Prompt | Arguments | What it does |
 |--------|-----------|--------------|
-| `cellar/setup-task` | `goal` (required) | Boots Cortex with the goal and walks the host through the recommended perceive → see → act → feed loop |
+| `cellar/setup-task` | `goal` (required) | Boots Cortex with the goal and walks the host through the recommended perceive -> see -> act -> feed loop |
+| `cellar/healthcheck` | `target_app` (optional) | Runs a read-only readiness check for native availability, windows, monitors, AX context, observation id, and browser CDP |
 | `cellar/inspect-app` | none | Identifies the focused app + its accessibility surface (windows, focused element, monitor scale_factor) |
 | `cellar/debug-hung-action` | `action` (optional) | Diagnoses why an action didn't land — reads Cortex status, recent diffs, and lists common causes |
 | `cellar/extract-table` | `app_hint` (optional) | Pulls a structured table from the screen, with branches for AX-friendly apps, Numbers, and browser DOM |
 | `cellar/run-numbers-write` | `sheet` (optional), `cells` (required JSON) | Writes cells deterministically into Numbers via the structured app-truth path (`write_cells`) |
+| `cellar/diagnose-focus` | `target_app` (optional) | Walks the focus-routing path when a `cel_act` lands in the wrong window — combines the `target_app` validation, the `cel_perceive feed` `landedInWrongApp` diagnostic, and the system-frontmost reading |
 
 ### How hosts surface them
 
-In Claude Code: type `/` and prompts appear as commands you can pick.
-In MCP Inspector: the **Prompts** tab lists them with their arguments.
-Programmatically: send `prompts/list` for the catalog and `prompts/get` to materialize one with arguments.
+| Host | How to discover prompts |
+|------|-------------------------|
+| Claude Code (CLI / IDE) | Type `/` at the prompt — registered MCP prompts appear inline as `/cellar/<name>` commands with autocomplete on the arguments. |
+| Cursor | Open the chat sidebar → `/` → MCP-registered prompts appear under the server name. |
+| Codex (CLI) | Slash-command browser via `/` or run `codex prompts list` to print the catalog. |
+| Claude Desktop | Currently does NOT auto-suggest MCP prompts in the UI; reach for them via the underlying `prompts/list` JSON-RPC if you're scripting. |
+| MCP Inspector | The **Prompts** tab lists them with their arguments — useful for smoke-testing without a real client. |
+| Programmatic | Send `prompts/list` for the catalog and `prompts/get` to materialise one with arguments — the same JSON-RPC any host uses internally. |
 
 ### Adding more
 

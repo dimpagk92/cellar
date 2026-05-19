@@ -1,12 +1,13 @@
 import { Command } from "commander";
 import {
   Cel,
+  cleanupBlankCdpTabs,
   discoverCanonicalCdpTargets,
   ensureDedicatedCdpBrowser,
   getCanonicalCdpState,
   getPreferredCelCdpPort,
   selectPreferredCdpTarget,
-} from "@cellar/agent";
+} from "@cellar/agent/runtime";
 
 type BrowserStatusOptions = {
   json?: boolean;
@@ -14,6 +15,11 @@ type BrowserStatusOptions = {
 
 type BrowserEnsureOptions = {
   url?: string;
+  json?: boolean;
+  cleanupBlanks?: boolean;
+};
+
+type BrowserCleanupOptions = {
   json?: boolean;
 };
 
@@ -98,11 +104,16 @@ browserCommand
   .description("Launch or reuse the dedicated CEL browser instance on the preferred CDP port")
   .option("--url <url>", "Open this URL after the CEL browser is ready")
   .option("--json", "Output raw JSON")
+  .option(
+    "--no-cleanup-blanks",
+    "Skip the automatic close of stray about:blank tabs after navigation",
+  )
   .action(async (opts: BrowserEnsureOptions) => {
     const cel = new Cel();
     const result = await ensureDedicatedCdpBrowser({
       cel,
       url: opts.url,
+      cleanupBlanksAfter: opts.cleanupBlanks,
     });
 
     if (opts.json) {
@@ -129,6 +140,26 @@ browserCommand
 
     if (opts.url) {
       console.log(`URL: ${opts.url}`);
+    }
+  });
+
+browserCommand
+  .command("cleanup")
+  .description("Close stray about:blank tabs on the CEL-owned CDP browser")
+  .option("--json", "Output raw JSON")
+  .action(async (opts: BrowserCleanupOptions) => {
+    const port = getPreferredCelCdpPort();
+    const result = await cleanupBlankCdpTabs(port);
+
+    if (opts.json) {
+      printJson({ port, ...result });
+      return;
+    }
+
+    if (result.closed === 0) {
+      console.log(`No about:blank tabs to close on port ${port}.`);
+    } else {
+      console.log(`Closed ${result.closed} about:blank tab(s) on port ${port}.`);
     }
   });
 

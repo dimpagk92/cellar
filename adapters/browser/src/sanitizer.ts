@@ -7,7 +7,7 @@
  * License: MIT
  */
 
-import type { ContextElement } from "@cellar/agent";
+import type { ContextElement } from "@cellar/agent/runtime";
 
 const MAX_LABEL_LENGTH = 200;
 const MAX_VALUE_LENGTH = 500;

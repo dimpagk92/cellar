@@ -358,11 +358,23 @@ export class CdpClient {
     return this.page.url();
   }
 
-  /** Navigate to a URL. */
-  async navigate(url: string): Promise<void> {
+  /**
+   * Navigate to a URL. Optional `waitUntil` / `timeout` flow through to
+   * Playwright's `page.goto`. The direct-CDP branch only honours `timeout`
+   * (it always waits on `Page.loadEventFired`, which corresponds to
+   * `waitUntil: "load"`).
+   */
+  async navigate(
+    url: string,
+    options?: {
+      waitUntil?: "load" | "domcontentloaded" | "networkidle" | "commit";
+      timeout?: number;
+    },
+  ): Promise<void> {
+    const timeout = options?.timeout ?? 10_000;
     if (this._directCdp) {
       await this._cdp.navigate(url);
-      // Wait for the page load event
+      // Wait for the page load event (or timeout)
       await new Promise<void>((resolve) => {
         const handler = () => {
           this._cdp.off("Page.loadEventFired", handler);
@@ -372,11 +384,14 @@ export class CdpClient {
         setTimeout(() => {
           this._cdp.off("Page.loadEventFired", handler);
           resolve();
-        }, 10_000); // 10s timeout — fail fast, celRun has its own 20s nav timeout
+        }, timeout);
       });
       return;
     }
-    await this.page.goto(url, { waitUntil: "domcontentloaded" });
+    await this.page.goto(url, {
+      waitUntil: options?.waitUntil ?? "domcontentloaded",
+      timeout,
+    });
   }
 
   /** Take a screenshot as a Buffer. */

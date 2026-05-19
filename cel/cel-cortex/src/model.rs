@@ -279,6 +279,12 @@ pub struct SourceSummary {
     pub accessibility: usize,
     pub native_api: usize,
     pub vision: usize,
+    /// Browser DOM elements pumped from the Rust browser adapter (or any
+    /// future CDP-backed source). Surfaced separately from `native_api`
+    /// so dashboards can tell when perception is browser-DOM-backed vs
+    /// adapter-backed (Numbers/Excel/SAP).
+    #[serde(default)]
+    pub cdp: usize,
     pub merged: usize,
     pub adapter_backed: usize,
 }
@@ -365,6 +371,7 @@ impl MentalModel {
                 ContextSource::AccessibilityTree => source_summary.accessibility += 1,
                 ContextSource::NativeApi => source_summary.native_api += 1,
                 ContextSource::Vision => source_summary.vision += 1,
+                ContextSource::Cdp => source_summary.cdp += 1,
                 ContextSource::Merged => source_summary.merged += 1,
             }
         }

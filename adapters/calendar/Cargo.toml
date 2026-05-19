@@ -1,0 +1,25 @@
+[package]
+name = "adapter-calendar"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "CEL adapter for Apple Calendar via AppleScript (macOS-only)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "adapter-calendar"
+path = "src/main.rs"
+
+[dependencies]
+cel-cortex = { workspace = true }
+cel-contracts = { workspace = true }
+cel-context = { workspace = true }
+cel-accessibility = { workspace = true }
+cel-adapter-runtime = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

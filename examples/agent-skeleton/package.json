@@ -1,0 +1,19 @@
+{
+  "name": "@cellar/agent-skeleton",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reference skeleton for a non-MCP agent backend consuming @cellar/agent/runtime",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cellar/agent": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

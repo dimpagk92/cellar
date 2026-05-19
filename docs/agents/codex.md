@@ -86,7 +86,7 @@ What Codex will do internally:
 5. Call `cel_see` `cdp_page` if CDP is configured, else `context`, to extract the page title.
 6. Return the title.
 
-## The `see → act` Pattern (Codex version)
+## The `see -> act -> verify` Pattern (Codex version)
 
 Same canonical loop every external agent uses with CEL:
 
@@ -95,7 +95,8 @@ loop:
   ctx = cel_see(mode="context")
   if goal_met(ctx): break
   step = codex_model_decides_next_tool(ctx)
-  cel_act(step)
+  receipt = cel_act(step)
+  verify(receipt)
 ```
 
 Rules:
@@ -103,10 +104,12 @@ Rules:
 1. Re-observe between batches — element IDs are ephemeral.
 2. Prefer `ax_action` and `set_value` over coordinates and typing.
 3. Batch up to ~4 actions per `cel_act` call, then re-observe.
+4. Store `cel_act` receipts and verify effects before claiming success.
 
 ## Tips
 
 - **Structured output.** Codex benefits from explicit JSON-shaped prompts. When asking it to report the result of a CEL run, request a machine-readable return (e.g. `Return {"title": "...", "ok": true}`) so downstream shell pipelines can parse it.
+- **Receipt-aware output.** Ask Codex to include receipt ids and verification evidence in its machine-readable return.
 - **Non-interactive mode.** Codex CLI often runs headless inside CI or shells. Make sure whatever process spawns Codex has Accessibility permission — not just your terminal.
 - **Approval policy.** Codex's tool-call approval behavior differs from Claude Code's and Cursor's. For one-shot scripts, disable approval only for read-only tools (`cel_see`) and keep approvals on for `cel_act` during development.
 - **No `cel_think` needed.** Codex is already a planner. Reach for `cel_think` only if you want to delegate long-horizon autonomy to CEL's built-in loop.

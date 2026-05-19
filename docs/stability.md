@@ -12,6 +12,7 @@ These surfaces are governed by the versioning rules below. Downstream consumers 
 - **AdapterDriver trait** — the Rust trait in `adapter-common` that third-party adapters implement. See [building-adapters.md](building-adapters.md).
 - **ContextElement schema** — the canonical fused-context type returned by perception. Field names, types, nullability.
 - **ActionResult shape** — return type of every action. Success/failure, timing, anomaly flags.
+- **Action receipt shape** — `cel_act` receipt fields such as `id`, `status`, `dispatch_path`, `requires_verification`, `verification`, `evidence`, and timestamps. Additive fields are allowed; removing or renaming existing fields is breaking.
 - **Environment variable names** — `CEL_*` env vars documented as user-facing (`CEL_RUNTIME_BACKEND`, `CEL_RUNTIME_URL`, `CEL_RUNTIME_TOKEN`, etc.). Renaming one is a breaking change.
 - **`cellar` CLI flag names** — documented flags on the `cellar` binary. Positional argument order.
 - **Node SDK `@cellar/agent` public API** — exported types and functions. npm-semver applies.
@@ -77,7 +78,7 @@ Each surface hits 1.0 independently when it meets its own criteria.
 ### MCP tools → 1.0
 
 - External-agent cookbook gallery is complete — Claude Code, Cursor, Mastra, LangGraph each have a published integration recipe.
-- The MCP tool argument/result schemas have been unchanged for **2 months**.
+- The MCP tool argument/result/receipt schemas have been unchanged for **2 months**.
 - **≥3 production users** depend on the MCP surface (named, listed, consenting).
 
 ### AdapterDriver trait → 1.0

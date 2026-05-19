@@ -132,6 +132,12 @@ pub struct ContextMerger {
     vision_threshold: usize,
     /// Whether the network monitor successfully started.
     network_started: bool,
+    /// Last AX-tree error text we logged at WARN. Dedupes the
+    /// "Accessibility tree unavailable" warning so the 200ms cortex
+    /// tick doesn't emit it 5x/sec while AX is broken (headless Chrome,
+    /// missing AX trust, AX-hostile foreground apps). Cleared on
+    /// recovery so the next failure WARNs again.
+    last_ax_error: Option<String>,
 }
 
 impl ContextMerger {
@@ -148,6 +154,7 @@ impl ContextMerger {
             context_cache_ttl: Duration::from_millis(500),
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started: false,
+            last_ax_error: None,
         }
     }
 
@@ -168,6 +175,7 @@ impl ContextMerger {
             context_cache_ttl: Duration::from_millis(500),
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started: false,
+            last_ax_error: None,
         }
     }
 
@@ -197,6 +205,7 @@ impl ContextMerger {
             context_cache_ttl: Duration::from_millis(500),
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started,
+            last_ax_error: None,
         }
     }
 
@@ -295,10 +304,28 @@ impl ContextMerger {
         // Query accessibility tree
         match self.accessibility.get_tree() {
             Ok(tree) => {
+                // AX recovered (or never failed). Surface the recovery
+                // at INFO so operators can correlate the WARN-stream
+                // stopping with a good signal, not a missed log line.
+                if self.last_ax_error.take().is_some() {
+                    tracing::info!("Accessibility tree recovered");
+                }
                 self.flatten_a11y_tree(&tree, &mut elements);
             }
             Err(e) => {
-                tracing::warn!("Accessibility tree unavailable: {}", e);
+                // Dedupe the WARN by error text. The 200ms cortex tick
+                // would otherwise emit this 5x/sec whenever AX is
+                // broken (headless Chrome, missing AX trust, AX-hostile
+                // foreground apps). First occurrence and any change in
+                // error text WARN; identical repeats drop to DEBUG
+                // (still captured in trace logs for post-mortems).
+                let text = e.to_string();
+                if self.last_ax_error.as_deref() != Some(text.as_str()) {
+                    tracing::warn!("Accessibility tree unavailable: {}", text);
+                    self.last_ax_error = Some(text);
+                } else {
+                    tracing::debug!("Accessibility tree still unavailable: {}", text);
+                }
             }
         }
 
@@ -1871,6 +1898,7 @@ mod tests {
             context_cache_ttl: Duration::from_millis(500),
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started: false,
+            last_ax_error: None,
         };
         assert!(merger.recent_network_events().is_empty());
     }

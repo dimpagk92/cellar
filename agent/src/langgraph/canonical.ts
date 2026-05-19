@@ -33,7 +33,13 @@ export type CanonicalAction =
   | { type: "activate_app"; app_name: string }
   | { type: "select"; from_x: number; from_y: number; to_x: number; to_y: number }
   | { type: "cdp_eval"; expression: string }
-  | { type: "navigate"; url: string }
+  | {
+      type: "navigate";
+      url: string;
+      wait_until?: "none" | "domcontentloaded" | "load" | "networkidle";
+      timeout_ms?: number;
+      dismiss_overlays?: boolean;
+    }
   | { type: "notebook_writes"; key?: string; value?: string; category?: string }
   | { type: "extract_with_fallback"; name: string; selectors: string[]; parse_as?: string }
   | { type: "write_cells"; app?: string; sheet?: string | null; table?: string | null; writes: CellWrite[]; verify?: boolean }
@@ -108,6 +114,32 @@ export interface PerceptionFrame {
   perception: ScreenContext;
   screenshot_base64?: string | null;
   caps: RuntimeCaps;
+  adapter_facts?: AdapterFactRef[];
+  cortex_anomalies?: CortexAnomaly[];
+  cortex_freshness?: CortexFreshnessAssessment | null;
+}
+
+export type CortexAnomalyType = "dialog" | "error" | "app_switch" | "auth_prompt";
+
+export interface CortexAnomaly {
+  type: CortexAnomalyType;
+  title?: string | null;
+  description: string;
+  timestamp: number;
+  element_ids?: string[];
+}
+
+export type FreshnessState = "fresh" | "soft_stale" | "hard_stale";
+export type StalenessCause = "time" | "event" | "confidence" | "verification";
+
+export interface CortexFreshnessAssessment {
+  state: FreshnessState;
+  causes: StalenessCause[];
+  age_ms: number;
+  confidence: number;
+  last_update_ms: number;
+  last_event_ms?: number | null;
+  last_significant_event_ms?: number | null;
 }
 
 // ─── Cortex memory (PR2) ─────────────────────────────────────────────────────
@@ -224,9 +256,20 @@ export interface KnowledgeRef {
 }
 
 export interface AdapterFactRef {
+  id?: string | null;
   adapter: string;
   kind: string;
   payload: unknown;
+}
+
+export interface AdapterActionRef {
+  adapter: string;
+  action: string;
+  params_schema?: Record<string, string>;
+  description?: string;
+  mutates_state?: boolean;
+  requires_verification?: boolean;
+  returns_data?: boolean;
 }
 
 export interface EventRef {
@@ -267,6 +310,7 @@ export interface PlanningView {
   screen: PlanningScreen;
   elements: PlanningElement[];
   adapter_facts: AdapterFactRef[];
+  adapter_actions: AdapterActionRef[];
   capabilities: CapabilityRef[];
   run_progress: RunProgress;
   memories: MemoryRef[];
@@ -277,6 +321,7 @@ export interface PlanningView {
   evidence: EvidenceRef[];
   selection_rationale?: string | null;
   omitted_counts: OmittedCounts;
+  adapter_actions_prompt?: string | null;
 }
 
 export interface ReviewDecision {

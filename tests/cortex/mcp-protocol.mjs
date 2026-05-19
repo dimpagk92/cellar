@@ -127,6 +127,7 @@ async function main() {
       "cellar/debug-hung-action",
       "cellar/extract-table",
       "cellar/run-numbers-write",
+      "cellar/diagnose-focus",
     ];
     for (const name of expectedPrompts) {
       assert(promptNames.includes(name), `${name} prompt available`);
@@ -229,6 +230,46 @@ async function main() {
       assert(typeof stopData.totalActions === "number", `Actions: ${stopData.totalActions}`);
     } else {
       assert(false, `Stop failed: ${JSON.stringify(stopResp)}`);
+    }
+
+    // 9. cel_perceive plan_view returns selected elements
+    //    Regression: before the cold-start fallback, the very first
+    //    plan_view call after boot returned `elements: []` because the
+    //    cortex's `current_context` hadn't been populated yet.
+    //    Now it falls back to a fresh ContextMerger fetch when the
+    //    cortex's snapshot is empty, so any UI on screen yields a
+    //    non-empty view.
+    //    Focus Finder explicitly so we have a known-AX-friendly app
+    //    on screen — the host-process window can be AX-hostile and
+    //    leave the cortex with an empty perception.
+    const { execFileSync } = await import("node:child_process");
+    execFileSync("open", [resolve(__dirname, "../..")]);
+    await sleep(400);
+    execFileSync("osascript", ["-e", 'tell application "Finder" to activate']);
+    await sleep(800);
+    console.log("\n9. cel_perceive plan_view returns selected elements");
+    const planResp = await server.callTool("cel_perceive", {
+      mode: "plan_view",
+      goal: "find an actionable element in the Finder window",
+    });
+    const planText = planResp.result?.content?.[0]?.text;
+    if (planText) {
+      const planData = JSON.parse(planText);
+      assert(
+        Array.isArray(planData.elements),
+        `plan_view returns an elements array (got ${typeof planData.elements})`,
+      );
+      assert(
+        planData.elements.length > 0,
+        `plan_view returns a non-empty selection (got ${planData.elements.length} elements; ` +
+          `${planData.omitted_counts?.elements ?? "?"} omitted by budget)`,
+      );
+      assert(
+        planData.omitted_counts && typeof planData.omitted_counts.elements === "number",
+        `plan_view reports omitted_counts.elements (got ${JSON.stringify(planData.omitted_counts)})`,
+      );
+    } else {
+      assert(false, `plan_view failed: ${JSON.stringify(planResp)}`);
     }
   } catch (e) {
     console.error("\nTest error:", e.message);

@@ -62,6 +62,7 @@ export type EnsureDedicatedCdpBrowserOptions = {
   port?: number;
   url?: string;
   timeoutMs?: number;
+  cleanupBlanksAfter?: boolean;
 };
 
 export type EnsureDedicatedCdpBrowserResult = {
@@ -228,6 +229,45 @@ async function queryVersion(port: number): Promise<JsonObject | null> {
 async function queryTargetCount(port: number): Promise<number> {
   const payload = await fetchJson(`http://127.0.0.1:${port}/json/list`);
   return Array.isArray(payload) ? payload.length : 0;
+}
+
+async function fetchHttpOk(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Close every page target on the given CEL CDP port whose URL is `about:blank`
+ * or empty. Used to suppress popunder/exit blanks that ad-heavy sites spawn as
+ * a side effect of navigation.
+ *
+ * Targets are enumerated via `/json/list` and closed via `/json/close/<id>`.
+ * Failures are swallowed; the returned `closed` count reflects only the tabs
+ * that the browser acknowledged closing.
+ */
+export async function cleanupBlankCdpTabs(port?: number): Promise<{ closed: number }> {
+  const resolvedPort = port ?? getPreferredCelCdpPort();
+  const payload = await fetchJson(`http://127.0.0.1:${resolvedPort}/json/list`);
+  if (!Array.isArray(payload)) return { closed: 0 };
+
+  let closed = 0;
+  for (const entry of payload) {
+    if (!entry || typeof entry !== "object") continue;
+    const page = entry as JsonObject;
+    if (page.type !== "page") continue;
+    const url = typeof page.url === "string" ? page.url : "";
+    if (url !== "" && url !== "about:blank") continue;
+    const id = typeof page.id === "string" ? page.id : null;
+    if (!id) continue;
+    if (await fetchHttpOk(`http://127.0.0.1:${resolvedPort}/json/close/${id}`)) {
+      closed += 1;
+    }
+  }
+  return { closed };
 }
 
 async function queryTargets(port: number): Promise<CanonicalCdpTarget[]> {
@@ -433,6 +473,11 @@ export async function ensureDedicatedCdpBrowser(
   if (initialStatus.ready) {
     if (options.url && options.cel?.cdpNavigate) {
       await options.cel.cdpNavigate(options.url);
+      const shouldCleanup = options.cleanupBlanksAfter ?? true;
+      if (shouldCleanup) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await cleanupBlankCdpTabs(requestedPort);
+      }
     }
     return {
       ok: true,

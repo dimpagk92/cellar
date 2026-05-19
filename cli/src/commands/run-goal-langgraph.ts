@@ -2,15 +2,17 @@ import { randomUUID } from "crypto";
 
 import { Command } from "commander";
 import {
-  Cel,
   CelLangGraphDriver,
-  celConfig,
   createCellarReactAgent,
-  ensureDedicatedCdpBrowser,
   extractFinalAgentText,
-  hasConfiguredLlmAuth,
   serializeAgentMessages,
 } from "@cellar/agent";
+import {
+  Cel,
+  celConfig,
+  ensureDedicatedCdpBrowser,
+  hasConfiguredLlmAuth,
+} from "@cellar/agent/runtime";
 
 interface RunGoalLangGraphOptions {
   maxSteps: number;

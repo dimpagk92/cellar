@@ -1,20 +1,22 @@
-# Agent Integration Roadmap
+# Agent Integration and Trust Proof Roadmap
 
-Date: April 24, 2026
+Date: May 14, 2026
 
-Status: **proposal** — the ranking below is a recommendation, not a commitment. User may re-rank; treat changes to this file as first-class.
+Status: **active direction** — trust/execution proof comes before broad runtime expansion.
 
 ## Framing
 
-CEL's durable value is in device understanding, execution, and adapter truth — not in owning a planner. That means the roadmap question is not "which planner do we build?" but "which agent runtimes should work well against CEL, and in what order?"
+CEL's durable value is in device understanding, trusted execution, verification, receipts, and adapter truth - not in owning a planner. That means the roadmap question is not "which planner do we build?" and not even "how many runtimes can we claim?" The sharper question is:
+
+> Can any competent agent use CEL to operate a real computer, prove what happened, and leave an auditable receipt trail?
 
 The north-star boundary stays the same across every runtime:
 
 - **Agent owns:** planning, retries, branching, checkpointing, approvals, stop conditions.
-- **CEL owns:** fused context, screenshots, action execution, adapter dispatch.
+- **CEL owns:** fused context, screenshots, action execution, adapter dispatch, verification surfaces, receipts.
 - **Adapters own:** app-specific truth.
 
-See [docs/adapters-cel-agents.md](./adapters-cel-agents.md).
+See [docs/adapters-cel-agents.md](./adapters-cel-agents.md) and [docs/trust-execution-layer.md](./trust-execution-layer.md).
 
 Integration docs live under [docs/agents/](./agents/README.md).
 
@@ -22,10 +24,10 @@ Integration docs live under [docs/agents/](./agents/README.md).
 
 | Tier | Meaning | Acceptance Bar |
 |---|---|---|
-| **P0** | Must-have for v0.2 agent-agnostic claim | Working cookbook + runnable example in `examples/` |
-| **P1** | High value next | Cookbook + one eval scenario under `eval/scenarios/` that exercises the runtime |
-| **P2** | Nice to have | Cookbook only |
-| **P3** | Covered transitively | No dedicated doc — user routes through the raw MCP client cookbook |
+| **P0** | Must-have for the trust/execution claim | End-to-end transcript with healthcheck, receipts, independent verification, and env-valid eval result |
+| **P1** | Expand trust proof across surfaces | Adapter-backed examples and agent-agnostic evals that prove receipts + verification |
+| **P2** | Runtime reach after P0/P1 is credible | Cookbook + thin example, no bespoke semantics |
+| **P3** | Covered transitively | No dedicated doc - user routes through the raw MCP client cookbook |
 
 ## Ranked List
 
@@ -33,31 +35,43 @@ Integration docs live under [docs/agents/](./agents/README.md).
 
 - **LangGraph** — Reference integration. Cookbook: [`docs/langgraph-rust-sidecar.md`](./langgraph-rust-sidecar.md). Validated the boundary before the cookbook set existed. No change planned.
 
-### P0 — ship next
+### P0 — ship next: trusted execution proof
 
 - **Claude Code** — Cookbook: [`docs/agents/claude-code.md`](./agents/claude-code.md).
   - Rationale: highest adoption of any MCP client in April 2026; a working Claude Code path is the biggest reach win and the lowest-friction demo for new users.
-  - Acceptance: cookbook (done), plus `examples/claude-code/` containing the Numbers `BTC/ETH/SOL` task so a user can copy-paste and watch it run end-to-end.
+  - Acceptance: cookbook (done), `/cellar/healthcheck`, plus `examples/claude-code/` containing the Numbers `BTC/ETH/SOL` task with `write_cells` receipts, `read_cells` readback, and a final answer that cites both. The transcript must distinguish "dispatched" from "verified".
 
 - **Raw MCP client reference** — Cookbook: [`docs/agents/mcp-client.md`](./agents/mcp-client.md).
   - Rationale: proves the agent-agnostic claim. Low effort. Also serves as the fallback path for any runtime we don't cover explicitly.
-  - Acceptance: cookbook (done), plus `examples/mcp-client-node/` (and optionally `examples/mcp-client-python/`) implementing the minimal example verbatim.
+  - Acceptance: cookbook (done), plus `examples/mcp-client-node/` implementing the minimal example verbatim and printing receipts. The example should pass even when no planner is involved.
 
-### P1 — ship after P0 lands
+### P1 — ship after P0 lands: adapter-backed trust
+
+- **Numbers trust suite** — external-agent evals.
+  - Rationale: Numbers is AX-hostile, so it cleanly proves why adapter truth matters.
+  - Acceptance: env-valid eval lane with active `numbers` adapter, `write_cells` receipt, `read_cells` readback, and no generic typing fallback.
+
+- **Browser/CDP trust suite** — external-agent evals.
+  - Rationale: browser tasks should prove CDP access instead of silently degrading to blind coordinate actions.
+  - Acceptance: healthcheck shows CDP target, navigation/action receipts include `dispatch_path: "cdp"` or browser adapter routing, and post-action DOM state verifies success.
+
+- **Eval validity gate**.
+  - Rationale: a low score from missing adapters, stub AX, or unavailable CDP is not a product baseline.
+  - Acceptance: reports call out environment-invalid signals separately from product failures.
+
+### P2 — runtime reach after the proof is solid
 
 - **Mastra** — Cookbook: [`docs/agents/mastra.md`](./agents/mastra.md).
-  - Rationale: TypeScript-first, same ecosystem as Cellar, shortest path from "look at the CEL SDK" to "I have a running agent."
-  - Acceptance: cookbook (done), one eval scenario wiring a Mastra agent against a `BrowserGym`/`Numbers` task under `eval/scenarios/`. Pinned against a specific Mastra version to avoid surface drift.
+  - Rationale: TypeScript-first, same ecosystem as Cellar. Good once the CEL receipt contract is stable enough to wrap.
+  - Acceptance: cookbook (done), one thin example or eval scenario that consumes the same MCP receipts, pinned against a specific Mastra version.
 
 - **Cursor** — Cookbook: [`docs/agents/cursor.md`](./agents/cursor.md).
-  - Rationale: Cursor's MCP usage is growing fast among developers; good overlap with our target early-adopter audience.
-  - Acceptance: cookbook (done), one eval scenario that runs via Cursor's composer against a canned task. Screenshot assets captured and checked in.
-
-### P2 — ship when bandwidth permits
+  - Rationale: good early-adopter overlap, but not worth bespoke work until Claude Code and raw MCP prove the general boundary.
+  - Acceptance: cookbook (done), one canned task transcript that includes healthcheck and receipts.
 
 - **Codex CLI** — Cookbook: [`docs/agents/codex.md`](./agents/codex.md).
-  - Rationale: OpenAI's official terminal agent. Adoption is growing but smaller than Claude Code / Cursor today. Version instability on the Codex side makes a pinned example risky until Codex settles its MCP config.
-  - Acceptance: cookbook only. No example in `examples/` until Codex MCP config stabilizes.
+  - Rationale: OpenAI's official terminal agent. Keep it as an MCP client, not a new Cellar identity.
+  - Acceptance: cookbook only until Codex MCP config stabilizes enough for a pinned example.
 
 - **n8n** — Cookbook: [`docs/agents/n8n.md`](./agents/n8n.md).
   - Rationale: unlocks workflow-engine users, but Path 1 (CLI) is brittle and Path 2 (HTTP) depends on `cellar-worker` which is not yet shipped.
@@ -73,17 +87,18 @@ Integration docs live under [docs/agents/](./agents/README.md).
 
 Three forces shape the ranking:
 
-1. **Reach.** Claude Code and raw MCP together cover most MCP-native demand in April 2026.
-2. **Ecosystem match.** Mastra and Cursor are closest to the Cellar stack (TypeScript, MCP-first, IDE-adjacent).
-3. **Drift risk.** Codex and n8n both depend on external surfaces that have been moving: Codex's config and n8n's lack of native MCP. Pinning examples against moving targets is costly — cookbooks first, runnable examples only after stabilization.
+1. **Trust beats reach.** A trusted Claude Code transcript is more valuable than five shallow runtime badges.
+2. **Receipts create the integration contract.** Once receipts are stable, every runtime can consume the same proof shape.
+3. **Adapters prove the moat.** Numbers and browser CDP show why CEL is more than generic UI perception.
+4. **Drift risk is real.** Codex, Cursor, Mastra, and n8n can move underneath us. Keep their docs thin until the CEL boundary is stronger than their churn.
 
 ## Expected Deliverables by End of Next Sprint
 
-- [ ] P0 — `examples/claude-code/` runs end-to-end with the Numbers task.
-- [ ] P0 — `examples/mcp-client-node/` implements the cookbook verbatim.
-- [ ] P1 — Mastra eval scenario, pinned Mastra version.
-- [ ] P1 — Cursor eval scenario + screenshot assets.
-- [ ] P2 — Revisit Codex cookbook once upstream config settles.
+- [ ] P0 — `examples/claude-code/` runs end-to-end with healthcheck, Numbers write receipt, readback, and final verification.
+- [ ] P0 — `examples/mcp-client-node/` implements the cookbook verbatim and prints receipts.
+- [ ] P0 — `cel_act` receipts are documented and returned over MCP for success and failure paths.
+- [ ] P1 — Eval reports flag environment-invalid signals separately from product failures.
+- [ ] P1 — External-agent Numbers and browser/CDP scenarios assert adapter/CDP truth, not planner internals.
 
 ## Review Cadence
 

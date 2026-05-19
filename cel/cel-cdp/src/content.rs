@@ -102,6 +102,28 @@ pub struct DomElement {
     pub input_type: Option<String>,
     pub value: Option<String>,
     pub placeholder: Option<String>,
+    /// HTML `id` attribute, when set. The most stable, semantically
+    /// meaningful selector that scenarios commonly target — e.g.
+    /// `target_contains: "submit"` matches `id="submit-btn"`. Without
+    /// this field the browser-adapter would have to fall back to less
+    /// stable signals (`backend_node_id` flips per page-load, text
+    /// shifts with content updates).
+    #[serde(default)]
+    pub dom_id: Option<String>,
+    /// HTML `name` attribute. Form fields almost always have a `name`
+    /// (it is what a form POST sends as the key) so it is the
+    /// second-best identifier after `dom_id` for inputs.
+    #[serde(default)]
+    pub dom_name: Option<String>,
+    /// `data-testid` attribute. Author-stamped stable identifier used by
+    /// component libraries (Radix, MUI, Headless UI) and test harnesses
+    /// for elements that don't expose a meaningful HTML `id` — e.g. a
+    /// list of action buttons that all read "Approve" but have
+    /// `data-testid="approve-payment-gateway"` per row. The
+    /// browser-rs adapter falls back to this in `pick_id_part` so the
+    /// element_id stays unique even when text + id collide.
+    #[serde(default)]
+    pub data_testid: Option<String>,
     /// Bounding rectangle (viewport-relative).
     pub bounds: Option<ElementBounds>,
     /// Incrementing ID for element identification.
@@ -127,13 +149,40 @@ pub struct DomElement {
 }
 
 /// Extract page content from an active CDP connection.
+///
+/// Resilience note: this function uses [`CdpClient::evaluate_resilient`]
+/// throughout (not the bare `evaluate`) so a WebSocket drop mid-tick
+/// auto-reconnects and retries once instead of returning empty. Why this
+/// matters: scenario transitions in cel-eval routinely tear down the
+/// page target (each scenario navigates to a fresh fixture URL), and
+/// during the 50–200 ms reconnect window the browser-rs adapter's
+/// per-tick `get_context()` call would otherwise see a dead socket and
+/// emit an empty Vec — which the cortex then merges into a `Stub Window`
+/// perception with zero dom:* elements. Run-3's 18:12:20–18:13:08
+/// burst of seven drops in 50 s on the Hetzner server made this the
+/// dominant cause of mid-eval "perception only shows Stub Window"
+/// failures. The resilient variant treats a transient drop as a single
+/// retry rather than a perception blackout.
 pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, CdpError> {
-    let title = client.get_title().await.unwrap_or_default();
-    let url = client.get_url().await.unwrap_or_default();
+    // Pull title + URL via resilient evaluate (the convenience
+    // `get_title` / `get_url` helpers call the bare `evaluate` path so
+    // we bypass them here when reconnect resilience matters).
+    let title = client
+        .evaluate_resilient("document.title")
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let url = client
+        .evaluate_resilient("window.location.href")
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
 
     // Extract body text via JavaScript
     let body_text = client
-        .evaluate("document.body?.innerText || ''")
+        .evaluate_resilient("document.body?.innerText || ''")
         .await
         .unwrap_or(serde_json::Value::String(String::new()));
     let body_text = body_text.as_str().unwrap_or("").to_string();
@@ -164,7 +213,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         })()
     "#;
     let text_blocks: Vec<TextBlock> = client
-        .evaluate(blocks_js)
+        .evaluate_resilient(blocks_js)
         .await
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
@@ -316,6 +365,17 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
                             input_type: el.type || null,
                             value: el.value !== undefined ? (el.value || '').slice(0, MAX_TEXT) || null : null,
                             placeholder: el.placeholder || null,
+                            // HTML id / name carry author-controlled semantic identity —
+                            // critical for stable dom:* element_ids. Empty string normalises
+                            // to null so the Rust side can use Option semantics cleanly.
+                            dom_id: el.id || null,
+                            dom_name: el.getAttribute && el.getAttribute('name') || null,
+                            // `data-testid` is the convention for "stable identifier
+                            // when the author didn't pick a meaningful `id`". Used as
+                            // the third fallback in `pick_id_part` so element_ids stay
+                            // unique on pages with many same-text buttons (a row of
+                            // "Approve" buttons whose text alone collides).
+                            data_testid: (el.getAttribute && el.getAttribute('data-testid')) || null,
                             bounds: rect,
                             backend_node_id: nodeCounter,
                             aria_role: role,
@@ -350,7 +410,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         })()
     "#;
     let interactive_elements: Vec<DomElement> = client
-        .evaluate(interactive_js)
+        .evaluate_resilient(interactive_js)
         .await
         .ok()
         .and_then(|v| serde_json::from_value(v).ok())
@@ -368,7 +428,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         })
     "#;
     let viewport: Option<ViewportInfo> = client
-        .evaluate(viewport_js)
+        .evaluate_resilient(viewport_js)
         .await
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -385,7 +445,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         } catch(e) { '{}' }
     "#;
     let perf_json = client
-        .evaluate(perf_js)
+        .evaluate_resilient(perf_js)
         .await
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -417,7 +477,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         })()
     "#;
     let console_json = client
-        .evaluate(console_js)
+        .evaluate_resilient(console_js)
         .await
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -442,7 +502,7 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
         )
     "#;
     let network_json = client
-        .evaluate(network_js)
+        .evaluate_resilient(network_js)
         .await
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -497,6 +557,9 @@ mod tests {
                 input_type: None,
                 value: None,
                 placeholder: None,
+                dom_id: Some("submit-btn".into()),
+                dom_name: None,
+                data_testid: None,
                 bounds: Some(ElementBounds {
                     x: 10,
                     y: 20,

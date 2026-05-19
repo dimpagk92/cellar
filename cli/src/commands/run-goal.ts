@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel, ensureDedicatedCdpBrowser } from "@cellar/agent";
+import { Cel, ensureDedicatedCdpBrowser } from "@cellar/agent/runtime";
 
 // Canonical run-goal surface — the CLI is a thin shim over
 // `CanonicalGoalRunner::run`. The only flags are budget limits; every

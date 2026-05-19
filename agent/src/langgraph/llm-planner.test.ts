@@ -15,6 +15,7 @@ function makeFakeView(goal: string): PlanningView {
     screen: { active_app: "Test App" },
     elements: [],
     adapter_facts: [],
+    adapter_actions: [],
     capabilities: [],
     run_progress: { steps_used: 0, max_steps: 80 },
     memories: [],

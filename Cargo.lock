@@ -3,6 +3,35 @@
 version = 4
 
 [[package]]
+name = "adapter-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-cdp",
+ "cel-context",
+ "cel-contracts",
+ "cel-cortex",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "adapter-calendar"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-adapter-runtime",
+ "cel-context",
+ "cel-contracts",
+ "cel-cortex",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "adapter-common"
 version = "0.1.0"
 dependencies = [
@@ -14,15 +43,73 @@ dependencies = [
 ]
 
 [[package]]
+name = "adapter-mail"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-adapter-runtime",
+ "cel-context",
+ "cel-contracts",
+ "cel-cortex",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "adapter-messages"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-adapter-runtime",
+ "cel-context",
+ "cel-contracts",
+ "cel-cortex",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "adapter-notes"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-context",
+ "cel-contracts",
+ "cel-cortex",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "adapter-numbers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "cel-accessibility",
  "cel-context",
+ "cel-contracts",
  "cel-cortex",
  "cel-input",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "adapter-reminders"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-adapter-runtime",
+ "cel-context",
+ "cel-contracts",
+ "cel-cortex",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -539,6 +626,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cel-adapter-runtime"
+version = "0.1.0"
+dependencies = [
+ "cel-cortex",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cel-audio"
 version = "0.1.0"
 dependencies = [
@@ -555,6 +652,7 @@ dependencies = [
 name = "cel-cdp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "cel-network",
  "futures-util",
  "serde",
@@ -612,6 +710,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -684,7 +783,9 @@ dependencies = [
 name = "cel-napi"
 version = "0.1.0"
 dependencies = [
+ "adapter-browser",
  "adapter-common",
+ "adapter-notes",
  "adapter-numbers",
  "base64",
  "cel-accessibility",

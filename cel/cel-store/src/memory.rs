@@ -28,7 +28,9 @@ pub struct Observation {
     pub content: String,
     pub priority: ObservationPriority,
     pub source_run_ids: String,
-    pub observed_at: String,
+    /// SQL-NULL when the observation has no recorded observation timestamp.
+    /// Serialised as JSON `null` (not `""`) so JS callers can branch on it.
+    pub observed_at: Option<String>,
     pub referenced_at: Option<String>,
     pub superseded_by: Option<i64>,
     pub created_at: String,
@@ -276,7 +278,7 @@ impl crate::CelStore {
                     content: row.get(2)?,
                     priority,
                     source_run_ids: row.get(4)?,
-                    observed_at: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    observed_at: row.get(5)?,
                     referenced_at: row.get(6)?,
                     superseded_by: row.get(7)?,
                     created_at: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
@@ -408,12 +410,49 @@ impl crate::CelStore {
 
     /// Search knowledge using FTS5 full-text search.
     /// Returns results ranked by BM25 relevance score.
+    ///
+    /// The raw `query` is sanitized before binding so that user input
+    /// containing FTS5-special characters (`-`, `:`, `*`, parens, double
+    /// quotes, `AND`/`OR`/`NOT`) does not produce a syntax error or get
+    /// interpreted as an operator. Space-separated tokens still combine via
+    /// FTS5's implicit AND, which is what real callers expect — see
+    /// [`sanitize_fts5_query`] for details.
     pub fn search_knowledge(
         &self,
         query: &str,
         workflow_scope: Option<&str>,
         limit: u32,
     ) -> Result<Vec<ScoredKnowledge>, StoreError> {
+        // Sanitize first; if nothing tokenizable remains (empty input, pure
+        // punctuation, only operator keywords), short-circuit. FTS5 rejects
+        // an empty MATCH expression as a syntax error, so we must not bind
+        // an empty string.
+        let safe_query = sanitize_fts5_query(query);
+        if safe_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.search_knowledge_match(&safe_query, workflow_scope, limit)
+    }
+
+    /// Query knowledge facts with an already-sanitized FTS5 MATCH expression.
+    ///
+    /// This is intentionally separate from [`search_knowledge`], whose public
+    /// contract accepts arbitrary user text and collapses tokens into implicit
+    /// AND. The planning-view selector builds a safe expression via
+    /// `safe_fts5_query_from_keywords` so it can preserve explicit OR recall
+    /// without re-sanitizing away the operators.
+    pub(crate) fn search_knowledge_match(
+        &self,
+        match_query: &str,
+        workflow_scope: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ScoredKnowledge>, StoreError> {
+        let safe_query = match_query.trim();
+        if safe_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // FTS5 query with BM25 ranking
         let sql = if workflow_scope.is_some() {
             "SELECT ks.id, ks.content, ks.source, ks.workflow_scope, rank, ks.created_at
@@ -446,9 +485,9 @@ impl crate::CelStore {
         };
 
         let rows = if let Some(scope) = workflow_scope {
-            stmt.query_map(rusqlite::params![query, scope, limit], map_row)?
+            stmt.query_map(rusqlite::params![safe_query, scope, limit], map_row)?
         } else {
-            stmt.query_map(rusqlite::params![query, limit], map_row)?
+            stmt.query_map(rusqlite::params![safe_query, limit], map_row)?
         };
 
         let mut results = Vec::new();
@@ -457,6 +496,33 @@ impl crate::CelStore {
         }
         Ok(results)
     }
+}
+
+/// Sanitize an arbitrary user query into a safe FTS5 MATCH expression.
+///
+/// FTS5 treats `-` as NOT, `:` as a column scope, `*` as a prefix marker,
+/// `( )` / `"` as grouping/phrase syntax, and the bare words `AND` / `OR` /
+/// `NOT` as operators. Passing user text verbatim to `MATCH` therefore turns
+/// ordinary inputs like `cognition-test-fact-123` or `path:to/foo` into
+/// syntax errors ("no such column: …").
+///
+/// We split on every non-alphanumeric/underscore character (which drops every
+/// FTS5-special punctuation) and filter out the operator keywords. The
+/// surviving tokens are rejoined with spaces, which FTS5 interprets as an
+/// implicit AND across the indexed columns. This preserves the contract that
+/// callers like `agent/src/goal-runner/history-advisor.ts` rely on
+/// (`keywords.join(" ")` → "all of these words must appear") while making
+/// arbitrary user input safe.
+///
+/// Returns an empty string when no usable token remains; `search_knowledge`
+/// short-circuits on that case so we never bind an empty MATCH expression.
+fn sanitize_fts5_query(query: &str) -> String {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|tok| !tok.is_empty())
+        .filter(|tok| !matches!(*tok, "AND" | "OR" | "NOT"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -539,6 +605,12 @@ mod tests {
         // High priority first
         assert_eq!(obs[0].priority, ObservationPriority::High);
         assert!(obs[0].content.contains("Vendor X"));
+        // Nullable timestamp round-trips: explicit value comes back as Some,
+        // omitted value comes back as None (NOT empty string — JSON callers
+        // need to distinguish "no timestamp recorded" from "" so they can
+        // fall back to created_at).
+        assert_eq!(obs[0].observed_at.as_deref(), Some("2024-06-15"));
+        assert_eq!(obs[1].observed_at, None);
     }
 
     #[test]
@@ -604,11 +676,93 @@ mod tests {
         assert!(!results.is_empty());
         assert!(results[0].content.contains("Vendor X"));
 
-        // Scoped search — only daily-po and global
-        let results = store
-            .search_knowledge("SAP OR stale", Some("daily-po"), 10)
-            .unwrap();
+        // Scoped search — only daily-po and global rows are eligible.
+        // Phrase-matched (post-sanitization), "SAP" hits the daily-po row.
+        let results = store.search_knowledge("SAP", Some("daily-po"), 10).unwrap();
         assert!(!results.is_empty());
+        assert!(results.iter().any(|r| r.content.contains("SAP system")));
+        // The trade-wf-scoped Bloomberg row must NOT leak into a daily-po search.
+        assert!(results.iter().all(|r| !r.content.contains("Bloomberg")));
+    }
+
+    #[test]
+    fn test_search_knowledge_sanitizes_fts5_special_chars() {
+        // Regression: user queries containing FTS5 operator characters
+        // (`-` NOT, `:` column scope, `*` prefix, parens, double quotes)
+        // used to crash with "no such column: …" because they were passed
+        // verbatim to MATCH. After sanitization they should be tokenized
+        // and combined via implicit AND — either match or return [], never
+        // error.
+        let store = CelStore::open_memory().unwrap();
+        store
+            .add_scoped_knowledge(
+                "cellar MCP cognition test sentinel",
+                "test",
+                None,
+                Some("cognition,sentinel"),
+            )
+            .unwrap();
+
+        // Hyphenated query: tokens "cognition" AND "test" both appear in
+        // the stored row, so it must match.
+        let hits = store.search_knowledge("cognition-test", None, 10).unwrap();
+        assert!(
+            hits.iter().any(|r| r.content.contains("cognition test")),
+            "hyphenated query should match rows containing both tokens, got: {hits:?}"
+        );
+
+        // Hyphenated query whose tokens don't all appear in the corpus
+        // ("fact" is missing) must return [] cleanly rather than erroring.
+        let misses = store
+            .search_knowledge("nope-xyz-fact-123", None, 10)
+            .unwrap();
+        assert!(misses.is_empty());
+
+        // Other FTS5-special characters should also no longer error,
+        // regardless of whether they happen to match anything.
+        for q in [
+            "path:to/foo",
+            "what about (parens)",
+            "literal \"quote\" inside",
+            "trailing*",
+            "NOT really an operator",
+            "x AND y OR z",
+        ] {
+            let _ = store
+                .search_knowledge(q, None, 10)
+                .unwrap_or_else(|e| panic!("query {q:?} should not error: {e}"));
+        }
+
+        // Inputs that sanitize to nothing (empty, whitespace, pure
+        // punctuation, only operator keywords) short-circuit to no
+        // results rather than feeding FTS5 an empty MATCH expression.
+        for q in ["", "   ", "----", "AND OR NOT"] {
+            assert!(
+                store.search_knowledge(q, None, 10).unwrap().is_empty(),
+                "query {q:?} should short-circuit to []"
+            );
+        }
+    }
+
+    #[test]
+    fn test_search_knowledge_match_preserves_safe_or_query() {
+        let store = CelStore::open_memory().unwrap();
+        store
+            .add_scoped_knowledge("Concur submit requires confirmation", "test", None, None)
+            .unwrap();
+        store
+            .add_scoped_knowledge("Payroll submit requires approval", "test", None, None)
+            .unwrap();
+        store
+            .add_scoped_knowledge("Espresso machine descaling guide", "test", None, None)
+            .unwrap();
+
+        let query = crate::safe_fts5_query_from_keywords(&["concur".into(), "payroll".into()])
+            .expect("safe FTS query");
+        let results = store.search_knowledge_match(&query, None, 10).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| !r.content.contains("Espresso")));
     }
 
     #[test]

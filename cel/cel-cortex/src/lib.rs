@@ -47,8 +47,10 @@ pub mod skeleton;
 
 // Re-export primary types for convenience.
 pub use adapter::{
-    discover_adapters, load_manifest, ActionDeclaration, ActionResult, AdapterDriver, AdapterError,
-    AdapterManifest, AdapterState, ContextDeclaration, RegisteredAdapter,
+    adapter_actions_from_manifests, discover_adapters, format_adapter_actions_prompt,
+    group_paired_manifests, load_manifest, merge_manifest_layers, ActionDeclaration, ActionResult,
+    AdapterDriver, AdapterError, AdapterManifest, AdapterState, ContextDeclaration,
+    RegisteredAdapter,
 };
 pub use cortex::{Cortex, CortexError, TargetValidation};
 pub use manager::CortexManager;

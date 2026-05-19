@@ -2,9 +2,9 @@
 
 [![Glama MCP server](https://glama.ai/mcp/servers/dimpagk92/cellar/badges/score.svg)](https://glama.ai/mcp/servers/dimpagk92/cellar)
 
-**CEL — agent-agnostic infrastructure for computer use.**
+**CEL — the trust and execution layer for AI-operated computers.**
 
-CEL (Context Execution Layer) is an open-source platform that fuses accessibility trees, CDP, vision, network, and app-specific adapters into one structured device understanding — and exposes stable execution primitives over MCP, CLI, SDK, and N-API. The planner is pluggable: use LangGraph, Mastra, Claude Code, Cursor, Codex, GPT, Gemini, n8n, a raw MCP client, or CEL's built-in `cel_think` fallback. CEL owns the device; you bring the agent.
+CEL (Context Execution Layer) is an open-source platform that fuses accessibility trees, CDP, vision, network, and app-specific adapters into one structured device understanding - and exposes stable execution primitives, verification surfaces, and action receipts over MCP, CLI, SDK, and N-API. The planner is pluggable: use LangGraph, Mastra, Claude Code, Cursor, Codex, GPT, Gemini, n8n, a raw MCP client, or CEL's built-in `cel_think` fallback. CEL owns trusted device execution; you bring the agent.
 
 > **Status: Active development.** Core runtime fully functional on macOS. MCP server with 4 composable tools. Linux support available. Windows planned.
 
@@ -17,7 +17,7 @@ CEL (Context Execution Layer) is an open-source platform that fuses accessibilit
 +------------------------------------------------------------+
 |  CEL / crates context fusion, stream normalization,         |
 |               canonical execution, adapter dispatch,        |
-|               stable MCP / CLI / SDK / N-API surfaces       |
+|               receipts, stable MCP / CLI / SDK / N-API      |
 +------------------------------------------------------------+
 |  Adapters     browser | Numbers | Excel | Figma | Slack    |
 |               Cursor | Docker Desktop | ...                 |
@@ -25,10 +25,10 @@ CEL (Context Execution Layer) is an open-source platform that fuses accessibilit
 ```
 
 - **Adapters** — where app-specific structured truth lives. Third-party extensible.
-- **CEL (this repo)** — the durable core: fused context, execution, adapter routing, tool surfaces.
+- **CEL (this repo)** — the durable core: fused context, execution, verification, receipts, adapter routing, tool surfaces.
 - **Agents** — planners/orchestrators. Every framework is a first-class client; none of them defines the platform.
 
-See [docs/what-cel-is.md](docs/what-cel-is.md) for the full platform boundary and [docs/adapters-cel-agents.md](docs/adapters-cel-agents.md) for the north-star design doc.
+See [docs/what-cel-is.md](docs/what-cel-is.md) for the full platform boundary, [docs/trust-execution-layer.md](docs/trust-execution-layer.md) for the receipt/evidence contract, and [docs/adapters-cel-agents.md](docs/adapters-cel-agents.md) for the north-star design doc.
 
 ## What CEL owns vs. what's pluggable
 
@@ -38,6 +38,7 @@ See [docs/what-cel-is.md](docs/what-cel-is.md) for the full platform boundary an
 | Freshness, anomaly, and state tracking (Cortex) | Retry / branching / checkpoint policy |
 | Canonical `cel_see` / `cel_act` / `cel_perceive` / `cel_think` tool surface | Which LLM(s) back each role |
 | Adapter lifecycle, dispatch, and the `AdapterDriver` trait | Human-approval / done-policy |
+| Execution receipts and verification evidence hints | Final claim wording and user-facing report |
 | Stable MCP, CLI (`cellar`), SDK, and N-API bindings | App-specific intelligence (lives in adapters) |
 
 ## Supported agents
@@ -61,7 +62,12 @@ First-party and community adapters. Full catalog in [docs/adapter-catalog.md](do
 
 | Adapter | Status | Notes |
 |---|---|---|
-| Browser (CDP + DOM fusion) | Stable | Primary runtime today |
+| Browser (CDP + DOM fusion) | Stable | Primary runtime today; TS (`browser`) + Rust (`browser-rs`) variants share the `browser_dom` truth surface |
+| Apple Calendar | Stable | Create / list / update / delete events via AppleScript document model |
+| Apple Mail | Stable | Compose (no auto-send), send-draft, list inbox, read, search |
+| Apple Messages | Stable | Read-only: list threads, read a thread, search message text |
+| Apple Notes | Stable | Folder-aware note CRUD via AppleScript |
+| Apple Reminders | Stable | Reminder list + item CRUD via AppleScript |
 | Numbers | In progress | Spreadsheet truth via app model, not AX guesswork |
 | Excel | Planned | COM bridge; roadmap in [docs/adapter-roadmap.md](docs/adapter-roadmap.md) |
 | Slack | Planned | Workspace-aware messaging/context |

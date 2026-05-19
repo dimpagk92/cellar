@@ -3646,6 +3646,7 @@ const NAVIGATE_POLL_MS: u64 = 100;
 ///   1. Buttons whose visible text contains accept/agree/got it/ok/
 ///      dismiss — short list, English-leaning, conservative.
 ///   2. Buttons with common consent IDs / aria-labels.
+///
 /// Failure is silent — a botched dismiss should never fail the navigate.
 const CEL_DISMISS_OVERLAYS_JS: &str = r#"(() => {
     try {
@@ -3698,9 +3699,9 @@ const CEL_DISMISS_OVERLAYS_JS: &str = r#"(() => {
 ///     navigations the action triggered.
 ///
 /// The shape is serialised as JSON so the after vs before comparison
-/// is a single string-inequality check. Tight enough that snapshot
-/// + compare round-trips in ~5 ms; cheap enough to call inside the
-/// 100ms poll cadence.
+/// is a single string-inequality check. Tight enough that the
+/// snapshot-and-compare round-trip is ~5 ms; cheap enough to call
+/// inside the 100ms poll cadence.
 ///
 /// Volatile content (timestamp tickers, animated counters, live
 /// feeds) will cause false-positive diffs on the order of the page's
@@ -4590,7 +4591,7 @@ mod tests {
                     "name": "{name}",
                     "display_name": "{name}",
                     "app_patterns": ["(?i){name}"],
-                    "platform": ["macos"],
+                    "platform": ["macos", "linux", "windows"],
                     "context": {{ "element_types": [], "truth_surface": "browser_dom" }},
                     "actions": {actions_json}
                 }}"#,

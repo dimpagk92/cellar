@@ -288,7 +288,7 @@ return output"#,
         if parts.len() < 7 {
             continue;
         }
-        let notes = parts[6].replace('\r', " ").replace('\n', " ");
+        let notes = parts[6].replace(['\r', '\n'], " ");
         events.push(json!({
             "event_id": parts[0].trim(),
             "title": parts[1].trim(),
@@ -490,7 +490,7 @@ pub(crate) fn parse_iso_components(
     if s.is_empty() {
         return Err(AdapterError::ExecutionFailed("empty ISO datetime".into()));
     }
-    let (date_part, time_part_raw) = match s.find(|c: char| c == 'T' || c == ' ') {
+    let (date_part, time_part_raw) = match s.find(['T', ' ']) {
         Some(i) => (&s[..i], Some(&s[i + 1..])),
         None => (s, None),
     };

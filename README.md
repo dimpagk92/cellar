@@ -62,7 +62,12 @@ First-party and community adapters. Full catalog in [docs/adapter-catalog.md](do
 
 | Adapter | Status | Notes |
 |---|---|---|
-| Browser (CDP + DOM fusion) | Stable | Primary runtime today |
+| Browser (CDP + DOM fusion) | Stable | Primary runtime today; TS (`browser`) + Rust (`browser-rs`) variants share the `browser_dom` truth surface |
+| Apple Calendar | Stable | Create / list / update / delete events via AppleScript document model |
+| Apple Mail | Stable | Compose (no auto-send), send-draft, list inbox, read, search |
+| Apple Messages | Stable | Read-only: list threads, read a thread, search message text |
+| Apple Notes | Stable | Folder-aware note CRUD via AppleScript |
+| Apple Reminders | Stable | Reminder list + item CRUD via AppleScript |
 | Numbers | In progress | Spreadsheet truth via app model, not AX guesswork |
 | Excel | Planned | COM bridge; roadmap in [docs/adapter-roadmap.md](docs/adapter-roadmap.md) |
 | Slack | Planned | Workspace-aware messaging/context |

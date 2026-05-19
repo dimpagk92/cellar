@@ -28,9 +28,8 @@ use crate::tree::*;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::budget::{AppWalkBudget, WalkDecision};
+use crate::budget::AppWalkBudget;
 use crate::cache::SnapshotCache;
-use crate::simhash::SimHash;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -99,18 +98,16 @@ impl AccessibilityTree for WindowsAccessibility {
         // TODO: get focused process name via GetForegroundWindow + GetWindowText
         let app_name = "unknown";
 
-        let max_elements = {
+        let decision = {
             let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
-            match budget.decide(app_name) {
-                WalkDecision::Full => DEFAULT_MAX_ELEMENTS,
-                WalkDecision::Reduced(n) => n,
-                WalkDecision::Skip => {
-                    return Err(AccessibilityError::QueryFailed(
-                        "budget: walk skipped".into(),
-                    ))
-                }
-            }
+            budget.should_walk(app_name)
         };
+        if !decision.walk {
+            return Err(AccessibilityError::QueryFailed(
+                "budget: walk skipped".into(),
+            ));
+        }
+        let max_elements = decision.max_nodes;
 
         // TODO: CoCreateInstance / GetFocusedElement / CreateTreeWalker
         // TODO: walk_tree(element, walker, max_elements, 0)
@@ -120,7 +117,7 @@ impl AccessibilityTree for WindowsAccessibility {
         let elapsed = start.elapsed();
         {
             let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
-            budget.record_walk(app_name, elapsed);
+            budget.record_walk(app_name, elapsed, false);
         }
 
         Err(AccessibilityError::Unavailable)

@@ -55,11 +55,17 @@ Runtime-specific evals are allowed, but they should be clearly isolated and seco
 
 Adapters live under `adapters/`. Two parallel languages, same `AdapterDriver` contract:
 
-- **Rust adapters** (in-process, called via the cortex tick loop):
+- **Rust adapters** (in-process via the cortex tick loop, or out-of-process
+  via `ProcessDriver` against a `cargo build`-produced binary):
   `adapters/numbers`, `adapters/excel`, `adapters/sap-gui`, `adapters/bloomberg`,
-  `adapters/metatrader`, `adapters/browser-rs`.
+  `adapters/metatrader`, `adapters/browser-rs`, plus the Apple-app productivity
+  set `adapters/calendar`, `adapters/mail`, `adapters/messages`, `adapters/notes`,
+  `adapters/reminders` (all macOS, AppleScript-backed document-model adapters).
 - **TypeScript adapters** (out-of-process via `ProcessDriver`, used by the
   LangGraph runtime): `adapters/browser`.
+- **Shared crates**: `adapters/adapter-common` (`AdapterDriver` trait + manifest
+  types) and `adapters/cel-adapter-runtime` (turns a Rust adapter binary into a
+  `ProcessDriver`-compatible JSON-RPC server).
 
 Browser perception is provided by **two** browser adapters that share the same
 conceptual contract: `adapters/browser/` (TS, Playwright + watchdogs) and

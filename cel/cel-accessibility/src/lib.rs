@@ -157,7 +157,7 @@ pub fn create_tree() -> Box<dyn AccessibilityTree> {
         // same way as a regular Err return — headless servers without
         // AT-SPI just get an empty AX tree, which is fine for browser-only
         // CDP goals.
-        let init = std::thread::spawn(|| linux::LinuxAccessibility::new()).join();
+        let init = std::thread::spawn(linux::LinuxAccessibility::new).join();
         match init {
             Ok(Ok(provider)) => return Box::new(provider),
             Ok(Err(e)) => {

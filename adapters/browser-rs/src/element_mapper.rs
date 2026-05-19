@@ -94,10 +94,11 @@ pub fn dom_element_to_context_element(dom: &DomElement, index: usize) -> Context
     // to the bracket index, which the runtime resolves itself.
     let css_selector = if let Some(id) = dom.dom_id.as_deref().filter(|s| !s.is_empty()) {
         Some(format!("#{}", id))
-    } else if let Some(testid) = dom.data_testid.as_deref().filter(|s| !s.is_empty()) {
-        Some(format!("[data-testid=\"{}\"]", testid))
     } else {
-        None
+        dom.data_testid
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|testid| format!("[data-testid=\"{}\"]", testid))
     };
     if let Some(sel) = css_selector {
         properties.insert("css_selector".into(), sel);

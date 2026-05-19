@@ -329,7 +329,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                         &last_batch_purpose,
                         steps_used,
                         &shared_memory,
-                        goal_embedding.as_deref(),
+                        goal_embedding,
                         limits.workflow_id_for_memory.as_deref(),
                         memory_store,
                     )
@@ -344,7 +344,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                         &last_batch_purpose,
                         steps_used,
                         &shared_memory,
-                        goal_embedding.as_deref(),
+                        goal_embedding,
                         limits.workflow_id_for_memory.as_deref(),
                         memory_store,
                     )
@@ -1876,10 +1876,10 @@ fn hash_action(action: &PlannedAction) -> u64 {
 /// Examples that match (all from real Sonnet output):
 /// * "The goal has been accomplished."
 /// * "The goal has already been accomplished - the button was clicked
-///    and the modal appeared as the expected result."
+///   and the modal appeared as the expected result."
 /// * "The button was already clicked successfully in step 1 (history
-///    shows 'ok' status). The modal dialog 'Add New Task' is now open
-///    on screen, which confirms the button click worked."
+///   shows 'ok' status). The modal dialog 'Add New Task' is now open
+///   on screen, which confirms the button click worked."
 ///
 /// Examples that DON'T match (legitimate Fails):
 /// * "Cannot locate the button after 6 attempts" (no success language)
@@ -2130,7 +2130,7 @@ fn closest_dom_id<'p>(target_id: &str, perception: &'p ScreenContext) -> Option<
             // Exact match — caller should have caught this; bail.
             return None;
         }
-        if best.map_or(true, |(bd, _)| d < bd) {
+        if best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, el.id.as_str()));
         }
     }
@@ -2199,9 +2199,7 @@ fn strip_hallucinated_expect_after(
         | PlannedAction::AxAction { expect_after, .. } => expect_after,
         _ => return None,
     };
-    let Some(exp) = expect_slot.as_ref() else {
-        return None;
-    };
+    let exp = expect_slot.as_ref()?;
     let selector = match exp {
         EffectExpectation::SelectorAppears { selector, .. }
         | EffectExpectation::SelectorDisappears { selector, .. }

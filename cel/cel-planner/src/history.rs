@@ -212,7 +212,8 @@ mod tests {
         history.record(
             0,
             PlannedAction::Click {
-                target_id: "btn1".into(), expect_after: None,
+                target_id: "btn1".into(),
+                expect_after: None,
             },
             true,
             None,
@@ -257,7 +258,8 @@ mod tests {
         history.record(
             0,
             PlannedAction::Click {
-                target_id: "btn".into(), expect_after: None,
+                target_id: "btn".into(),
+                expect_after: None,
             },
             true,
             None,
@@ -272,7 +274,8 @@ mod tests {
             StepRecord {
                 step_index: 0,
                 action: PlannedAction::Click {
-                    target_id: "a".into(), expect_after: None,
+                    target_id: "a".into(),
+                    expect_after: None,
                 },
                 success: true,
                 error: None,
@@ -351,7 +354,8 @@ mod tests {
             history.record(
                 i,
                 PlannedAction::Click {
-                    target_id: "btn".into(), expect_after: None,
+                    target_id: "btn".into(),
+                    expect_after: None,
                 },
                 false,
                 Some(format!("Failed: {}", i)),

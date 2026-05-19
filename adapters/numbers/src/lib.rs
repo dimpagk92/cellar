@@ -384,11 +384,7 @@ impl AdapterDriver for NumbersAdapter {
         if action != "write_cells" {
             return Ok(None);
         }
-        if params
-            .get("verify")
-            .and_then(Value::as_bool)
-            == Some(false)
-        {
+        if params.get("verify").and_then(Value::as_bool) == Some(false) {
             return Ok(None);
         }
 
@@ -622,7 +618,10 @@ fn cells_match(expected: &str, actual: &str) -> bool {
         return true;
     }
 
-    match (parse_lenient_number(norm_expected), parse_lenient_number(norm_actual)) {
+    match (
+        parse_lenient_number(norm_expected),
+        parse_lenient_number(norm_actual),
+    ) {
         (Some(left), Some(right)) => (left - right).abs() <= 0.000_001,
         _ => false,
     }

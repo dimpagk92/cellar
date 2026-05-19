@@ -173,10 +173,7 @@ pub fn create_tree() -> Box<dyn AccessibilityTree> {
                             .map(|s| (*s).to_string())
                     })
                     .unwrap_or_else(|| "(non-string panic payload)".into());
-                tracing::warn!(
-                    "AT-SPI2 init panicked, falling back to stub: {}",
-                    msg
-                );
+                tracing::warn!("AT-SPI2 init panicked, falling back to stub: {}", msg);
             }
         }
     }

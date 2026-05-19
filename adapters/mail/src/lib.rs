@@ -129,11 +129,7 @@ impl AdapterDriver for MailAdapter {
         Ok(Vec::new())
     }
 
-    async fn execute(
-        &self,
-        action: &str,
-        params: Value,
-    ) -> Result<ActionResult, AdapterError> {
+    async fn execute(&self, action: &str, params: Value) -> Result<ActionResult, AdapterError> {
         match action {
             "compose" => Ok(ActionResult {
                 success: true,
@@ -279,18 +275,12 @@ fn list_inbox(params: &Value) -> Result<Value, AdapterError> {
         whose_clauses.push("date received > sinceDate".to_string());
     }
     if let Some(f) = &from_filter {
-        whose_clauses.push(format!(
-            "sender contains \"{}\"",
-            applescript_escape(f)
-        ));
+        whose_clauses.push(format!("sender contains \"{}\"", applescript_escape(f)));
     }
     let messages_expr = if whose_clauses.is_empty() {
         "messages of inbox".to_string()
     } else {
-        format!(
-            "(messages of inbox whose {})",
-            whose_clauses.join(" and ")
-        )
+        format!("(messages of inbox whose {})", whose_clauses.join(" and "))
     };
 
     let script = format!(
@@ -484,10 +474,7 @@ pub(crate) fn applescript_escape(s: &str) -> String {
 /// rather than relying on `date "..."` which is locale-dependent. The
 /// initial `set day to 1` guards against current-date being on the 31st
 /// when the target month has fewer days (a well-known AppleScript pitfall).
-pub(crate) fn applescript_date_snippet(
-    iso: &str,
-    var_name: &str,
-) -> Result<String, AdapterError> {
+pub(crate) fn applescript_date_snippet(iso: &str, var_name: &str) -> Result<String, AdapterError> {
     let (year, month, day, hour, minute, second) = parse_iso_components(iso)?;
     let month_name = month_to_applescript(month)?;
     Ok(format!(
@@ -511,8 +498,18 @@ pub(crate) fn applescript_date_snippet(
 
 fn month_to_applescript(month: u32) -> Result<&'static str, AdapterError> {
     let names = [
-        "January", "February", "March", "April", "May", "June", "July", "August",
-        "September", "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     if !(1..=12).contains(&month) {
         return Err(AdapterError::ExecutionFailed(format!(
@@ -579,10 +576,7 @@ pub(crate) fn parse_iso_components(
     let (hour, minute, second) = match time_part {
         Some(t) if !t.is_empty() => {
             let time_parts: Vec<&str> = t.split(':').collect();
-            let h: u32 = time_parts
-                .first()
-                .and_then(|x| x.parse().ok())
-                .unwrap_or(0);
+            let h: u32 = time_parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
             let m: u32 = time_parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
             let sec_str = time_parts.get(2).copied().unwrap_or("0");
             // Drop fractional seconds (e.g. "30.500")
@@ -644,13 +638,11 @@ fn collect_string_array(
     let items: Vec<String> = if let Some(arr) = v.as_array() {
         arr.iter()
             .map(|x| {
-                x.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        AdapterError::ExecutionFailed(format!(
-                            "`{field}` array entries must be strings"
-                        ))
-                    })
+                x.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    AdapterError::ExecutionFailed(format!(
+                        "`{field}` array entries must be strings"
+                    ))
+                })
             })
             .collect::<Result<_, _>>()?
     } else if let Some(s) = v.as_str() {
@@ -862,7 +854,10 @@ mod tests {
     #[test]
     fn collect_string_array_accepts_string_or_array() {
         let p = json!({"to": "alice@example.com"});
-        assert_eq!(collect_string_array(&p, "to", true).unwrap(), vec!["alice@example.com"]);
+        assert_eq!(
+            collect_string_array(&p, "to", true).unwrap(),
+            vec!["alice@example.com"]
+        );
 
         let p = json!({"to": ["alice@example.com", "bob@example.com"]});
         assert_eq!(
@@ -872,7 +867,10 @@ mod tests {
 
         let p = json!({});
         assert!(collect_string_array(&p, "to", true).is_err());
-        assert_eq!(collect_string_array(&p, "cc", false).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            collect_string_array(&p, "cc", false).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

@@ -353,7 +353,8 @@ mod tests {
     #[test]
     fn test_planned_action_click_roundtrip() {
         let action = PlannedAction::Click {
-            target_id: "dom:submit".into(), expect_after: None,
+            target_id: "dom:submit".into(),
+            expect_after: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
@@ -468,7 +469,8 @@ mod tests {
     fn test_all_action_variants_serialize() {
         let actions = vec![
             PlannedAction::Click {
-                target_id: "btn".into(), expect_after: None,
+                target_id: "btn".into(),
+                expect_after: None,
             },
             PlannedAction::Type {
                 target_id: Some("inp".into()),

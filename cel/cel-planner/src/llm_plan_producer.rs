@@ -1362,8 +1362,8 @@ Hope that helps!"#;
         // the regex fallback recovers `verified=false` so the
         // grader signal isn't lost to a truncated response.
         let raw = "{\n  \"verified\": false,\n";
-        let v = parse_verify_done_lenient(raw)
-            .expect("regex fallback should recover from truncation");
+        let v =
+            parse_verify_done_lenient(raw).expect("regex fallback should recover from truncation");
         assert!(!v.verified);
         // `reason` defaults to empty when the field is absent /
         // unrecoverable; that's strictly better than fail-open

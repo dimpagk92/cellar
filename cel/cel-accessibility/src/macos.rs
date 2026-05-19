@@ -1850,10 +1850,7 @@ fn get_ax_state_fast(element: AXUIElementRef, role: &str) -> ElementState {
 /// agent workflows are impossible without per-row labels, so we run a
 /// dedicated cascade for these roles in `build_element`.
 fn is_row_like_role(role: &str) -> bool {
-    matches!(
-        role,
-        "AXRow" | "AXCell" | "AXOutlineRow" | "AXListRow"
-    )
+    matches!(role, "AXRow" | "AXCell" | "AXOutlineRow" | "AXListRow")
 }
 
 /// Cascade attempted for row-like roles. Order matters: `AXLabel` is the
@@ -1881,7 +1878,13 @@ fn row_label_cascade(element: AXUIElementRef) -> Option<String> {
 
 /// Try the cascade attributes on a single element, no recursion.
 fn direct_label_cascade(element: AXUIElementRef) -> Option<String> {
-    for attr in ["AXLabel", "AXValue", "AXDescription", "AXTitle", "AXFilename"] {
+    for attr in [
+        "AXLabel",
+        "AXValue",
+        "AXDescription",
+        "AXTitle",
+        "AXFilename",
+    ] {
         if let Some(s) = get_ax_string(element, attr).filter(|s| !s.trim().is_empty()) {
             return Some(s);
         }
@@ -1903,9 +1906,8 @@ fn descendant_label_cascade(element: AXUIElementRef, depth: usize) -> Option<Str
     {
         return None;
     }
-    let arr: CFArray<CFType> = unsafe {
-        CFArray::wrap_under_get_rule(kids_ref as core_foundation::array::CFArrayRef)
-    };
+    let arr: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_get_rule(kids_ref as core_foundation::array::CFArrayRef) };
     let n = arr.len().min(8);
     for i in 0..n {
         let child_ref = arr.get(i).map(|c| c.as_CFTypeRef() as AXUIElementRef)?;

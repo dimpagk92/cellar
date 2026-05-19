@@ -120,11 +120,7 @@ impl AdapterDriver for CalendarAdapter {
         Ok(Vec::new())
     }
 
-    async fn execute(
-        &self,
-        action: &str,
-        params: Value,
-    ) -> Result<ActionResult, AdapterError> {
+    async fn execute(&self, action: &str, params: Value) -> Result<ActionResult, AdapterError> {
         match action {
             "create_event" => Ok(ActionResult {
                 success: true,
@@ -184,16 +180,10 @@ fn create_event(params: &Value) -> Result<Value, AdapterError> {
         title = applescript_escape(&title),
     );
     if let Some(n) = &notes {
-        props.push_str(&format!(
-            ", description:\"{}\"",
-            applescript_escape(n)
-        ));
+        props.push_str(&format!(", description:\"{}\"", applescript_escape(n)));
     }
     if let Some(l) = &location {
-        props.push_str(&format!(
-            ", location:\"{}\"",
-            applescript_escape(l)
-        ));
+        props.push_str(&format!(", location:\"{}\"", applescript_escape(l)));
     }
 
     let mut attendee_lines = String::new();
@@ -448,10 +438,7 @@ pub(crate) fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-pub(crate) fn applescript_date_snippet(
-    iso: &str,
-    var_name: &str,
-) -> Result<String, AdapterError> {
+pub(crate) fn applescript_date_snippet(iso: &str, var_name: &str) -> Result<String, AdapterError> {
     let (year, month, day, hour, minute, second) = parse_iso_components(iso)?;
     let month_name = month_to_applescript(month)?;
     Ok(format!(
@@ -475,8 +462,18 @@ pub(crate) fn applescript_date_snippet(
 
 fn month_to_applescript(month: u32) -> Result<&'static str, AdapterError> {
     let names = [
-        "January", "February", "March", "April", "May", "June", "July", "August",
-        "September", "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     if !(1..=12).contains(&month) {
         return Err(AdapterError::ExecutionFailed(format!(
@@ -529,10 +526,7 @@ pub(crate) fn parse_iso_components(
     let (hour, minute, second) = match time_part {
         Some(t) if !t.is_empty() => {
             let time_parts: Vec<&str> = t.split(':').collect();
-            let h: u32 = time_parts
-                .first()
-                .and_then(|x| x.parse().ok())
-                .unwrap_or(0);
+            let h: u32 = time_parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
             let m: u32 = time_parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
             let sec_str = time_parts.get(2).copied().unwrap_or("0");
             let sec_int = sec_str.split('.').next().unwrap_or("0");
@@ -590,13 +584,11 @@ fn collect_string_array(
     if let Some(arr) = v.as_array() {
         arr.iter()
             .map(|x| {
-                x.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| {
-                        AdapterError::ExecutionFailed(format!(
-                            "`{field}` array entries must be strings"
-                        ))
-                    })
+                x.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    AdapterError::ExecutionFailed(format!(
+                        "`{field}` array entries must be strings"
+                    ))
+                })
             })
             .collect()
     } else if let Some(s) = v.as_str() {

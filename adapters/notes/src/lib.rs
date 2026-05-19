@@ -212,8 +212,7 @@ impl AdapterDriver for NotesAdapter {
             Some(id) => id.to_string(),
             None => return Ok(None),
         };
-        let body =
-            applescript_get_body(&note_id).map_err(AdapterError::ExecutionFailed)?;
+        let body = applescript_get_body(&note_id).map_err(AdapterError::ExecutionFailed)?;
         Ok(Some(ActionResult {
             success: true,
             error: None,
@@ -505,7 +504,10 @@ fn required_string(params: &Value, field: &str) -> Result<String, AdapterError> 
 }
 
 fn optional_string(params: &Value, field: &str) -> Option<String> {
-    params.get(field).and_then(Value::as_str).map(|s| s.to_string())
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
 }
 
 fn notes_actions() -> HashMap<String, ActionDeclaration> {
@@ -639,6 +641,9 @@ mod tests {
 
     #[test]
     fn applescript_escape_quotes_and_backslashes() {
-        assert_eq!(applescript_escape(r#"he said "hi"\n"#), r#"he said \"hi\"\\n"#);
+        assert_eq!(
+            applescript_escape(r#"he said "hi"\n"#),
+            r#"he said \"hi\"\\n"#
+        );
     }
 }

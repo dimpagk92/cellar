@@ -132,11 +132,7 @@ impl AdapterDriver for MessagesAdapter {
         Ok(Vec::new())
     }
 
-    async fn execute(
-        &self,
-        action: &str,
-        params: Value,
-    ) -> Result<ActionResult, AdapterError> {
+    async fn execute(&self, action: &str, params: Value) -> Result<ActionResult, AdapterError> {
         match action {
             "list_threads" => Ok(ActionResult {
                 success: true,
@@ -594,7 +590,10 @@ mod tests {
     fn normalize_whitespace_collapses_runs() {
         assert_eq!(normalize_whitespace("hello\n\nworld"), "hello world");
         assert_eq!(normalize_whitespace("  a  b  c  "), "a b c");
-        assert_eq!(normalize_whitespace("line\tone\rline\ntwo"), "line one line two");
+        assert_eq!(
+            normalize_whitespace("line\tone\rline\ntwo"),
+            "line one line two"
+        );
         assert_eq!(normalize_whitespace(""), "");
     }
 

@@ -465,11 +465,8 @@ impl CdpClient {
     pub async fn navigate_resilient(&self, url: &str) -> Result<(), CdpError> {
         self.send_command_resilient("Page.enable", serde_json::json!({}))
             .await?;
-        self.send_command_resilient(
-            "Page.navigate",
-            serde_json::json!({ "url": url }),
-        )
-        .await?;
+        self.send_command_resilient("Page.navigate", serde_json::json!({ "url": url }))
+            .await?;
         Ok(())
     }
 
@@ -520,11 +517,7 @@ impl CdpClient {
     /// the swap so concurrent senders don't see a half-open state.
     /// Errors propagate so the caller can fall back if needed.
     async fn reconnect(&self) -> Result<(), CdpError> {
-        let stored_url = self
-            .ws_url
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let stored_url = self.ws_url.lock().map(|g| g.clone()).unwrap_or_default();
 
         let mut last_err: Option<CdpError> = None;
         let mut new_ws = None;

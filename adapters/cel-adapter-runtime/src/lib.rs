@@ -130,7 +130,10 @@ async fn handle<D: AdapterDriver>(adapter: &mut D, req: Request) -> Value {
             // success=true sentinel so the adapter can decide.
             let original_result = serde_json::from_value::<ActionResult>(original_result_value)
                 .unwrap_or_else(|_| ActionResult::ok());
-            match adapter.verify_action(&action, &params, &original_result).await {
+            match adapter
+                .verify_action(&action, &params, &original_result)
+                .await
+            {
                 Ok(Some(verified)) => action_result_to_json(&verified),
                 // None => signal "no verification opinion"; the cortex
                 // ProcessDriver maps any non-ExecuteResponse-shaped

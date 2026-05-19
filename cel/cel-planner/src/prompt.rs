@@ -1926,7 +1926,8 @@ mod tests {
     fn test_resolve_action_indices() {
         let map = vec!["dom:btn1".into(), "dom:input1".into()];
         let mut action = PlannedAction::Click {
-            target_id: "1".into(), expect_after: None,
+            target_id: "1".into(),
+            expect_after: None,
         };
         resolve_action_indices(&mut action, &map);
         match &action {
@@ -1955,7 +1956,8 @@ mod tests {
         history.record(
             0,
             PlannedAction::Click {
-                target_id: "btn1".into(), expect_after: None,
+                target_id: "btn1".into(),
+                expect_after: None,
             },
             true,
             None,

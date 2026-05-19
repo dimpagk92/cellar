@@ -2890,8 +2890,7 @@ async fn wait_for_effect(
             // without CDP exploding" is at least weak evidence of a
             // healthy page.
             let baseline = before_snapshot.unwrap_or("");
-            let baseline_js = serde_json::to_string(baseline)
-                .unwrap_or_else(|_| "\"\"".into());
+            let baseline_js = serde_json::to_string(baseline).unwrap_or_else(|_| "\"\"".into());
             (
                 format!(
                     r#"(() => {{
@@ -3175,7 +3174,10 @@ async fn dispatch_keycombo_via_cdp(
         "nativeVirtualKeyCode": event.vk,
         "modifiers": modifier_mask,
     });
-    if let Err(e) = client.send_command("Input.dispatchKeyEvent", up_params).await {
+    if let Err(e) = client
+        .send_command("Input.dispatchKeyEvent", up_params)
+        .await
+    {
         return crate::adapter::ActionResult::fail(format!("cdp keycombo keyUp: {e}"));
     }
     crate::adapter::ActionResult::ok()
@@ -3204,7 +3206,9 @@ async fn dispatch_type_via_cdp(
                 let js = build_set_value_js(role, id_part, text);
                 return match client.evaluate(&js).await {
                     Ok(v) => check_cdp_ok(v, "typed"),
-                    Err(e) => crate::adapter::ActionResult::fail(format!("cdp type set_value: {e}")),
+                    Err(e) => {
+                        crate::adapter::ActionResult::fail(format!("cdp type set_value: {e}"))
+                    }
                 };
             }
         }

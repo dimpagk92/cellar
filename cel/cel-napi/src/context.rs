@@ -109,12 +109,7 @@ fn resolve_active_display(capture: &dyn cel_display::ScreenCapture) -> Option<u3
     let monitors = capture.list_monitors().ok()?;
     monitors
         .iter()
-        .find(|m| {
-            cx >= m.x
-                && cx < m.x + m.width as i32
-                && cy >= m.y
-                && cy < m.y + m.height as i32
-        })
+        .find(|m| cx >= m.x && cx < m.x + m.width as i32 && cy >= m.y && cy < m.y + m.height as i32)
         .map(|m| m.id)
 }
 

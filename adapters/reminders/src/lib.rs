@@ -118,11 +118,7 @@ impl AdapterDriver for RemindersAdapter {
         Ok(Vec::new())
     }
 
-    async fn execute(
-        &self,
-        action: &str,
-        params: Value,
-    ) -> Result<ActionResult, AdapterError> {
+    async fn execute(&self, action: &str, params: Value) -> Result<ActionResult, AdapterError> {
         match action {
             "add" => Ok(ActionResult {
                 success: true,
@@ -177,15 +173,9 @@ fn add_reminder(params: &Value) -> Result<Value, AdapterError> {
     let notes = optional_string(params, "notes");
 
     let mut date_prelude = String::new();
-    let mut props = format!(
-        "name:\"{}\"",
-        applescript_escape(&title)
-    );
+    let mut props = format!("name:\"{}\"", applescript_escape(&title));
     if let Some(n) = &notes {
-        props.push_str(&format!(
-            ", body:\"{}\"",
-            applescript_escape(n)
-        ));
+        props.push_str(&format!(", body:\"{}\"", applescript_escape(n)));
     }
     if let Some(d) = &due {
         date_prelude.push_str(&applescript_date_snippet(d, "dueDate")?);
@@ -351,20 +341,14 @@ fn update_reminder(params: &Value) -> Result<Value, AdapterError> {
     let mut date_prelude = String::new();
     let mut set_lines: Vec<String> = Vec::new();
     if let Some(t) = &new_title {
-        set_lines.push(format!(
-            "  set name of r to \"{}\"",
-            applescript_escape(t)
-        ));
+        set_lines.push(format!("  set name of r to \"{}\"", applescript_escape(t)));
     }
     if let Some(d) = &new_due {
         date_prelude.push_str(&applescript_date_snippet(d, "newDue")?);
         set_lines.push("  set due date of r to newDue".into());
     }
     if let Some(n) = &new_notes {
-        set_lines.push(format!(
-            "  set body of r to \"{}\"",
-            applescript_escape(n)
-        ));
+        set_lines.push(format!("  set body of r to \"{}\"", applescript_escape(n)));
     }
     let set_block = set_lines.join("\n");
 
@@ -430,10 +414,7 @@ pub(crate) fn applescript_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-pub(crate) fn applescript_date_snippet(
-    iso: &str,
-    var_name: &str,
-) -> Result<String, AdapterError> {
+pub(crate) fn applescript_date_snippet(iso: &str, var_name: &str) -> Result<String, AdapterError> {
     let (year, month, day, hour, minute, second) = parse_iso_components(iso)?;
     let month_name = month_to_applescript(month)?;
     Ok(format!(
@@ -457,8 +438,18 @@ pub(crate) fn applescript_date_snippet(
 
 fn month_to_applescript(month: u32) -> Result<&'static str, AdapterError> {
     let names = [
-        "January", "February", "March", "April", "May", "June", "July", "August",
-        "September", "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     if !(1..=12).contains(&month) {
         return Err(AdapterError::ExecutionFailed(format!(
@@ -509,10 +500,7 @@ pub(crate) fn parse_iso_components(
     let (hour, minute, second) = match time_part {
         Some(t) if !t.is_empty() => {
             let time_parts: Vec<&str> = t.split(':').collect();
-            let h: u32 = time_parts
-                .first()
-                .and_then(|x| x.parse().ok())
-                .unwrap_or(0);
+            let h: u32 = time_parts.first().and_then(|x| x.parse().ok()).unwrap_or(0);
             let m: u32 = time_parts.get(1).and_then(|x| x.parse().ok()).unwrap_or(0);
             let sec_str = time_parts.get(2).copied().unwrap_or("0");
             let sec_int = sec_str.split('.').next().unwrap_or("0");

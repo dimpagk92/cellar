@@ -46,7 +46,7 @@ async function activate(targetApp: string): Promise<void> {
   // avoid pulling in a native helper from a TS-only layer.
   await execFileAsync("osascript", [
     "-e",
-    `tell application "${targetApp.replace(/"/g, '\\"')}" to activate`,
+    `tell application "${targetApp.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}" to activate`,
   ]);
 }
 

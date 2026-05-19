@@ -509,10 +509,11 @@ mod target_ids_tests {
         match a {
             PlannedAction::Click {
                 target_id,
-                expect_after: Some(EffectExpectation::SelectorAppears {
-                    selector,
-                    timeout_ms,
-                }),
+                expect_after:
+                    Some(EffectExpectation::SelectorAppears {
+                        selector,
+                        timeout_ms,
+                    }),
             } => {
                 assert_eq!(target_id, "dom:button:submit");
                 assert_eq!(selector, "#success-message");
@@ -543,18 +544,12 @@ mod target_ids_tests {
 
     #[test]
     fn effect_expectation_all_four_variants_parse() {
-        let appears: EffectExpectation = serde_json::from_str(
-            r#"{"kind":"selector_appears","selector":".success"}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            appears,
-            EffectExpectation::SelectorAppears { .. }
-        ));
-        let disappears: EffectExpectation = serde_json::from_str(
-            r#"{"kind":"selector_disappears","selector":".modal.open"}"#,
-        )
-        .unwrap();
+        let appears: EffectExpectation =
+            serde_json::from_str(r#"{"kind":"selector_appears","selector":".success"}"#).unwrap();
+        assert!(matches!(appears, EffectExpectation::SelectorAppears { .. }));
+        let disappears: EffectExpectation =
+            serde_json::from_str(r#"{"kind":"selector_disappears","selector":".modal.open"}"#)
+                .unwrap();
         assert!(matches!(
             disappears,
             EffectExpectation::SelectorDisappears { .. }
@@ -570,8 +565,7 @@ mod target_ids_tests {
         // `dom_changed` is the diff-based fallback for actions whose
         // post-state isn't a single named selector. No `selector`
         // field — just an optional timeout.
-        let changed: EffectExpectation =
-            serde_json::from_str(r#"{"kind":"dom_changed"}"#).unwrap();
+        let changed: EffectExpectation = serde_json::from_str(r#"{"kind":"dom_changed"}"#).unwrap();
         match changed {
             EffectExpectation::DomChanged { timeout_ms } => {
                 // Default timeout when omitted.

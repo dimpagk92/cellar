@@ -944,8 +944,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                 // of the full list. Bounded so wildly
                                 // different ids (distance >= half the
                                 // target length) don't surface noise.
-                                let closest =
-                                    closest_dom_id(target_id, &perception);
+                                let closest = closest_dom_id(target_id, &perception);
                                 tracing::warn!(
                                     target_id = %target_id,
                                     closest = ?closest,
@@ -2162,9 +2161,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         curr[0] = j + 1;
         for (i, &ai) in a.iter().enumerate() {
             let cost = if ai == bj { 0 } else { 1 };
-            curr[i + 1] = (curr[i] + 1)
-                .min(prev[i + 1] + 1)
-                .min(prev[i] + cost);
+            curr[i + 1] = (curr[i] + 1).min(prev[i + 1] + 1).min(prev[i] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -3272,8 +3269,9 @@ mod tests {
     #[test]
     fn selector_is_verbatim_recognises_data_testid_family() {
         let dom_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let testids: std::collections::HashSet<&str> =
-            ["approve-payment-gateway", "submit-btn"].into_iter().collect();
+        let testids: std::collections::HashSet<&str> = ["approve-payment-gateway", "submit-btn"]
+            .into_iter()
+            .collect();
 
         // Double-quote form.
         assert!(selector_is_verbatim_in_perception(
@@ -3361,8 +3359,7 @@ mod tests {
     #[test]
     fn strip_hallucinated_expect_after_keeps_valid_selector_intact() {
         use cel_contracts::EffectExpectation;
-        let dom_ids: std::collections::HashSet<&str> =
-            ["success-message"].into_iter().collect();
+        let dom_ids: std::collections::HashSet<&str> = ["success-message"].into_iter().collect();
         let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut action = PlannedAction::Click {
             target_id: "1".into(),
@@ -3375,10 +3372,7 @@ mod tests {
         assert!(reason.is_none(), "valid selector should not strip");
         match action {
             PlannedAction::Click { expect_after, .. } => {
-                assert!(
-                    expect_after.is_some(),
-                    "valid expect_after should survive"
-                );
+                assert!(expect_after.is_some(), "valid expect_after should survive");
             }
             _ => unreachable!(),
         }
@@ -3395,9 +3389,7 @@ mod tests {
         let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut action = PlannedAction::Click {
             target_id: "1".into(),
-            expect_after: Some(EffectExpectation::DomChanged {
-                timeout_ms: 2_000,
-            }),
+            expect_after: Some(EffectExpectation::DomChanged { timeout_ms: 2_000 }),
         };
         let reason = strip_hallucinated_expect_after(&mut action, &dom_ids, &testids);
         assert!(reason.is_none(), "DomChanged should never be stripped");
@@ -4518,10 +4510,7 @@ mod tests {
         // A `dom:tr:row-42` vs perception's submit/cancel buttons —
         // edit distance is far above the half-length threshold, so the
         // helper should return None rather than surface garbage.
-        let ctx = perception_with_ids(&[
-            "dom:button:submit",
-            "dom:button:cancel",
-        ]);
+        let ctx = perception_with_ids(&["dom:button:submit", "dom:button:cancel"]);
         let got = super::closest_dom_id("dom:tr:row-42", &ctx);
         assert!(got.is_none(), "unrelated id should not get a suggestion");
     }
@@ -4534,10 +4523,7 @@ mod tests {
 
     #[test]
     fn closest_dom_id_skips_non_dom_elements() {
-        let ctx = perception_with_ids(&[
-            "ax:1234",
-            "dom:button:save",
-        ]);
+        let ctx = perception_with_ids(&["ax:1234", "dom:button:save"]);
         let got = super::closest_dom_id("dom:button:saev", &ctx);
         // Should pick the dom:* one, ignoring the ax:* sibling.
         assert_eq!(got, Some("dom:button:save"));

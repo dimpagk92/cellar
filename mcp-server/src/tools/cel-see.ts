@@ -6,7 +6,7 @@ import {
   discoverCanonicalCdpTargets,
   getCanonicalCdpState,
   normalizeCortexModel,
-} from "@cellar/agent";
+} from "@cellar/agent/runtime";
 import {
   sleep,
   buildUrlMap,
@@ -19,7 +19,7 @@ import {
   axPermissionGuard,
 } from "./shared.js";
 import { persistObservation, readObservation } from "./observations.js";
-import { compressContext, hasActiveSpinner } from "@cellar/agent";
+import { compressContext, hasActiveSpinner } from "@cellar/agent/runtime";
 
 export const celSeeSchema = z.discriminatedUnion("mode", [
   // --- context: full screen context ---
@@ -62,6 +62,15 @@ export const celSeeSchema = z.discriminatedUnion("mode", [
   // --- screenshot ---
   z.object({
     mode: z.literal("screenshot"),
+    display_id: z
+      .number()
+      .optional()
+      .describe(
+        "Optional monitor id (from cel_see mode 'monitors'). When omitted, " +
+          "captures the display containing the frontmost app's key window — important " +
+          "on multi-monitor setups where the primary display may be empty wallpaper " +
+          "while the active app lives on a secondary screen.",
+      ),
   }),
 
   // --- observation: load a previously persisted observation snapshot ---
@@ -209,7 +218,7 @@ export async function handleCelSee(cel: Cel, args: Input) {
             if (pageContent?.body_text && pageContent.body_text.length > 10) {
               // Check if page-text already exists (avoid duplicates)
               const hasPageText = ctx.elements.some(
-                (el: import("@cellar/agent").ContextElement) =>
+                (el: import("@cellar/agent/runtime").ContextElement) =>
                   el.id === "page-text" || el.id?.includes("page-text"),
               );
               if (!hasPageText) {
@@ -226,7 +235,7 @@ export async function handleCelSee(cel: Cel, args: Input) {
                     confidence: 0.9,
                     source: "merged" as const,
                     content_role: "content" as const,
-                  } as import("@cellar/agent").ContextElement,
+                  } as import("@cellar/agent/runtime").ContextElement,
                 ]};
                 cdpEnriched = true;
               }
@@ -385,7 +394,7 @@ export async function handleCelSee(cel: Cel, args: Input) {
       }
 
       case "screenshot": {
-        const buffer = cel.captureScreen();
+        const buffer = cel.captureScreen(args.display_id);
         const base64 = buffer.toString("base64");
         return {
           content: [

@@ -1,0 +1,12 @@
+[package]
+name = "cel-adapter-runtime"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Shared stdio JSON-RPC loop for ProcessDriver adapters — any AdapterDriver impl plugs in"
+
+[dependencies]
+cel-cortex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

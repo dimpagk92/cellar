@@ -1,0 +1,19 @@
+{
+  "manifest_extends": "../browser/manifest.json",
+  "manifest_alias": "browser",
+  "display_name": "Browser (Rust, via cel-cdp)",
+  "runtime": "native",
+  "context": {
+    "element_types": [
+      "button", "input", "link", "select", "textarea",
+      "checkbox", "radio", "combobox", "menuitem", "tab"
+    ],
+    "refresh_ms": 300
+  },
+  "lifecycle": {
+    "requires_frontmost": false,
+    "background_refresh": true,
+    "bootstrap_on_activate": false
+  },
+  "actions": {}
+}

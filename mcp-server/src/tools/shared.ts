@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Cel, ScreenContext, ContextElement, ContextReference } from "@cellar/agent";
+import type { Cel, ScreenContext, ContextElement, ContextReference } from "@cellar/agent/runtime";
 
 /** Async delay. */
 export function sleep(ms: number): Promise<void> {

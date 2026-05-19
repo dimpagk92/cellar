@@ -77,9 +77,9 @@ fn parse_canonical_config(config_json: &str) -> napi::Result<CanonicalJsConfig> 
 async fn run_local_canonical(config: CanonicalJsConfig) -> napi::Result<String> {
     let cortex = crate::cortex::get_cortex_handle()
         .ok_or_else(|| napi::Error::from_reason("Cortex not running — call boot_cortex() first"))?;
-    let llm_client = cel_llm::create_client().map_err(|e| {
+    let llm_client = cel_llm::create_client_with_role(cel_llm::LlmRole::Planner).map_err(|e| {
         napi::Error::from_reason(format!(
-            "LLM client not configured (set CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
+            "LLM client not configured (set CEL_LLM_PLANNER_PROVIDER / CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
         ))
     })?;
     let planner = LlmPlanProducer::new(Arc::new(llm_client));
@@ -121,6 +121,11 @@ fn render_outcome_for_js(outcome: &GoalOutcome) -> serde_json::Value {
             ),
             "failure_report": report,
         }),
+        GoalOutcome::Refused { summary } => serde_json::json!({
+            "status": "Refused",
+            "summary": format!("Clarification needed: {summary}"),
+            "question": summary,
+        }),
     }
 }
 
@@ -129,6 +134,8 @@ struct CanonicalPerceptionSnapshot {
     perception: cel_context::ScreenContext,
     screenshot_base64: Option<String>,
     caps: RuntimeCaps,
+    cortex_anomalies: Vec<cel_cortex::Anomaly>,
+    cortex_freshness: Option<cel_cortex::FreshnessAssessment>,
 }
 
 fn parse_json_or_default<T>(json: &str) -> napi::Result<T>
@@ -185,10 +192,14 @@ pub async fn canonical_perceive(capture_screenshot: Option<bool>) -> napi::Resul
         None
     };
     let caps = executor.capabilities().await;
+    let cortex_anomalies = executor.cortex_anomalies().await;
+    let cortex_freshness = executor.cortex_freshness().await;
     serde_json::to_string(&CanonicalPerceptionSnapshot {
         perception,
         screenshot_base64,
         caps,
+        cortex_anomalies,
+        cortex_freshness,
     })
     .map_err(|e| napi::Error::from_reason(format!("Snapshot serialization failed: {e}")))
 }
@@ -202,9 +213,12 @@ pub async fn canonical_perceive(capture_screenshot: Option<bool>) -> napi::Resul
 /// running.
 ///
 /// **Stateless**: `perception_json` and `caps_json` are both provided.
-/// Skips the cortex entirely and builds the view from the caller's
-/// inputs. Useful for the eval harness, replay tooling, and any caller
-/// that already has a perception snapshot.
+/// Builds the view from the caller's perception/caps. Useful for the eval
+/// harness, replay tooling, and any caller that already has a perception
+/// snapshot.
+/// Optional `adapter_facts_json`, `cortex_anomalies_json`, and
+/// `cortex_freshness_json` can accompany a stateless frame; when omitted
+/// and a cortex is booted, the stateful signals are read live.
 ///
 /// `budget_json` is an optional serialized [`PlanningBudget`]. When
 /// omitted, defaults are used (see `PlanningBudget::default`).
@@ -214,6 +228,9 @@ pub async fn canonical_build_planning_view(
     budget_json: Option<String>,
     perception_json: Option<String>,
     caps_json: Option<String>,
+    adapter_facts_json: Option<String>,
+    cortex_anomalies_json: Option<String>,
+    cortex_freshness_json: Option<String>,
 ) -> napi::Result<String> {
     crate::ensure_tracing_init();
 
@@ -233,6 +250,42 @@ pub async fn canonical_build_planning_view(
             let perception: cel_context::ScreenContext = serde_json::from_str(&p_json)
                 .map_err(|e| napi::Error::from_reason(format!("Invalid perception JSON: {e}")))?;
             let caps: RuntimeCaps = parse_json_or_default(&c_json)?;
+            let adapter_facts: Vec<cel_contracts::AdapterFactRef> =
+                match adapter_facts_json.as_deref() {
+                    Some(json) => parse_json_or_default(json)?,
+                    None => {
+                        if let Some(cortex) = crate::cortex::get_cortex_handle() {
+                            let executor = CortexStepExecutor::new(cortex);
+                            executor.adapter_facts(&goal, &perception).await
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                };
+            let cortex_anomalies: Vec<cel_cortex::Anomaly> = match cortex_anomalies_json.as_deref()
+            {
+                Some(json) => parse_json_or_default(json)?,
+                None => {
+                    if let Some(cortex) = crate::cortex::get_cortex_handle() {
+                        let executor = CortexStepExecutor::new(cortex);
+                        executor.cortex_anomalies().await
+                    } else {
+                        Vec::new()
+                    }
+                }
+            };
+            let cortex_freshness: Option<cel_cortex::FreshnessAssessment> =
+                match cortex_freshness_json.as_deref() {
+                    Some(json) => parse_json_or_default(json)?,
+                    None => {
+                        if let Some(cortex) = crate::cortex::get_cortex_handle() {
+                            let executor = CortexStepExecutor::new(cortex);
+                            executor.cortex_freshness().await
+                        } else {
+                            None
+                        }
+                    }
+                };
             build_planning_view(&PlanningViewInputs {
                 goal: &goal,
                 budget: &budget,
@@ -243,9 +296,9 @@ pub async fn canonical_build_planning_view(
                 workflow_id: None,
                 goal_embedding: None,
                 recent_events_store: None,
-                cortex_anomalies: None,
-                cortex_freshness: None,
-                adapter_facts: None,
+                cortex_anomalies: Some(cortex_anomalies.as_slice()),
+                cortex_freshness: cortex_freshness.as_ref(),
+                adapter_facts: Some(adapter_facts.as_slice()),
             })
         }
         (None, None) => {
@@ -256,8 +309,27 @@ pub async fn canonical_build_planning_view(
                 )
             })?;
             let executor = CortexStepExecutor::new(cortex);
-            let perception = executor.perceive().await;
+            let mut perception = executor.perceive().await;
+            // Cold-start fallback: a freshly booted cortex hasn't ticked
+            // yet, so `current_context` is empty for ~1s. Without this
+            // fallback, the very first plan_view call after boot returns
+            // `elements: []` despite the screen being full of actionable
+            // elements — a foot-gun for any host that calls plan_view
+            // immediately after start. Falls back to a fresh one-shot
+            // ContextMerger fetch (the same path `get_context` uses), so
+            // the caller gets a useful view without having to know about
+            // the warm-up window.
+            if perception.elements.is_empty() {
+                if let Ok(fresh) = crate::context::fetch_fresh_context() {
+                    if !fresh.elements.is_empty() {
+                        perception = fresh;
+                    }
+                }
+            }
             let caps = executor.capabilities().await;
+            let adapter_facts = executor.adapter_facts(&goal, &perception).await;
+            let cortex_anomalies = executor.cortex_anomalies().await;
+            let cortex_freshness = executor.cortex_freshness().await;
             build_planning_view(&PlanningViewInputs {
                 goal: &goal,
                 budget: &budget,
@@ -268,9 +340,9 @@ pub async fn canonical_build_planning_view(
                 workflow_id: None,
                 goal_embedding: None,
                 recent_events_store: None,
-                cortex_anomalies: None,
-                cortex_freshness: None,
-                adapter_facts: None,
+                cortex_anomalies: Some(cortex_anomalies.as_slice()),
+                cortex_freshness: cortex_freshness.as_ref(),
+                adapter_facts: Some(adapter_facts.as_slice()),
             })
         }
         _ => {
@@ -301,9 +373,9 @@ pub async fn canonical_decide_next(
     screenshot_base64: Option<String>,
 ) -> napi::Result<String> {
     crate::ensure_tracing_init();
-    let llm_client = cel_llm::create_client().map_err(|e| {
+    let llm_client = cel_llm::create_client_with_role(cel_llm::LlmRole::Planner).map_err(|e| {
         napi::Error::from_reason(format!(
-            "LLM client not configured (set CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
+            "LLM client not configured (set CEL_LLM_PLANNER_PROVIDER / CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
         ))
     })?;
     let planner = LlmPlanProducer::new(Arc::new(llm_client));
@@ -339,9 +411,9 @@ pub async fn canonical_verify_done(
     screenshot_base64: Option<String>,
 ) -> napi::Result<String> {
     crate::ensure_tracing_init();
-    let llm_client = cel_llm::create_client().map_err(|e| {
+    let llm_client = cel_llm::create_client_with_role(cel_llm::LlmRole::Planner).map_err(|e| {
         napi::Error::from_reason(format!(
-            "LLM client not configured (set CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
+            "LLM client not configured (set CEL_LLM_PLANNER_PROVIDER / CEL_LLM_PROVIDER or ~/.cellar/config.toml): {e}"
         ))
     })?;
     let planner = LlmPlanProducer::new(Arc::new(llm_client));

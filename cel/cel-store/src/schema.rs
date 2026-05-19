@@ -478,8 +478,9 @@ impl crate::cortex_memory::CortexMemoryStore for std::sync::Mutex<CelStore> {
 
 // Tier A1: same Mutex<CelStore> handle implements KnowledgeStore so the
 // canonical runner can pass one shared handle into PlanningViewInputs
-// for both memory and knowledge selection. Empty / whitespace-only
-// query short-circuits to Ok(empty) for parity with WK1's search_memory.
+// for both memory and knowledge selection. The caller passes an already-safe
+// FTS5 MATCH expression; empty / whitespace-only query short-circuits to
+// Ok(empty) for parity with WK1's search_memory.
 impl crate::cortex_memory::KnowledgeStore for std::sync::Mutex<CelStore> {
     fn search_knowledge_for_workflow(
         &self,
@@ -492,7 +493,7 @@ impl crate::cortex_memory::KnowledgeStore for std::sync::Mutex<CelStore> {
             return Ok(Vec::new());
         }
         let guard = self.lock().expect("CelStore Mutex poisoned");
-        guard.search_knowledge(trimmed, workflow_scope, limit as u32)
+        guard.search_knowledge_match(trimmed, workflow_scope, limit as u32)
     }
 }
 

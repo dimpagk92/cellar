@@ -1,11 +1,12 @@
 {
   "name": "@cellar/agent",
   "version": "0.1.0",
-  "description": "CEL workflow execution engine",
+  "description": "CEL runtime surface for trusted computer observation and execution",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
+    "./runtime": "./dist/runtime-surface.js",
     "./interfaces": "./dist/interfaces/index.js",
     "./test-utils": "./dist/test-utils/index.js",
     "./cortex": "./dist/cortex.js",

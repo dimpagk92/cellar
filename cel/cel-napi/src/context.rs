@@ -1,9 +1,14 @@
 use napi_derive::napi;
 
-/// Get the unified screen context — merges all available streams.
-/// Returns JSON string of ScreenContext.
-#[napi]
-pub fn get_context() -> napi::Result<String> {
+/// Build a fresh ScreenContext by spinning up a one-shot ContextMerger.
+///
+/// Used by the napi-exported `get_context` JSON wrapper AND by the
+/// `canonical_build_planning_view` cold-start fallback — when the cortex
+/// is freshly booted and `current_context` is still empty, plan_view
+/// would otherwise return `elements: []` for the first ~1s. Falling back
+/// to a fresh fetch keeps the contract that "plan_view returns a
+/// non-empty view as soon as the cortex is up."
+pub(crate) fn fetch_fresh_context() -> napi::Result<cel_context::ScreenContext> {
     let a11y = cel_accessibility::create_tree();
     let display = cel_display::create_capture();
     let network = cel_network::create_monitor();
@@ -16,17 +21,43 @@ pub fn get_context() -> napi::Result<String> {
         merger = merger.with_vision(vision).with_runtime(handle);
     }
 
-    let context = merger.get_context();
+    Ok(merger.get_context())
+}
+
+/// Get the unified screen context — merges all available streams.
+/// Returns JSON string of ScreenContext.
+#[napi]
+pub fn get_context() -> napi::Result<String> {
+    let context = fetch_fresh_context()?;
     serde_json::to_string(&context).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
 /// Capture a screenshot and return as PNG bytes.
+///
+/// `display_id`:
+///   - Some(n): capture exactly that monitor.
+///   - None: capture the monitor containing the frontmost app's key window
+///     (resolved via cel-signals). Falls back to the primary monitor when no
+///     frontmost window can be located. Behaviour-preserving for callers who
+///     don't pass the parameter on a single-display setup, but correctly
+///     captures the active display on multi-monitor rigs where the frontmost
+///     app is on a secondary display.
 #[napi]
-pub fn capture_screen() -> napi::Result<napi::bindgen_prelude::Buffer> {
+pub fn capture_screen(display_id: Option<u32>) -> napi::Result<napi::bindgen_prelude::Buffer> {
     let mut capture = cel_display::create_capture();
-    let frame = capture
-        .capture_frame()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let frame = match display_id {
+        Some(id) => capture
+            .capture_monitor(id)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+        None => match resolve_active_display(&*capture) {
+            Some(id) => capture
+                .capture_monitor(id)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            None => capture
+                .capture_frame()
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+        },
+    };
     let png =
         cel_display::encode_png(&frame).map_err(|e| napi::Error::from_reason(e.to_string()))?;
     Ok(png.into())
@@ -42,6 +73,49 @@ pub fn capture_window(window_id: u32) -> napi::Result<napi::bindgen_prelude::Buf
     let png =
         cel_display::encode_png(&frame).map_err(|e| napi::Error::from_reason(e.to_string()))?;
     Ok(png.into())
+}
+
+/// List windows from the capture backend. Returns JSON string.
+///
+/// This exposes the same platform capture IDs that `capture_window` expects.
+#[napi]
+pub fn list_capture_windows() -> napi::Result<String> {
+    let capture = cel_display::create_capture();
+    let windows = capture
+        .list_windows()
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    serde_json::to_string(&windows).map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Find the monitor that contains the frontmost app's key window.
+///
+/// Returns None when:
+/// - No frontmost app is detected (lock screen, no AX permissions, etc.).
+/// - The frontmost app has no on-screen window with bounds.
+/// - No monitor's bounds intersect the window's centre.
+///
+/// Callers should fall back to `capture_frame` (primary monitor) when this
+/// returns None — that preserves the pre-multi-display behaviour.
+fn resolve_active_display(capture: &dyn cel_display::ScreenCapture) -> Option<u32> {
+    let bus = cel_signals::create_signal_bus();
+    let snap = bus.snapshot();
+    let frontmost_app = snap.running_apps.iter().find(|a| a.is_frontmost)?;
+    let frontmost_window = snap
+        .window_list
+        .iter()
+        .find(|w| w.app_name == frontmost_app.name && w.is_on_screen)?;
+    let cx = frontmost_window.x + (frontmost_window.width as i32) / 2;
+    let cy = frontmost_window.y + (frontmost_window.height as i32) / 2;
+    let monitors = capture.list_monitors().ok()?;
+    monitors
+        .iter()
+        .find(|m| {
+            cx >= m.x
+                && cx < m.x + m.width as i32
+                && cy >= m.y
+                && cy < m.y + m.height as i32
+        })
+        .map(|m| m.id)
 }
 
 /// List available monitors. Returns JSON string.
@@ -61,18 +135,6 @@ pub fn list_windows() -> napi::Result<String> {
     let bus = cel_signals::create_signal_bus();
     let snap = bus.snapshot();
     serde_json::to_string(&snap.window_list).map_err(|e| napi::Error::from_reason(e.to_string()))
-}
-
-/// List windows from the capture backend. Returns JSON string.
-///
-/// This exposes the same platform capture IDs that `capture_window` expects.
-#[napi]
-pub fn list_capture_windows() -> napi::Result<String> {
-    let capture = cel_display::create_capture();
-    let windows = capture
-        .list_windows()
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-    serde_json::to_string(&windows).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
 /// Create a resilient ContextReference from a ContextElement JSON.

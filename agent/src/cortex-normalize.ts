@@ -51,12 +51,17 @@ export function normalizeCortexModel(raw: unknown): MentalModel | null {
   }
 
   if (parsed.lastDiffSummary) {
-    const diff = parsed.lastDiffSummary;
-    if (diff.added_count !== undefined && diff.addedCount === undefined) diff.addedCount = diff.added_count;
-    if (diff.removed_count !== undefined && diff.removedCount === undefined) diff.removedCount = diff.removed_count;
-    if (diff.changed_count !== undefined && diff.changedCount === undefined) diff.changedCount = diff.changed_count;
-    if (diff.unchanged_count !== undefined && diff.unchangedCount === undefined) {
-      diff.unchangedCount = diff.unchanged_count;
+    normalizeDiffCasing(parsed.lastDiffSummary);
+  }
+  // recentDiffs is renamed above (recent_diffs → recentDiffs) but the items
+  // themselves still carry snake_case `added_count` / `changed_count` /
+  // `removed_count`. cel_perceive feed reads `latestDiff.addedCount`
+  // (camelCase) when computing `actionLanded`, so without this normalization
+  // the field is undefined → `actionLanded` is permanently `false` whenever
+  // a diff is present. Apply the same shape transform per item.
+  if (Array.isArray(parsed.recentDiffs)) {
+    for (const d of parsed.recentDiffs) {
+      if (d && typeof d === "object") normalizeDiffCasing(d);
     }
   }
 
@@ -110,4 +115,19 @@ export function normalizeCortexAnomalies(raw: unknown): Anomaly[] {
   if (!raw) return [];
   const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
   return Array.isArray(parsed) ? parsed as Anomaly[] : [];
+}
+
+/**
+ * Mirror snake_case PerceptionDiff / DiffSummary fields to camelCase in place.
+ * The Rust serializer emits snake_case; downstream TS consumers (cel_perceive
+ * feed, suggestion builders) read camelCase. Used for both lastDiffSummary
+ * and each item in recentDiffs[].
+ */
+function normalizeDiffCasing(diff: Record<string, any>): void {
+  if (diff.added_count !== undefined && diff.addedCount === undefined) diff.addedCount = diff.added_count;
+  if (diff.removed_count !== undefined && diff.removedCount === undefined) diff.removedCount = diff.removed_count;
+  if (diff.changed_count !== undefined && diff.changedCount === undefined) diff.changedCount = diff.changed_count;
+  if (diff.unchanged_count !== undefined && diff.unchangedCount === undefined) diff.unchangedCount = diff.unchanged_count;
+  if (diff.added_labels !== undefined && diff.addedLabels === undefined) diff.addedLabels = diff.added_labels;
+  if (diff.changed_labels !== undefined && diff.changedLabels === undefined) diff.changedLabels = diff.changed_labels;
 }

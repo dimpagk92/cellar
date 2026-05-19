@@ -44,4 +44,37 @@ impl LlmError {
             }
         )
     }
+
+    /// True when the error is a transient transport / network failure that
+    /// the LLM client should retry internally before bubbling up. Covers:
+    ///
+    /// * `RequestFailed` — `reqwest::Error::send()` failures (DNS errors,
+    ///   connection refused, TCP reset, timeout). At runtime these are
+    ///   nearly always transient — DNS hiccups, brief Anthropic
+    ///   gateway flaps, the user's wifi blinking. Without retry they
+    ///   currently kill the run on the first decide_next call (eval saw
+    ///   `error sending request for url (https://api.anthropic.com/...)`
+    ///   take down `browser_desktop_handoff` turn 2 even though every
+    ///   other call in the run succeeded). One transient blip should
+    ///   not be a single point of failure.
+    /// * 5xx server errors EXCEPT 529 (which is rate-limit-style and
+    ///   handled by `is_rate_limited`). 500/502/503/504 are transient
+    ///   server-side issues; the request itself is well-formed and a
+    ///   retry usually succeeds.
+    ///
+    /// `is_transient_network` deliberately excludes 4xx (auth/bad
+    /// request — those won't fix themselves), `NotConfigured`,
+    /// `ParseError`, and the rate-limit statuses (which have their
+    /// own retry policy).
+    pub fn is_transient_network(&self) -> bool {
+        match self {
+            LlmError::RequestFailed(_) => true,
+            LlmError::HttpError { status, .. } => {
+                // 5xx range, excluding the rate-limit-style 529 which
+                // `is_rate_limited` already covers.
+                *status >= 500 && *status < 600 && *status != 529
+            }
+            _ => false,
+        }
+    }
 }

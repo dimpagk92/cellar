@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { assessActionAmbiguity, buildBrowserCallbacks } from "../callback-builder.js";
-import type { ActionOutcome, PlannedAction, ScreenContext } from "@cellar/agent";
+import type { ActionOutcome, PlannedAction, ScreenContext } from "@cellar/agent/runtime";
 
 function makeContext(overrides: Partial<ScreenContext> = {}): ScreenContext {
   return {

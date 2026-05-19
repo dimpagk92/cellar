@@ -13,13 +13,14 @@
 
 import { BrowserAdapter } from "./index.js";
 import type {
-  Cel, PlannedAction, ScreenContext, GoalRunnerCallbacks, Cortex,
+  Cel, PlannedAction, ScreenContext, Cortex,
   ContextElement, AdapterCapabilities,
-} from "@cellar/agent";
-import { executePlannedAction } from "@cellar/agent";
+} from "@cellar/agent/runtime";
+import { executePlannedAction } from "@cellar/agent/runtime";
 import type {
   AdapterInstance, AdapterManifest, AdapterState, AdapterPlatform,
-} from "@cellar/agent";
+} from "@cellar/agent/runtime";
+import type { GoalRunnerCallbacks } from "@cellar/agent";
 
 // ─── Exported Utilities ─────────────────────────────────────────────────────
 
@@ -366,9 +367,9 @@ export interface BrowserCallbackOptions {
   verify?: () => Promise<boolean>;
   /** Optional cortex used for freshness-aware routing and outcome ingestion. */
   cortex?: Cortex | {
-    model: { freshness?: import("@cellar/agent").FreshnessAssessment } | null;
-    readFreshness?(): import("@cellar/agent").FreshnessAssessment;
-    ingestActionOutcome?(outcome: import("@cellar/agent").ActionOutcome): void;
+    model: { freshness?: import("@cellar/agent/runtime").FreshnessAssessment } | null;
+    readFreshness?(): import("@cellar/agent/runtime").FreshnessAssessment;
+    ingestActionOutcome?(outcome: import("@cellar/agent/runtime").ActionOutcome): void;
   };
   /** Goal text for ambiguity-aware routing and resolution. */
   goal?: string;
@@ -664,12 +665,12 @@ export function buildBrowserCallbacks(opts: BrowserCallbackOptions): GoalRunnerC
 
   // Helper: getContextFast with a 5s timeout to prevent 30-84s hangs
   // on empty pages, internal chrome:// pages, or navigating pages.
-  const getContextWithTimeout = async (timeoutMs = 5000): Promise<import("@cellar/agent").ScreenContext> => {
+  const getContextWithTimeout = async (timeoutMs = 5000): Promise<import("@cellar/agent/runtime").ScreenContext> => {
     if (!isCdpConnected) return adapter.getContext();
     try {
       return await Promise.race([
         adapter.getContextFast(),
-        new Promise<import("@cellar/agent").ScreenContext>((_, reject) =>
+        new Promise<import("@cellar/agent/runtime").ScreenContext>((_, reject) =>
           setTimeout(() => reject(new Error("getContextFast timeout")), timeoutMs),
         ),
       ]);
@@ -683,12 +684,12 @@ export function buildBrowserCallbacks(opts: BrowserCallbackOptions): GoalRunnerC
         return {
           app: "Browser", window: title || "Loading...",
           elements: [], timestamp_ms: Date.now(),
-        } as import("@cellar/agent").ScreenContext;
+        } as import("@cellar/agent/runtime").ScreenContext;
       } catch {
         return {
           app: "Browser", window: "Loading...",
           elements: [], timestamp_ms: Date.now(),
-        } as import("@cellar/agent").ScreenContext;
+        } as import("@cellar/agent/runtime").ScreenContext;
       }
     }
   };

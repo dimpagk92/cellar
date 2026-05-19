@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Cel, PlannerStepRecord, PlannedAction, ScreenContext } from "@cellar/agent";
+import type { Cel, PlannerStepRecord, PlannedAction, ScreenContext } from "@cellar/agent/runtime";
 import { textResult, errorResult } from "./shared.js";
 import { ensureCdpChrome } from "../server.js";
 
@@ -118,7 +118,14 @@ export const celThinkSchema = z.discriminatedUnion("mode", [
     run_id: z.number().describe("Run ID from run_start"),
     step_index: z.number(),
     step_id: z.string(),
-    action: z.string().describe("JSON-serialized action taken"),
+    // MCP transports that auto-encode object literals (notably the wire layer
+    // in some hosts) deliver `action` as a JSON object even when callers pass
+    // a string. Accept either shape and coerce to a string before persisting,
+    // so the agent gets a clear contract instead of a zod parse error.
+    action: z
+      .union([z.string(), z.record(z.unknown())])
+      .transform((v) => (typeof v === "string" ? v : JSON.stringify(v)))
+      .describe("Action taken — either a string or an object (will be JSON-stringified)"),
     success: z.boolean(),
     confidence: z.number().min(0).max(1),
     context_snapshot: z.string().optional(),

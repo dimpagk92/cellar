@@ -19,6 +19,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    // Headless daemon: log the grant instructions if AX is denied, but
+    // don't fire the macOS notification (no one is at the terminal to
+    // dismiss it). Continues either way — browser-only / CDP-only
+    // workloads still function without AX.
+    cel_accessibility::ensure_trust_or_log(false);
+
     let port: u16 = std::env::var("CEL_WORKER_PORT")
         .ok()
         .and_then(|s| s.parse().ok())

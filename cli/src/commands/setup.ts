@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel } from "@cellar/agent";
+import { Cel } from "@cellar/agent/runtime";
 
 export const setupCommand = new Command("setup")
   .description("Configure CEL for maximum context depth on this machine")

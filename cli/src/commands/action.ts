@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel } from "@cellar/agent";
+import { Cel } from "@cellar/agent/runtime";
 
 export const actionCommand = new Command("action")
   .description("Execute a quick input action")

@@ -11,7 +11,7 @@
  * Inspired by Stagehand v3's URL anti-hallucination in extract().
  */
 
-import type { ContextElement } from "@cellar/agent";
+import type { ContextElement } from "@cellar/agent/runtime";
 
 /** URL pattern to match in text. */
 const URL_PATTERN = /https?:\/\/[^\s"'<>]+/g;

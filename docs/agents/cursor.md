@@ -91,7 +91,7 @@ What Cursor will do internally:
 
 TODO: screenshot — Cursor composer showing the sequence of CEL tool calls.
 
-## The `see → act` Pattern (Cursor version)
+## The `see -> act -> verify` Pattern (Cursor version)
 
 Cursor's tool loop is a tight read-plan-act loop driven by the model:
 
@@ -100,7 +100,8 @@ loop:
   ctx = cel_see(mode="context")
   if goal_met(ctx): break
   step = cursor_model_decides_next_tool(ctx)
-  cel_act(step)
+  receipt = cel_act(step)
+  verify(receipt)
 ```
 
 Same rules as any other external-agent cookbook:
@@ -108,6 +109,7 @@ Same rules as any other external-agent cookbook:
 1. **Re-observe between action batches.** Element IDs are ephemeral.
 2. **Prefer structured actions.** `ax_action` > `click(x,y)`, `set_value` > `type`, `write_cells` > typing into Numbers cells.
 3. **Batch up to ~4 actions**, then re-observe.
+4. **Record receipts.** A receipt proves dispatch. Verify the user-facing result with readback, CDP/AX state, screenshot, or Cortex diff.
 
 ## Tips
 

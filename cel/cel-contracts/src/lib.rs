@@ -14,14 +14,14 @@ pub mod canonical;
 pub mod producer;
 pub mod view;
 
-pub use actions::{CellWrite, PlannedAction};
+pub use actions::{CellWrite, EffectExpectation, PlannedAction};
 pub use canonical::{
     AttemptRecord, FailureReport, GoalOutcome, NextMove, RunLimits, RuntimeCaps, Step, StepKind,
     StepResult,
 };
-pub use producer::{DoneVerdict, PlanProducer};
+pub use producer::{DoneVerdict, NextActionHint, PlanProducer};
 pub use view::{
-    AdapterFactRef, AnomalyRef, Blocker, CapabilityRef, EventRef, EvidenceRef, KnowledgeRef,
-    MemoryRef, OmittedCounts, PlanningBudget, PlanningElement, PlanningElementState,
+    AdapterActionRef, AdapterFactRef, AnomalyRef, Blocker, CapabilityRef, EventRef, EvidenceRef,
+    KnowledgeRef, MemoryRef, OmittedCounts, PlanningBudget, PlanningElement, PlanningElementState,
     PlanningScreen, PlanningView, RunProgress,
 };

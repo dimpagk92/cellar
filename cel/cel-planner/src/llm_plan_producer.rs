@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cel_contracts::PlanningView;
+use cel_contracts::{AdapterActionRef, PlanningView};
 use cel_llm::{ChatMessage, LlmClient, LlmError};
 
 use crate::canonical::{AttemptRecord, NextMove};
@@ -18,14 +18,14 @@ use crate::canonical::{AttemptRecord, NextMove};
 /// the goal, everything that has happened so far, live perception,
 /// and optionally a screenshot. Decide the NEXT small batch of
 /// actions (1–5 steps). Don't plan further than that; we'll call you
-/// again after running the batch. Terminate with Done or Fail when
-/// appropriate.
-pub const NEXT_MOVE_SYSTEM_PROMPT: &str = r#"
+/// again after running the batch. Terminate with Done, Fail, or
+/// Clarify when appropriate.
+pub const NEXT_MOVE_SYSTEM_PROMPT: &str = r##"
 You are the planner of a macOS automation agent. You are called once
 per turn. Each turn you produce the NEXT small batch of actions for
-the runner to execute, or you signal Done / Fail.
+the runner to execute, or you signal Done / Fail / Clarify.
 
-Return ONLY a JSON object with one of these three shapes:
+Return ONLY a JSON object with one of these four shapes:
 
 1. Batch — do these steps, then you'll be called again:
    {
@@ -43,22 +43,83 @@ Return ONLY a JSON object with one of these three shapes:
 3. Fail — you can't proceed (genuinely impossible, not just hard):
    { "kind": "fail", "reason": "<why>" }
 
+4. Clarify — the goal is too ambiguous or destructive to attempt
+   safely; ASK the user instead of guessing:
+   { "kind": "clarify", "question": "<what you need clarified>" }
+
 Action shapes inside a Step (these are the ONLY legal shapes):
   { "type": "navigate",    "url": "<https url>" }
   { "type": "cdp_eval",    "expression": "<javascript, one line>" }
   { "type": "wait",        "ms": <int> }
   { "type": "activate_app","app_name": "Numbers" }
-  { "type": "ax_action",   "target_id": "<ax:...>", "action": "click", "label": "<verbatim>", "role_hint": "button" }
-  { "type": "set_value",   "target_id": "<ax:...>", "value": "..." }
+  { "type": "ax_action",   "target_id": "<dom:...|ax:...>", "action": "click", "label": "<verbatim>", "role_hint": "button" }
+  { "type": "set_value",   "target_id": "<dom:...|ax:...>", "value": "..." }
   { "type": "type",        "target_id": null, "text": "..." }
   { "type": "key",         "key": "Return" }
   { "type": "key_combo",   "keys": ["Cmd","N"] }
+
+  Optional `expect_after` on click / set_value / ax_action — the
+  runtime polls the page after dispatch and FAILS the action if the
+  expected post-state doesn't materialise within `timeout_ms`
+  (default 2000). Four shapes:
+    "expect_after": {"kind": "selector_appears",     "selector": "#success-message"}
+    "expect_after": {"kind": "selector_disappears",  "selector": ".modal.open"}
+    "expect_after": {"kind": "selector_text_contains","selector": "#status", "substring": "Approved"}
+    "expect_after": {"kind": "dom_changed"}
+
+  `dom_changed` is the fallback when you know the action SHOULD
+  change SOMETHING visible but no single selector captures it
+  (delete-row, tab-switch, "load more", submit→navigate). The
+  runtime captures a before-snapshot at dispatch, polls until the
+  page differs (text length, interactive element count, OR URL),
+  and reports `EffectMissing` if nothing changed within the
+  timeout. Strictly weaker than the selector-based variants — use
+  those when you have a verbatim `selector="..."` from perception;
+  use `dom_changed` when you don't.
+
+  STRICT USAGE RULE — read carefully, this is the most-misused
+  feature:
+
+  Each element in perception comes with a precomputed
+  `selector="..."` attribute (when the element has an HTML `id` or
+  `data-testid`). That is the ONLY value you may use for
+  `expect_after.selector` — paste it verbatim, no translation.
+
+  Examples (correct):
+    Perception line: `[5]<button label="Approve" selector="#btn-approve" />`
+      → `"expect_after": {"kind": "selector_appears", "selector": "#btn-approve"}`
+    Perception line: `[7]<button label="Approve" selector="[data-testid=\"approve-pgw\"]" />`
+      → `"expect_after": {"kind": "selector_appears", "selector": "[data-testid=\"approve-pgw\"]"}`
+
+  If the element you want to assert against has no
+  `selector="..."` on its perception line, OMIT `expect_after`
+  entirely. A missing expectation is STRICTLY BETTER than a
+  hallucinated one — the runtime falls back to verify_done's
+  screenshot grader at end-of-run.
+
+  Do NOT invent CSS classes (`.success`, `.confirmation`,
+  `.modal`, `.thank-you`, `.alert`, `.success-message`, etc.) or
+  attribute-selector guesses (`[data-success]`, `[data-status]`).
+  The runtime will strip your `expect_after` at parse time when
+  the selector isn't in perception, so the bogus assertion does
+  no work; but the planner that doesn't try in the first place
+  saves a turn.
+
+  Symptom you are misusing this feature: history shows
+  `Stripped hallucinated expect_after — selector not in this
+  turn's perception`. That means you invented a selector; just
+  paste from `selector="..."` next time, or omit.
+
+  Without `expect_after` the runtime reports `ok` whenever the
+  click HANDLER ran — not whether the page reacted. That's still
+  the right default unless you have a verbatim selector to assert
+  against.
   Valid key names (case-insensitive): Return, Tab, Escape, Backspace,
   Delete, Space, Up, Down, Left, Right, Home, End, PageUp, PageDown,
   F1..F12, Ctrl, Alt, Shift, Cmd, or a single character. Do NOT write
   "right arrow" / "ArrowDown" / "Enter key" — use "Right", "Down",
   "Return".
-  { "type": "click",       "target_id": "<ax:...>" }
+  { "type": "click",       "target_id": "<dom:...|ax:...>" }
   { "type": "scroll",      "dx": 0, "dy": 200 }
   { "type": "extract_with_fallback",
     "name": "btc_price",
@@ -84,6 +145,22 @@ Core rules (non-negotiable):
   appeared), adapt. Never fire a step that depends on state that
   isn't currently observable.
 
+* **CDP is foreground-independent.** When `cdp_bound=true` in
+  RuntimeCaps, every CDP-routed action (`navigate`,
+  `extract_with_fallback`, `cdp_eval`, and any `set_value` /
+  `click` / `ax_action` with a `dom:*` target_id) lands in the
+  CDP-bound page REGARDLESS of which desktop app is currently
+  frontmost. If perception shows `APP: <some-IDE>` (Claude,
+  Codex, VS Code, Terminal, …) or no AX elements at all, that
+  does NOT mean the browser is broken — headless / non-frontmost
+  Chrome doesn't appear in the AX tree. Trust the CDP action's
+  `ok` result in history. Keep using `set_value` / `ax_action` /
+  `click` (with `dom:*`) for in-page interactions per the Browser
+  routing rule below — those go through CDP just like
+  `cdp_eval` does, but the `dom:*` path is more reliable. The
+  `RuntimeCaps` block names the bound browser and URL — that's
+  the page you're driving, full stop, independent of `APP:`.
+
 * **Never repeat a BANNED action.** The user prompt may include a
   `## BANNED ACTIONS` section listing exact action JSONs that have
   already failed. Emitting any of them again is a hard error — the
@@ -101,11 +178,76 @@ Core rules (non-negotiable):
 * **Small batches.** 1–5 steps per turn. After the batch runs you
   get called again with fresh state. Big commitments are a smell.
 
+* **Done is graded by the runtime, not by your self-report.** When
+  you emit Done, the runtime force-refreshes perception (forces a
+  cortex tick to capture post-action state) and runs a separate
+  grader pass against the fresh view + screenshot. If the grader
+  decides the evidence doesn't support your claim, the runtime
+  rejects the Done and you'll see a `runtime rejected Done: ...`
+  attempt record on the next turn — at which point you should either
+  gather the missing evidence or emit Fail. You don't need to add a
+  "I verified the side-effect" preamble to every Done — the runtime
+  is doing the verification for you. What you DO need to do: only
+  emit Done when you actually believe the goal happened. Emitting
+  Done speculatively to "see what the grader thinks" wastes a turn.
+
+* **Done summaries carry the data.** When the goal is a question
+  ("what number does it show?", "what is the price?", "how many
+  results?") or asks to extract a value, the Done `summary` MUST
+  state the literal answer. "Read the total counter" is a
+  description of the work; "The total is 1000" is the answer. The
+  grader looks for the value in the summary text — vague
+  acknowledgements ("successfully read the counter") fail even when
+  the value sits in shared_memory and the screenshot proves you
+  reached the right page. For action goals (click X, submit Y),
+  describe the side-effect ("Submitted the form, success banner is
+  visible") rather than restating the goal verbatim.
+
+* **Honor the grader's `next_action_hint`.** When a previous
+  AttemptRecord in history has `next_action_hint = retry_last_action`
+  (look for `HINT: re-emit your previous action` in the error
+  string), your next batch MUST contain that exact action again.
+  Do NOT emit a "verify state" / "check current state" batch — the
+  runtime already verified the side-effect didn't materialise.
+  Wasting a turn on verification when the grader explicitly asked
+  for a retry is the exact failure mode this hint exists to prevent.
+  Other hint values:
+    - `different_action`  → switch verbs (click → cdp_eval-with-
+      trusted-event, etc.); same target, different shape.
+    - `different_target`  → re-read perception, find the element
+      that actually corresponds to the goal, dispatch against THAT
+      target_id (not the previous one).
+    - `give_up`           → strongly consider emitting Fail with a
+      specific reason — the grader believes the goal is
+      unachievable from here.
+  When you DO retry, attach `expect_after` to the retried action
+  (see Slice 2's contract) so the runtime catches a second silent
+  failure immediately rather than letting the next turn discover
+  it via verify_done again.
+
 * **target_id rules.** For ax_action/set_value/click the target_id
   MUST appear verbatim in the perception below. NEVER invent a path
   or selector string (`ax:AXApplication/...`, `AXRole='AXButton'`,
   `ax:placeholder-X`, etc.). ALWAYS populate `label` + `role_hint`
   as a fallback.
+
+  For browser-DOM elements you have two valid forms — pick whichever
+  matches perception:
+  1. The bracket index `"5"` (matches the `[5]` shown in front of
+     each element). The runtime resolves it to the real `dom:role:id`
+     for you. Always safe — never out of date.
+  2. The exact `dom:role:<id_part>` string. The `<id_part>` MUST come
+     from a value the perception line surfaces — the `id="..."`
+     attribute, `testid="..."` attribute, or (for inputs) `name`. Do
+     NOT manufacture the id_part by slugifying the visible label —
+     `<button id="btn-export">Export to Notes</button>` is
+     `dom:button:btn-export`, NOT `dom:button:export-to-notes`. The
+     dispatch path does an `id`/`name`/`placeholder`/`aria-label`
+     substring search as a fallback, but a wrong guess fails noisily
+     (`no-match:button:export-to-notes`) and burns a step. If the
+     element has no `id="..."` and no `testid="..."` attribute on
+     its perception line, use the bracket index — that is always
+     correct.
 
 * **Web data extraction.** To read a field from a page, use
   `extract_with_fallback` — NOT raw `cdp_eval` loops. Provide 2-4
@@ -122,25 +264,68 @@ Core rules (non-negotiable):
       history entry — that's your signal the page doesn't surface
       the data and you must move on with the rest of the goal. Do
       NOT try to bypass the auto-null by renaming the field.
-  Reserve raw `cdp_eval` for actions (clicks, scrolls via JS) — not
-  data reads.
+  Reserve raw `cdp_eval` for situations the typed actions can't
+  express — invoking page methods, reading computed styles, scrolling
+  arbitrary distances, dispatching custom events. NOT for data reads
+  (use `extract_with_fallback`) and NOT for clicks/typing on elements
+  already in perception (use `set_value` / `ax_action` / `click` with
+  the `dom:*` target_id — see Browser routing below).
 
-* **Browser routing.** If APP is a browser, EVERY in-page interaction
-  must be `cdp_eval`. Navigation is `navigate` with a DIRECT URL —
-  never type a URL into a search box and press Return, and never
-  use the homepage + search workflow when you already know the
-  target. Examples of direct URLs you should prefer:
+* **Browser routing.** If APP is a browser, in-page interactions
+  follow a strict precedence — pick the FIRST rule that applies:
+
+  1. **`set_value` / `ax_action` / `click` with a `dom:*` target_id**
+     when the perception list contains a matching `dom:*` element.
+     This is the path for filling form fields, clicking known
+     buttons, toggling checkboxes, selecting dropdown options. The
+     runtime routes `dom:*` targets through CDP's JS-click /
+     JS-set-value helpers — atomic, idempotent, and the id_part
+     (`dom:input:email`, `dom:button:submit-btn`) carries the
+     author's HTML `id`/`name`/`aria-label`, so dispatch finds the
+     element by stable identifier rather than a guessed CSS selector.
+     If perception shows `dom:input:email` for the email field, you
+     MUST emit `set_value target_id="dom:input:email"` — not
+     `cdp_eval` with `document.querySelector('#email').value=...`.
+     The `cdp_eval` path is brittle (selectors break on framework
+     re-renders), verbose (you're hand-writing JS), and bypasses the
+     runtime's verification of the action.
+
+  2. **`extract_with_fallback`** for reading data from the page.
+     Already covered above — never use `cdp_eval` for data reads.
+
+  3. **`cdp_eval`** ONLY when (1) and (2) don't apply: invoking page
+     methods, dispatching custom events, scrolling to specific
+     coordinates, reading computed styles, walking shadow DOM that
+     perception didn't surface. Treat this as the escape hatch, not
+     the default.
+  The runtime will REFUSE `ax_action` and `click` with `ax:*`
+  target_ids when the frontmost app is a browser (you'll see
+  "runtime refuses" in history) — `ax:*` is for desktop apps, not
+  web. The RuntimeCaps block above names which browser is CDP-bound
+  — stay on that one.
+
+  Navigation is `navigate` with a DIRECT URL — never type a URL into
+  a search box and press Return, and never use the homepage + search
+  workflow when you already know the target. Examples of direct URLs
+  you should prefer:
     - Yahoo Finance ticker: https://finance.yahoo.com/quote/BTC-USD
       (substitute ETH-USD, SOL-USD, AAPL, etc.)
     - Yahoo Finance historical: https://finance.yahoo.com/quote/BTC-USD/history
     - Yahoo Finance news:       https://finance.yahoo.com/quote/BTC-USD/news
   Repeatedly navigating to the homepage and concluding "the page is
   wrong" is a stall pattern — use the per-asset URL directly.
-  The runtime will REFUSE `ax_action` and `click` with `ax:*`
-  target_ids when the frontmost app is a browser (you'll see
-  "runtime refuses" in history), so don't waste a turn trying. The
-  RuntimeCaps block above names which browser is CDP-bound — stay
-  on that one.
+
+  **Do NOT `navigate` to "go back" or "reload" the current page when
+  perception already shows the elements you need.** If `cdp_current_url`
+  in the runtime caps shows you are on the right page and the element
+  table includes your target, a click that returns `no-match:...` means
+  your `target_id` is wrong, NOT that the page is wrong. Re-read the
+  perception line (`id="..."` / `testid="..."` is the verbatim id_part),
+  use the bracket index as a fallback, or try a different element — do
+  not navigate away and lose page state. Inventing a URL like
+  `https://github.com/...` because the goal mentions a ticket number
+  takes you away from the fixture page and burns the rest of your
+  budget chasing your own re-navigations.
 
 * **Desktop routing.** For desktop apps use `ax_action` with label
   fallback, or prefer a key shortcut when no label is available.
@@ -221,8 +406,147 @@ Core rules (non-negotiable):
   "The page layout has changed and I cannot extract data after 5
   tries with different selectors" IS fail (or partial-Done).
 
+* **Clarify criteria — narrow, not paranoid.** Clarify is the wrong
+  tool for normal hard goals (use Fail), for goals that need more
+  exploration (just take a step), or for goals against unfamiliar UIs
+  (read the perception). Clarify is reserved for THREE specific cases:
+
+    1. **Pronoun without antecedent.** The goal text uses "it", "that
+       one", "this", or "the X" with no specific identifier AND
+       perception shows multiple plausible targets. Example:
+       goal = "Delete it" + dashboard shows ten rows → Clarify "which
+       row?". NOT a clarify case: goal = "Delete the topmost row" or
+       "Approve a deploy" — the qualifier resolves the referent (top
+       row, any pending deploy).
+
+    2. **Irreversible side-effect outside the named scope.** Anything
+       that deletes user data, sends money, posts publicly, sends a
+       message to many recipients, formats/wipes storage, or otherwise
+       has a real-world consequence the user can't undo — AND the goal
+       text doesn't explicitly authorise it. Example:
+       goal = "Clean up the inbox" + the only obvious tool is a
+       "Delete all" button → Clarify. NOT a clarify case: goal =
+       "Mark this email as read", "Approve the deploy", "Acknowledge
+       the alert", "Export the ticket to Notes", "Submit the form" —
+       these are reversible or scoped operations the goal text
+       explicitly authorises.
+
+    3. **Required parameter the user clearly meant to supply.** Goal
+       names a verb that demands a value the goal omits. Example:
+       "Book a flight" (where to?), "Schedule a meeting" (when?),
+       "Rename the file" (to what?). NOT a clarify case: the value is
+       in perception (e.g. "the topmost pending row" + perception
+       shows exactly one pending row), or the goal allows free choice
+       ("write any test message").
+
+  **Default stance: TRY first.** If the goal names a verb and a
+  plausible target exists in perception, attempt it. A failed attempt
+  becomes Fail (or a recoverable retry). A refused-out-of-caution
+  goal is silently expensive — the user wrote the prompt expecting
+  action; refusing inverts the contract.
+
+  Shape:
+    { "kind": "clarify", "question": "<one specific question>" }
+  The question should be ONE focused ask — not a checklist. Example:
+  goal = "Delete it"; the dashboard has multiple rows, none labeled
+  "it" → `{"kind":"clarify","question":"Which item should I delete?
+  I see several rows on the dashboard and 'it' is ambiguous."}`.
+  Bad pattern (do not do this): goal = "Approve a deploy in the live
+  queue" + perception shows pending deploys → Clarify "which one?".
+  "A deploy" + the live queue context resolves the referent — pick
+  the topmost pending row and act.
+
 Output one JSON object. No prose, no markdown fences.
-"#;
+"##;
+
+fn adapter_action_prompt_description(description: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let compact = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+fn render_adapter_actions_prompt(actions: &[AdapterActionRef]) -> String {
+    if actions.is_empty() {
+        return String::new();
+    }
+
+    let mut sorted = actions.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        left.adapter
+            .cmp(&right.adapter)
+            .then(left.action.cmp(&right.action))
+    });
+
+    let mut out = String::new();
+    for action in sorted {
+        let example = serde_json::json!({
+            "type": "custom",
+            "adapter": &action.adapter,
+            "action": &action.action,
+            "params": &action.params_schema,
+        });
+        out.push_str("  ");
+        out.push_str(&serde_json::to_string(&example).unwrap_or_else(|_| "{}".into()));
+        out.push('\n');
+
+        let description = adapter_action_prompt_description(&action.description);
+        out.push_str("    - ");
+        if !description.is_empty() {
+            out.push_str(&description);
+            out.push(' ');
+        }
+        out.push_str(&format!(
+            "[mutates_state={}, requires_verification={}, returns_data={}]\n",
+            action.mutates_state, action.requires_verification, action.returns_data
+        ));
+    }
+    out
+}
+
+/// Build the full system prompt for a planner turn.
+///
+/// Always starts with [`NEXT_MOVE_SYSTEM_PROMPT`] verbatim. When
+/// `PlanningView::adapter_actions` is non-empty, this planner renders the
+/// structured action catalogue at the planner boundary. If an older caller only
+/// supplies `PlanningView::adapter_actions_prompt`, that pre-rendered fragment
+/// remains a transitional fallback.
+///
+/// Without this section the LLM never learns about adapter routing: asked to
+/// "draft an email" it falls through to GUI driving (Cmd+N, AX clicks on
+/// Mail's compose form), which is exactly the failure mode the adapter system
+/// exists to prevent.
+fn build_system_prompt(view: &PlanningView) -> String {
+    let rendered_adapter_actions = render_adapter_actions_prompt(&view.adapter_actions);
+    let adapter_actions = if !rendered_adapter_actions.is_empty() {
+        Some(rendered_adapter_actions.as_str())
+    } else {
+        view.adapter_actions_prompt
+            .as_deref()
+            .filter(|section| !section.is_empty())
+    };
+
+    match adapter_actions {
+        Some(section) => {
+            let mut s = String::with_capacity(NEXT_MOVE_SYSTEM_PROMPT.len() + section.len() + 128);
+            s.push_str(NEXT_MOVE_SYSTEM_PROMPT);
+            s.push_str("\n## App-Specific Actions\n");
+            s.push_str(
+                "These adapter actions are available for the current turn. \
+                Prefer them over GUI keystrokes when the goal matches an \
+                action's description — they bypass focus-loss / keystroke \
+                fragility entirely. Use the exact shape shown.\n\n",
+            );
+            s.push_str(section);
+            s
+        }
+        _ => NEXT_MOVE_SYSTEM_PROMPT.to_string(),
+    }
+}
 
 /// LLM-backed reactive plan producer.
 pub struct LlmPlanProducer {
@@ -250,21 +574,21 @@ impl crate::canonical_plan_producer::PlanProducer for LlmPlanProducer {
         screenshot_png: Option<&[u8]>,
     ) -> Result<NextMove, String> {
         let user = build_user_prompt(goal, history, shared_memory, view);
+        // Static base + per-turn adapter actions catalogue when present.
+        // The runner stamps `view.adapter_actions` from the cortex's active
+        // adapter manifests; this planner renders that structured catalogue
+        // into the system prompt so `{"type":"custom", "adapter":"mail",
+        // "action":...}` is a legal shape.
+        let system = build_system_prompt(view);
         let raw = if let Some(png) = screenshot_png {
-            let data_url = format!("data:image/png;base64,{}", cel_llm::base64_encode(png));
+            let data_url = format!("data:image/jpeg;base64,{}", cel_llm::base64_encode(png));
             self.client
-                .complete_with_image(
-                    NEXT_MOVE_SYSTEM_PROMPT,
-                    &data_url,
-                    &user,
-                    self.max_tokens,
-                    Some("auto"),
-                )
+                .complete_with_image(&system, &data_url, &user, self.max_tokens, Some("auto"))
                 .await
                 .map_err(|e| format!("decide_next (with image) failed: {}", llm_error_message(e)))?
         } else {
             let messages = vec![
-                ChatMessage::text("system", NEXT_MOVE_SYSTEM_PROMPT),
+                ChatMessage::text("system", &system),
                 ChatMessage::text("user", &user),
             ];
             self.client
@@ -286,7 +610,7 @@ impl crate::canonical_plan_producer::PlanProducer for LlmPlanProducer {
     ) -> Result<crate::canonical_plan_producer::DoneVerdict, String> {
         let user = build_verify_done_user_prompt(goal, summary, shared_memory, view);
         let raw = if let Some(png) = screenshot_png {
-            let data_url = format!("data:image/png;base64,{}", cel_llm::base64_encode(png));
+            let data_url = format!("data:image/jpeg;base64,{}", cel_llm::base64_encode(png));
             self.client
                 .complete_with_image(
                     VERIFY_DONE_SYSTEM_PROMPT,
@@ -323,7 +647,11 @@ supported by evidence. You see:
 * A CURRENT screenshot (if provided).
 
 Respond ONLY with JSON:
-  { "verified": true | false, "reason": "<one-sentence why>" }
+  {
+    "verified":         true | false,
+    "reason":           "<one-sentence why>",
+    "next_action_hint": "retry_last_action" | "different_action" | "different_target" | "give_up" | null
+  }
 
 Rules:
 
@@ -340,6 +668,26 @@ Rules:
 * If evidence is inconclusive, verified: false with the reason
   "inconclusive: <what additional observation would settle it>".
 * Do not hallucinate evidence that isn't in the inputs.
+
+`next_action_hint` (set ONLY when verified=false; null when verified=true):
+
+* "retry_last_action" — the agent's last action looks correct in
+  shape (right target, right verb) but the page didn't react. The
+  most useful next move is to re-emit the same action. Use this when
+  perception shows the pre-state still in place (submit button still
+  there, modal still open) AND the goal is something a single click /
+  set_value would accomplish if it actually fired.
+* "different_action" — the action shape is wrong. Same intent,
+  different verb (e.g. switch from `click` to `cdp_eval`-with-
+  trusted-event, or a key shortcut instead of a coordinate click).
+* "different_target" — the action targeted the wrong element. The
+  element it landed on isn't the one the goal needs (e.g. clicked
+  "Approve" on the wrong row, set_value on a similarly-named-but-
+  different field).
+* "give_up" — the goal is unachievable from the current state. The
+  planner should emit Fail rather than burn more budget.
+* null — uncertain, or no clear hint applies. Default to null when
+  in doubt — false positives here are worse than no signal.
 
 Return ONLY the JSON object. No prose, no markdown fences.
 "#;
@@ -383,23 +731,179 @@ fn build_verify_done_user_prompt(
 fn parse_verify_done_lenient(
     raw: &str,
 ) -> Result<crate::canonical_plan_producer::DoneVerdict, String> {
-    let trimmed = strip_code_fence(raw).trim();
     #[derive(serde::Deserialize)]
     struct Raw {
         verified: bool,
         #[serde(default)]
         reason: String,
+        /// Optional categorical hint added in the Slice 3 grader
+        /// prompt update. Older grader responses (or older parsers
+        /// reading this raw shape) omit the field, defaulting to
+        /// None.
+        #[serde(default)]
+        next_action_hint: Option<cel_contracts::NextActionHint>,
     }
-    let parsed: Raw = serde_json::from_str(trimmed).map_err(|e| {
-        format!(
-            "{e} (raw starts: {:?})",
-            &trimmed.chars().take(80).collect::<String>()
-        )
-    })?;
-    Ok(crate::canonical_plan_producer::DoneVerdict {
-        verified: parsed.verified,
-        reason: parsed.reason,
+    let candidate = extract_json_object(raw);
+    match serde_json::from_str::<Raw>(&candidate) {
+        Ok(parsed) => Ok(crate::canonical_plan_producer::DoneVerdict {
+            verified: parsed.verified,
+            reason: parsed.reason,
+            next_action_hint: parsed.next_action_hint,
+        }),
+        Err(e) => {
+            // Last-resort regex fallback for truncated / malformed
+            // responses (seen with Gemini Flash: the model emits
+            // `{"verified": false,\n` then hits its token cap before
+            // closing the object). If we can recover the `verified`
+            // boolean from a partial response, that's strictly more
+            // useful than fail-open's "accept the Done". `reason` is
+            // best-effort; `next_action_hint` falls back to None.
+            if let Some(verdict) = extract_verdict_via_regex(raw) {
+                tracing::warn!(
+                    "verify_done JSON parse failed (\"{e}\") but regex \
+                     fallback recovered verified={}",
+                    verdict.verified,
+                );
+                return Ok(verdict);
+            }
+            Err(format!(
+                "{e} (raw starts: {:?})",
+                &candidate.chars().take(80).collect::<String>()
+            ))
+        }
+    }
+}
+
+/// Try to pull a JSON object out of a free-form LLM response.
+///
+/// Handles the response shapes we've seen models produce:
+///   * `{"verified": true, ...}` — clean JSON, return as-is.
+///   * `\`\`\`json\n{...}\n\`\`\`` — markdown code fence around JSON.
+///   * `Here's the verdict: {...}` — prose preamble + JSON.
+///   * `{...} The reason is...` — JSON + trailing prose.
+///   * Combination of the above.
+///
+/// Algorithm: strip code fences, then scan for the first `{`. If
+/// found, walk forward tracking brace depth and quote state until
+/// depth returns to zero (closing brace) or end-of-string. Return
+/// the spanning substring. When no `{` is found, return the trimmed
+/// input untouched — serde will give a clear error.
+fn extract_json_object(raw: &str) -> String {
+    let stripped = strip_code_fence(raw);
+    let trimmed = stripped.trim();
+    let Some(start) = trimmed.find('{') else {
+        return trimmed.to_string();
+    };
+    let bytes = trimmed.as_bytes();
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut end = trimmed.len();
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    trimmed[start..end].to_string()
+}
+
+/// Regex-style fallback for truncated grader responses. The grader
+/// prompt asks for `{"verified": true|false, "reason": "...",
+/// "next_action_hint": ...}`. When the model emits a truncated
+/// response we can still recover at least the `verified` boolean
+/// and (sometimes) the `reason` string by string-matching the keys.
+///
+/// Returns None when even the `verified` field isn't extractable
+/// — at which point the caller surfaces the original parse error
+/// and the fail-open path takes over.
+fn extract_verdict_via_regex(raw: &str) -> Option<crate::canonical_plan_producer::DoneVerdict> {
+    let verified = extract_bool_field(raw, "verified")?;
+    let reason = extract_string_field(raw, "reason").unwrap_or_default();
+    let hint_raw = extract_string_field(raw, "next_action_hint");
+    let next_action_hint = hint_raw.and_then(|s| {
+        // Same names as the NextActionHint enum's serde variants.
+        match s.as_str() {
+            "retry_last_action" => Some(cel_contracts::NextActionHint::RetryLastAction),
+            "different_action" => Some(cel_contracts::NextActionHint::DifferentAction),
+            "different_target" => Some(cel_contracts::NextActionHint::DifferentTarget),
+            "give_up" => Some(cel_contracts::NextActionHint::GiveUp),
+            _ => None,
+        }
+    });
+    Some(crate::canonical_plan_producer::DoneVerdict {
+        verified,
+        reason,
+        next_action_hint,
     })
+}
+
+/// Find `"<key>": true` or `"<key>": false` in free-form text.
+fn extract_bool_field(text: &str, key: &str) -> Option<bool> {
+    let needle_true = format!("\"{key}\": true");
+    let needle_true_compact = format!("\"{key}\":true");
+    let needle_false = format!("\"{key}\": false");
+    let needle_false_compact = format!("\"{key}\":false");
+    if text.contains(&needle_true) || text.contains(&needle_true_compact) {
+        Some(true)
+    } else if text.contains(&needle_false) || text.contains(&needle_false_compact) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Find `"<key>": "<value>"` in free-form text. Handles simple
+/// strings; doesn't try to decode escapes (a backslash in the
+/// fallback value is a corner-case worth accepting since this path
+/// is best-effort recovery from a broken response anyway).
+fn extract_string_field(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let key_pos = text.find(&needle)?;
+    let after_key = &text[key_pos + needle.len()..];
+    let trimmed = after_key.trim_start();
+    let after_quote = trimmed.strip_prefix('"')?;
+    // Scan to the closing quote, skipping escaped quotes.
+    let bytes = after_quote.as_bytes();
+    let mut i = 0;
+    let mut escape = false;
+    while i < bytes.len() {
+        if escape {
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'\\' {
+            escape = true;
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            return Some(after_quote[..i].to_string());
+        }
+        i += 1;
+    }
+    None
 }
 
 fn strip_code_fence(s: &str) -> &str {
@@ -504,6 +1008,19 @@ pub fn build_user_prompt(
         out.push_str("\n## What has happened so far (oldest first)\n");
         for (i, rec) in history.iter().enumerate().take(40) {
             let status = if rec.succeeded { "ok" } else { "err" };
+            // Truncation budgets:
+            // - succeeded rows: 180 chars is enough — "ok"-side errors
+            //   are rare and short (recoverable-warning style).
+            // - failed rows: 600 chars. The runtime's structured
+            //   rejection messages name the AVAILABLE element ids,
+            //   suggest the closest match, and tell the planner to
+            //   re-read perception. Truncating at 180 amputated all
+            //   that signal and the planner kept re-emitting the same
+            //   hallucinated target. Eval evidence (server-runs/
+            //   eval-2026-05-14): a 399-char "Available dom:* ids: …"
+            //   list cut to 180 → planner sees the "your target was
+            //   refused" verdict but NOT the suggested replacement.
+            let err_max = if rec.succeeded { 180 } else { 600 };
             out.push_str(&format!(
                 "{:>2}. [{}] {} → action={} {}\n",
                 i + 1,
@@ -512,7 +1029,7 @@ pub fn build_user_prompt(
                 action_kind(&rec.action),
                 rec.error
                     .as_deref()
-                    .map(|e| format!("error=\"{}\"", truncate(e, 180)))
+                    .map(|e| format!("error=\"{}\"", truncate(e, err_max)))
                     .unwrap_or_default()
             ));
         }
@@ -653,16 +1170,24 @@ pub fn build_user_prompt(
         }
     }
 
-    out.push_str("\nReturn the next move (batch / done / fail) as JSON now.");
+    out.push_str("\nReturn the next move (batch / done / fail / clarify) as JSON now.");
     out
 }
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+        return s.to_string();
     }
+    // Walk to a char boundary at or below `max` so multibyte content
+    // (emoji, CJK, Greek, …) doesn't panic. `s.is_char_boundary(max)`
+    // already returns true on ASCII bytes so this is a no-op for the
+    // common case. Surfaced by a messages.read_thread response that
+    // included Greek text in a snippet.
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &s[..cut])
 }
 
 /// Produce the "do NOT repeat" list — each entry is a one-line JSON
@@ -758,6 +1283,167 @@ mod tests {
     use crate::types::PlannedAction;
 
     #[test]
+    fn verify_done_parser_extracts_next_action_hint_when_present() {
+        let raw = r#"{
+            "verified": false,
+            "reason": "Send Message button still present and accessible — submission did not occur",
+            "next_action_hint": "retry_last_action"
+        }"#;
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(!v.verified);
+        assert!(v.reason.contains("Send Message"));
+        assert_eq!(
+            v.next_action_hint,
+            Some(cel_contracts::NextActionHint::RetryLastAction)
+        );
+    }
+
+    #[test]
+    fn verify_done_parser_handles_missing_hint_back_compat() {
+        // Pre-Slice-3 grader responses don't include `next_action_hint`.
+        // The parser must still accept them — defaulting the field to
+        // None — so any cached/stale grader behaviour keeps working.
+        let raw = r#"{"verified": true, "reason": ""}"#;
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(v.verified);
+        assert!(v.next_action_hint.is_none());
+    }
+
+    #[test]
+    fn verify_done_parser_handles_explicit_null_hint() {
+        // The grader prompt says to emit `null` when uncertain. Confirm
+        // explicit null parses as None (not as a parse error).
+        let raw = r#"{
+            "verified": false,
+            "reason": "page is mid-transition; recheck after wait",
+            "next_action_hint": null
+        }"#;
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(!v.verified);
+        assert!(v.next_action_hint.is_none());
+    }
+
+    #[test]
+    fn verify_done_parser_strips_prose_preamble() {
+        // Gemini Flash sometimes emits prose before the JSON. The
+        // extractor should scan past it to the first `{` and parse
+        // the rest.
+        let raw = r#"Sure, here's the verdict:
+
+{"verified": true, "reason": "All good"}
+
+Hope that helps!"#;
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(v.verified);
+        assert_eq!(v.reason, "All good");
+    }
+
+    #[test]
+    fn verify_done_parser_handles_nested_braces_in_reason() {
+        // Don't stop at the first `}` — track brace depth properly.
+        // A reason string can contain unrelated braces in transcript
+        // snippets, and `next_action_hint` is itself a nested value.
+        let raw = r#"{
+            "verified": false,
+            "reason": "found a stray { in the page text",
+            "next_action_hint": null
+        }"#;
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(!v.verified);
+        assert!(v.reason.contains("stray {"));
+    }
+
+    #[test]
+    fn verify_done_parser_regex_fallback_recovers_from_truncation() {
+        // The 2026-05-14 server-eval log caught Gemini emitting:
+        //     {
+        //       "verified": false,
+        // ...and stopping there, mid-JSON. Strict parsing fails;
+        // the regex fallback recovers `verified=false` so the
+        // grader signal isn't lost to a truncated response.
+        let raw = "{\n  \"verified\": false,\n";
+        let v = parse_verify_done_lenient(raw)
+            .expect("regex fallback should recover from truncation");
+        assert!(!v.verified);
+        // `reason` defaults to empty when the field is absent /
+        // unrecoverable; that's strictly better than fail-open
+        // accepting the Done.
+        assert_eq!(v.reason, "");
+    }
+
+    #[test]
+    fn verify_done_parser_regex_fallback_recovers_reason_when_complete() {
+        // Truncation after `"reason"` field but before close-brace:
+        // strict parse fails, regex picks up both `verified` and
+        // the partially-present `reason`.
+        let raw = r#"{
+            "verified": true,
+            "reason": "submitted form successfully",
+            "next_action_hint": "retry_last_action""#;
+        // Note: no closing `}` — truncated.
+        let v = parse_verify_done_lenient(raw).expect("parse via fallback");
+        assert!(v.verified);
+        assert_eq!(v.reason, "submitted form successfully");
+        assert_eq!(
+            v.next_action_hint,
+            Some(cel_contracts::NextActionHint::RetryLastAction)
+        );
+    }
+
+    #[test]
+    fn extract_json_object_walks_brace_depth() {
+        // Multiple nested objects — scanner must walk to the
+        // matching outer brace, not the first close-brace.
+        let raw = r#"prelude {"a": {"b": "c"}, "d": 1} trailing"#;
+        let extracted = extract_json_object(raw);
+        assert_eq!(extracted, r#"{"a": {"b": "c"}, "d": 1}"#);
+    }
+
+    #[test]
+    fn extract_json_object_handles_strings_with_braces() {
+        // A brace inside a string literal isn't a JSON close-brace.
+        let raw = r#"{"text": "looks like a { brace"}"#;
+        let extracted = extract_json_object(raw);
+        assert_eq!(extracted, raw);
+    }
+
+    #[test]
+    fn extract_json_object_handles_escaped_quotes_in_strings() {
+        let raw = r#"{"text": "an escaped \" inside"}"#;
+        let extracted = extract_json_object(raw);
+        assert_eq!(extracted, raw);
+    }
+
+    #[test]
+    fn verify_done_parser_handles_all_hint_variants() {
+        for (label, raw_hint, expected) in [
+            (
+                "retry",
+                "retry_last_action",
+                cel_contracts::NextActionHint::RetryLastAction,
+            ),
+            (
+                "different action",
+                "different_action",
+                cel_contracts::NextActionHint::DifferentAction,
+            ),
+            (
+                "different target",
+                "different_target",
+                cel_contracts::NextActionHint::DifferentTarget,
+            ),
+            ("give up", "give_up", cel_contracts::NextActionHint::GiveUp),
+        ] {
+            let raw = format!(
+                r#"{{"verified":false,"reason":"x","next_action_hint":"{}"}}"#,
+                raw_hint
+            );
+            let v = parse_verify_done_lenient(&raw).expect(label);
+            assert_eq!(v.next_action_hint, Some(expected), "label={label}");
+        }
+    }
+
+    #[test]
     fn parses_batch_next_move() {
         let raw = r#"{
           "kind": "batch",
@@ -791,6 +1477,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_clarify_next_move() {
+        // The Clarify terminal — the planner emits this when the goal
+        // is too ambiguous or destructive to attempt safely. Lock the
+        // serde tag down so a rename can't silently break the prompt.
+        let raw = r#"{"kind":"clarify","question":"Which item should I delete?"}"#;
+        let mv = parse_next_move_lenient(raw).expect("parse");
+        match mv {
+            NextMove::Clarify { question } => {
+                assert!(
+                    question.contains("delete"),
+                    "question should round-trip verbatim, got {question:?}"
+                );
+            }
+            other => panic!("expected clarify, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_empty_batch() {
         let raw = r#"{"kind":"batch","purpose":"x","steps":[]}"#;
         let err = parse_next_move_lenient(raw).unwrap_err();
@@ -805,15 +1509,24 @@ mod tests {
     }
 
     #[test]
-    fn history_rendering_truncates_error() {
+    fn history_rendering_truncates_failed_error_at_600() {
+        // Failed rows get a 600-char window (bumped from 180) so the
+        // runtime's structured rejection messages — which name the
+        // AVAILABLE element ids and the closest match — reach the
+        // planner intact. Strings longer than 600 still get the
+        // ellipsis treatment.
         let rec = AttemptRecord {
             step_purpose: "click Blank".into(),
             action: PlannedAction::Navigate {
                 url: "https://x/".into(),
+                wait_until: None,
+                timeout_ms: None,
+                dismiss_overlays: None,
             },
             succeeded: false,
-            error: Some("a".repeat(500)),
+            error: Some("a".repeat(900)),
             data: serde_json::Value::Null,
+            next_action_hint: None,
         };
         let out = build_user_prompt(
             "do the thing",
@@ -824,7 +1537,87 @@ mod tests {
         assert!(out.contains("error=\""));
         assert!(
             out.contains("…"),
-            "long error should be truncated with ellipsis"
+            "900-char failed-row error should be truncated with ellipsis"
+        );
+    }
+
+    #[test]
+    fn history_rendering_preserves_full_rejection_message_under_600() {
+        // The motivating real-world failure: the runtime rejects a
+        // hallucinated dom:* target and packs the recovery hint
+        // ("Available dom:* ids: ...", "Closest match: ...") into
+        // ~400 chars. The old 180-char window amputated this signal.
+        // Pin the new behaviour: a ~400-char failed-row message
+        // round-trips intact.
+        let realistic = "runtime refused: target_id \"dom:button:purge-all-user-sessions\" \
+             is not in the current perception. Closest match in this turn's perception: \
+             \"dom:button:purge-all-sessions\" — use that id verbatim if it's the element \
+             you meant. Pick a verbatim id from this turn's element table (the [N] bracket \
+             index is always safe), or a different action. Available dom:* ids: \
+             dom:button:purge-all-sessions, dom:button:cancel, dom:input:reason";
+        assert!(realistic.len() < 600, "test fixture should fit the window");
+        let rec = AttemptRecord {
+            step_purpose: "Click Purge button".into(),
+            action: PlannedAction::Click {
+                target_id: "dom:button:purge-all-user-sessions".into(),
+                expect_after: None,
+            },
+            succeeded: false,
+            error: Some(realistic.to_string()),
+            data: serde_json::Value::Null,
+            next_action_hint: Some(cel_contracts::NextActionHint::DifferentTarget),
+        };
+        let out = build_user_prompt(
+            "purge sessions",
+            std::slice::from_ref(&rec),
+            &serde_json::json!({}),
+            &empty_view(),
+        );
+        // History block must contain the actual suggested closest-match
+        // id (this is the single piece of info the planner needs to
+        // recover with a one-token edit).
+        assert!(
+            out.contains("dom:button:purge-all-sessions"),
+            "the suggested closest-match id must survive history rendering, \
+             got: {out}"
+        );
+        assert!(
+            out.contains("Closest match"),
+            "the 'Closest match' label must survive"
+        );
+        assert!(
+            out.contains("Available dom:* ids"),
+            "the suggestions list label must survive"
+        );
+    }
+
+    #[test]
+    fn history_rendering_still_truncates_successful_rows_at_180() {
+        // Successful rows keep the conservative 180-char window — "ok"
+        // entries rarely carry meaningful errors and we don't want
+        // every successful turn padding the prompt with junk.
+        let rec = AttemptRecord {
+            step_purpose: "click Blank".into(),
+            action: PlannedAction::Navigate {
+                url: "https://x/".into(),
+                wait_until: None,
+                timeout_ms: None,
+                dismiss_overlays: None,
+            },
+            succeeded: true,
+            error: Some("b".repeat(400)),
+            data: serde_json::Value::Null,
+            next_action_hint: None,
+        };
+        let out = build_user_prompt(
+            "do the thing",
+            std::slice::from_ref(&rec),
+            &serde_json::json!({}),
+            &empty_view(),
+        );
+        assert!(
+            out.contains("…"),
+            "400-char succeeded-row error should still truncate at 180"
         );
     }
 
@@ -835,6 +1628,7 @@ mod tests {
             screen: cel_contracts::PlanningScreen::default(),
             elements: vec![],
             adapter_facts: vec![],
+            adapter_actions: vec![],
             capabilities: vec![],
             memories: vec![],
             knowledge: vec![],
@@ -845,7 +1639,53 @@ mod tests {
             selection_rationale: None,
             omitted_counts: cel_contracts::OmittedCounts::default(),
             run_progress: cel_contracts::RunProgress::default(),
+            adapter_actions_prompt: None,
         }
+    }
+
+    #[test]
+    fn system_prompt_prefers_structured_adapter_actions() {
+        let mut view = empty_view();
+        view.adapter_actions_prompt = Some("legacy adapter prompt".into());
+        view.adapter_actions.push(cel_contracts::AdapterActionRef {
+            adapter: "mail".into(),
+            action: "compose".into(),
+            params_schema: std::collections::BTreeMap::from([
+                ("body".into(), "string".into()),
+                ("to".into(), "string|string[]".into()),
+            ]),
+            description: "Create a draft without sending it.".into(),
+            mutates_state: true,
+            requires_verification: false,
+            returns_data: true,
+        });
+
+        let out = build_system_prompt(&view);
+        assert!(out.contains("## App-Specific Actions"));
+        assert!(out.contains(r#""type":"custom""#));
+        assert!(out.contains(r#""adapter":"mail""#));
+        assert!(out.contains(r#""action":"compose""#));
+        assert!(out.contains(r#""body":"string""#));
+        assert!(out.contains("mutates_state=true"));
+        assert!(out.contains("requires_verification=false"));
+        assert!(out.contains("returns_data=true"));
+        assert!(!out.contains("legacy adapter prompt"));
+    }
+
+    #[test]
+    fn system_prompt_falls_back_to_transitional_adapter_prompt() {
+        let mut view = empty_view();
+        view.adapter_actions_prompt = Some("  legacy-section\n".into());
+
+        let out = build_system_prompt(&view);
+        assert!(out.contains("## App-Specific Actions"));
+        assert!(out.contains("legacy-section"));
+    }
+
+    #[test]
+    fn system_prompt_omits_adapter_section_when_no_actions_exist() {
+        let out = build_system_prompt(&empty_view());
+        assert!(!out.contains("## App-Specific Actions"));
     }
 
     #[test]
@@ -891,6 +1731,7 @@ mod tests {
             element_id: Some("dom:cookie-accept".into()),
         });
         view.adapter_facts.push(cel_contracts::AdapterFactRef {
+            id: None,
             adapter: "numbers".into(),
             kind: "table".into(),
             payload: serde_json::json!({"sheet":"Sheet 1","rows":12,"cols":8}),

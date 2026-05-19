@@ -17,7 +17,7 @@
  */
 
 import type { Page } from "playwright";
-import type { ContextElement, Bounds, ElementState } from "@cellar/agent";
+import type { ContextElement, Bounds, ElementState } from "@cellar/agent/runtime";
 import type { CdpChannel } from "./cdp-channel.js";
 import {
   extractA11yTree,

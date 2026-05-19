@@ -120,7 +120,20 @@ pub fn estimate_image_tokens(width: u32, height: u32, detail: &str) -> usize {
 ///
 /// Returns `LlmError::NotConfigured` (with instructions) if neither source yields a provider.
 pub fn create_client() -> Result<LlmClient, LlmError> {
-    let config = LlmProviderConfig::from_env()
+    create_client_with_role(LlmRole::General)
+}
+
+/// Create an [`LlmClient`] for a specific [`LlmRole`].
+///
+/// Lets callers pick up role-specific env overrides (e.g. `CEL_LLM_PLANNER_*`)
+/// before falling back to general (`CEL_LLM_*`), provider-specific
+/// (`ANTHROPIC_API_KEY`, …), or `~/.cellar/config.toml`.
+///
+/// This is the entry point planner / observer / vision call sites should use —
+/// otherwise the role's dedicated env vars are silently ignored and only the
+/// general config takes effect.
+pub fn create_client_with_role(role: LlmRole) -> Result<LlmClient, LlmError> {
+    let config = LlmProviderConfig::from_env_with_role(role)
         .or_else(LlmProviderConfig::from_config_file)
         .ok_or(LlmError::NotConfigured)?;
     LlmClient::new(config)

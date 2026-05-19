@@ -1,11 +1,12 @@
 {
   "name": "cellar",
   "private": true,
-  "description": "Open source desktop agent runtime — powered by CEL (Context Execution Layer)",
+  "description": "Open source trust and execution layer for AI-operated computers",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "lint": "pnpm -r lint",
+    "lint": "pnpm -r lint && node scripts/check-agent-boundary.mjs",
+    "lint:boundary": "node scripts/check-agent-boundary.mjs",
     "clean": "pnpm -r exec rm -rf dist"
   },
   "devDependencies": {

@@ -1,0 +1,68 @@
+{
+  "_note": "ProcessDriver manifest. Spawned by cel-cortex::discover_adapters from this directory. Build the binary with `cargo build --release -p adapter-mail` (or `make build-adapters` for all four productivity adapters).",
+  "name": "mail",
+  "display_name": "Apple Mail",
+  "app_patterns": ["(?i)^mail$"],
+  "platform": ["macos"],
+  "runtime": "process",
+  "entrypoint": "../../target/release/adapter-mail",
+  "context": {
+    "element_types": [],
+    "refresh_ms": 5000,
+    "confidence": 0.95,
+    "truth_surface": "document_model"
+  },
+  "lifecycle": {
+    "requires_frontmost": false,
+    "background_refresh": true,
+    "bootstrap_on_activate": false
+  },
+  "verification": {
+    "truth_surface": "document_model"
+  },
+  "actions": {
+    "compose": {
+      "params": {
+        "to": "string|string[] (addresses)",
+        "cc": "string|string[]?",
+        "bcc": "string|string[]?",
+        "subject": "string",
+        "body": "string (plain text)",
+        "attachments": "string[]? (POSIX file paths)",
+        "visible": "boolean? (default false — compose window hidden)"
+      },
+      "description": "Create an outgoing message. DOES NOT SEND. Returns draft_id for use with send_draft. Body is plain text in v1.",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "send_draft": {
+      "params": { "draft_id": "string" },
+      "description": "Send a previously-composed draft. IRREVERSIBLE — once accepted by the SMTP queue there is no recall. Deliberately a separate op from compose so the host's confirmation policy can intervene before the wire.",
+      "mutates_state": true,
+      "returns_data": true
+    },
+    "list_inbox": {
+      "params": {
+        "since": "string? (ISO-8601 datetime)",
+        "from": "string? (substring match on sender)",
+        "limit": "number? (default 20)"
+      },
+      "description": "List recent messages from the unified inbox.",
+      "returns_data": true
+    },
+    "read_message": {
+      "params": { "message_id": "string (Mail integer id)" },
+      "description": "Read body + recipients of a message in the inbox.",
+      "returns_data": true
+    },
+    "search": {
+      "params": {
+        "query": "string",
+        "mailbox": "string? (v1 ignores — always inbox)",
+        "limit": "number? (default 20)"
+      },
+      "description": "Substring match against subject + sender in the unified inbox.",
+      "returns_data": true
+    }
+  }
+}

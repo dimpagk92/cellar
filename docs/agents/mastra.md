@@ -105,7 +105,7 @@ const result = await desktopAgent.generate({
 console.log(result.text);
 ```
 
-## The `see → act` Pattern (Mastra version)
+## The `see -> act -> verify` Pattern (Mastra version)
 
 Mastra's tool loop is identical to every other external agent:
 
@@ -114,7 +114,8 @@ loop:
   ctx = cel_see(mode="context")
   if goal_met(ctx): break
   step = mastra_agent_decides(ctx)
-  cel_act(step)
+  receipt = cel_act(step)
+  verify(receipt)
 ```
 
 Same rules:
@@ -122,6 +123,7 @@ Same rules:
 1. Re-observe between action batches.
 2. Prefer structured actions (`ax_action`, `set_value`, `write_cells`) over coordinate guesses.
 3. Batch up to ~4 actions per `cel_act` call.
+4. Store `cel_act` receipts and pair them with post-action evidence.
 
 ## Tips
 

@@ -27,7 +27,7 @@ import {
   type ScreenContext,
   type PlannedAction,
   type ContextElement,
-} from "@cellar/agent";
+} from "@cellar/agent/runtime";
 
 let adapter: BrowserAdapter | null = null;
 let lastContext: ScreenContext | null = null;
@@ -142,10 +142,52 @@ async function handleRequest(req: { method: string; action?: string; params?: an
 
           // Custom browser actions (navigate, evaluate, etc.)
           if (action === "navigate") {
-            await adapter.navigate(params.url);
-            await adapter.waitForStable({ timeout: 3000, idleTime: 150 });
-            try { await adapter.dismissCookieConsent(); } catch {}
-            success = true;
+            // Read canonical params with sensible defaults so legacy callers
+            // (just `{url}`) keep working unchanged. Mirrors the cortex
+            // fallback's defaults so both dispatch paths agree.
+            const url: string = params.url;
+            const waitUntilCanonical: string = params.wait_until ?? "domcontentloaded";
+            const timeoutMs: number = typeof params.timeout_ms === "number" ? params.timeout_ms : 30_000;
+            const dismissOverlays: boolean = params.dismiss_overlays !== false;
+            // Map canonical → Playwright. "none" maps to "commit" (the
+            // earliest milestone goto resolves on) so we still get a
+            // navigate ack without waiting for any lifecycle event.
+            const playwrightWaitUntil: "load" | "domcontentloaded" | "networkidle" | "commit" =
+              waitUntilCanonical === "none" ? "commit"
+                : waitUntilCanonical === "load" ? "load"
+                : waitUntilCanonical === "networkidle" ? "networkidle"
+                : "domcontentloaded";
+            const start = Date.now();
+            await adapter.navigate(url, { waitUntil: playwrightWaitUntil, timeout: timeoutMs });
+            // dismiss_overlays default-true. Skip entirely on opt-out so the
+            // flag actually has observable effect (was previously ignored).
+            // Adapter returns `boolean` — true iff a banner was actually
+            // clicked, false when no banner was detected.
+            let dismissed = false;
+            if (dismissOverlays) {
+              try {
+                dismissed = await adapter.dismissCookieConsent();
+              } catch { /* never fail navigate on a botched dismiss */ }
+            }
+            const finalUrl = await adapter
+              .evaluate<string>("window.location.href")
+              .catch(() => url);
+            const loadMs = Date.now() - start;
+            // Match the cortex fallback's data shape exactly. The MCP
+            // formatter and any downstream consumer should see identical
+            // results regardless of which dispatch path fired.
+            respond({
+              success: true,
+              data: {
+                url,
+                final_url: finalUrl,
+                redirected: finalUrl !== url,
+                load_ms: loadMs,
+                dismissed_overlays: dismissed,
+                wait_until: waitUntilCanonical,
+              },
+            });
+            return;
           } else if (action === "evaluate") {
             await adapter.evaluate(params.expression ?? params.code);
             success = true;

@@ -222,6 +222,7 @@ export {
 export {
   DEFAULT_CEL_CDP_PORT,
   chooseChromiumBrowser,
+  cleanupBlankCdpTabs,
   ensureDedicatedCdpBrowser,
   getCelCdpProfileRoot,
   getCanonicalCdpState,

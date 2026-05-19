@@ -130,7 +130,7 @@ impl StepHistory {
             .map(|s| {
                 let label = s.element_label.as_deref().unwrap_or("");
                 let action_type = match &s.action {
-                    PlannedAction::Click { target_id } => {
+                    PlannedAction::Click { target_id, .. } => {
                         if label.is_empty() {
                             format!("clicked {}", target_id)
                         } else {
@@ -212,7 +212,7 @@ mod tests {
         history.record(
             0,
             PlannedAction::Click {
-                target_id: "btn1".into(),
+                target_id: "btn1".into(), expect_after: None,
             },
             true,
             None,
@@ -239,6 +239,7 @@ mod tests {
                 i,
                 PlannedAction::Click {
                     target_id: format!("btn{}", i),
+                    expect_after: None,
                 },
                 true,
                 None,
@@ -256,7 +257,7 @@ mod tests {
         history.record(
             0,
             PlannedAction::Click {
-                target_id: "btn".into(),
+                target_id: "btn".into(), expect_after: None,
             },
             true,
             None,
@@ -271,7 +272,7 @@ mod tests {
             StepRecord {
                 step_index: 0,
                 action: PlannedAction::Click {
-                    target_id: "a".into(),
+                    target_id: "a".into(), expect_after: None,
                 },
                 success: true,
                 error: None,
@@ -303,6 +304,7 @@ mod tests {
                 i,
                 PlannedAction::Click {
                     target_id: format!("btn{}", i),
+                    expect_after: None,
                 },
                 i % 3 != 0, // Every 3rd step fails
                 if i % 3 == 0 {
@@ -330,6 +332,7 @@ mod tests {
                 i,
                 PlannedAction::Click {
                     target_id: format!("btn{}", i),
+                    expect_after: None,
                 },
                 true,
                 None,
@@ -348,7 +351,7 @@ mod tests {
             history.record(
                 i,
                 PlannedAction::Click {
-                    target_id: "btn".into(),
+                    target_id: "btn".into(), expect_after: None,
                 },
                 false,
                 Some(format!("Failed: {}", i)),

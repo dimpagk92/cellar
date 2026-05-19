@@ -20,7 +20,7 @@
  * License: MIT
  */
 
-import type { ContextElement, Bounds, ElementState } from "@cellar/agent";
+import type { ContextElement, Bounds, ElementState } from "@cellar/agent/runtime";
 import type { RawDOMElement } from "./dom-extractor.js";
 
 // --- Confidence scoring constants ---

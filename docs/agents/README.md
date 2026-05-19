@@ -2,17 +2,23 @@
 
 Date: April 24, 2026
 
-This is the index for per-agent-runtime integration guides. CEL is the platform; agents are clients. Each page below shows how to drive CEL from one specific agent runtime.
+This is the index for per-agent-runtime integration guides. CEL is the trust and execution layer; agents are clients. Each page below shows how to drive CEL from one specific agent runtime without making that runtime the platform identity.
 
 If this is your first time, read [docs/adapters-cel-agents.md](../adapters-cel-agents.md) before picking a runtime.
 
 ## The Boundary Rule (read once, then stop worrying about it)
 
 - **The agent owns:** planning, tool selection, retries, branching, checkpointing, approvals, stop conditions.
-- **CEL owns:** fused context, screenshots, action execution, adapter dispatch, results.
+- **CEL owns:** fused context, screenshots, action execution, adapter dispatch, results, receipts, verification surfaces.
 - **Adapters own:** app-specific structured truth (Numbers cells, Figma nodes, Slides shapes, etc.).
 
 For any external agent, the preferred tool boundary is small: `cel_see` + `cel_act`, occasionally `cel_perceive`. Reaching for `cel_think` from an external agent is usually an anti-pattern — `cel_think` exists for built-in autonomous flows and for agents that explicitly want CEL to take over the loop.
+
+The preferred external-agent loop is:
+
+```text
+healthcheck -> observe -> act -> verify -> cite receipt/evidence
+```
 
 See [docs/mcp-server.md](../mcp-server.md) for the full tool surface.
 
@@ -66,13 +72,14 @@ CEL exposes four MCP tools. External-agent cookbooks in this folder focus on the
 | Tool | Modes | External-agent recommendation |
 |---|---|---|
 | `cel_see` | 14 modes (context, screenshot, windows, focused, element_at, is_settable, make_reference, cursor_position, cdp_status, cdp_page, wait_for_element, wait_for_idle, watch, monitors) | Use freely |
-| `cel_act` | single-action and batched (click, right_click, double_click, mouse_move, type, key_press, key_combo, scroll, drag, ax_action, set_value, cdp_eval, write_cells, read_cells) | Use freely |
+| `cel_act` | single-action and batched (click, right_click, double_click, mouse_move, type, key_press, key_combo, scroll, drag, ax_action, set_value, cdp_eval, navigate, write_cells, read_cells, adapter_action) | Use freely; cite receipts and verify effects |
 | `cel_perceive` | 7 modes (start, read, feed, checkpoint, configure, status, stop) | Use for multi-step tasks where continuous awareness matters |
 | `cel_think` | 17 modes (run_goal, plan, plan_with_vision, search_knowledge, store_knowledge, memory_get, memory_set, observe, get_observations, run_start, run_finish, run_log_step, run_history, run_steps, llm_complete, llm_complete_with_image, eviction) | Generally avoid from external agents. Use only when you explicitly want CEL to own the loop |
 
 ## See Also
 
 - [docs/adapters-cel-agents.md](../adapters-cel-agents.md) — the three-layer architecture
+- [docs/trust-execution-layer.md](../trust-execution-layer.md) — the trust loop and receipt contract
 - [docs/mcp-server.md](../mcp-server.md) — full tool reference
 - [docs/langgraph-rust-sidecar.md](../langgraph-rust-sidecar.md) — the original reference integration
 - [docs/agent-integration-roadmap.md](../agent-integration-roadmap.md) — which runtimes to prioritize next

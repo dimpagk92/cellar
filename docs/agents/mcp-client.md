@@ -16,7 +16,7 @@ This is the reference integration. It proves the claim that CEL is agent-agnosti
 In this setup:
 
 - Your code owns the LLM, the loop, and the stop condition.
-- CEL provides `cel_see`, `cel_act`, `cel_perceive`, `cel_think` over stdio MCP.
+- CEL provides `cel_see`, `cel_act`, `cel_perceive`, `cel_think` over stdio MCP. `cel_act` returns receipts.
 - You call tools using the standard MCP client API for your language.
 
 ## Setup
@@ -75,7 +75,7 @@ const ctx = await client.callTool({
 console.log("Elements:", JSON.parse(ctx.content[0].text).elements.length);
 
 // 3. Write a value into Numbers A1 via the Numbers adapter.
-await client.callTool({
+const write = await client.callTool({
   name: "cel_act",
   arguments: {
     action: "write_cells",
@@ -84,13 +84,16 @@ await client.callTool({
     verify: true,
   },
 });
+const writePayload = JSON.parse(write.content[0].text);
+console.log("write receipt:", writePayload.receipt.id, writePayload.receipt.dispatch_path);
 
 // 4. Read it back deterministically.
 const read = await client.callTool({
   name: "cel_act",
   arguments: { action: "read_cells", app: "Numbers", cell_refs: ["A1"] },
 });
-console.log("A1 =", read.content[0].text);
+const readPayload = JSON.parse(read.content[0].text);
+console.log("A1 =", readPayload.result);
 
 await client.close();
 ```
@@ -131,7 +134,7 @@ asyncio.run(main())
 
 TODO: verify with the current `mcp` Python SDK — the exact class names have shifted across releases. The shape is stable.
 
-## The `see → act` Pattern (raw version)
+## The `see -> act -> verify` Pattern (raw version)
 
 With a raw client, the canonical agent loop is yours to write. The simplest version:
 
@@ -143,7 +146,10 @@ for (let step = 0; step < MAX_STEPS; step++) {
   if (goalMet(ctx)) break;
 
   const action = yourPlanner(ctx); // LLM call, rules engine, whatever
-  await client.callTool({ name: "cel_act", arguments: action });
+  const actResp = await client.callTool({ name: "cel_act", arguments: action });
+  const actPayload = JSON.parse(actResp.content[0].text);
+  recordReceipt(actPayload.receipt ?? actPayload.receipts);
+  await verifyEffect(action, actPayload);
 }
 ```
 
@@ -152,11 +158,13 @@ Rules (every external-agent cookbook shares these):
 1. **Re-observe between action batches.** Element IDs are ephemeral.
 2. **Prefer structured actions.** `ax_action` > `click(x,y)`, `set_value` > `type`, `write_cells` > typing into cells.
 3. **Batch up to ~4 actions per call to `cel_act`**, then re-observe.
+4. **Treat receipts as dispatch proof.** Verify completion with readback, CDP/AX state, screenshot, or Cortex diff.
 
 ## Tips
 
 - **Tool list is your contract.** Always call `listTools()` at least once during development to confirm your build of CEL matches [docs/mcp-server.md](../mcp-server.md).
 - **Error envelope.** CEL returns typed errors in the MCP `content` array. Parse `isError` on the response to distinguish transport-level failures from tool-level failures.
+- **Receipts.** Parse `receipt` / `receipts` from `cel_act` responses and store them with your transcript. They carry dispatch path and verification requirements.
 - **Confidence-aware branching.** Elements carry confidence (0.0-1.0). Branch on it the same way every other CEL agent does.
 - **Stay on the small surface.** Unless you are building delegated autonomy, only use `cel_see` and `cel_act`. `cel_perceive` is for multi-phase tasks; `cel_think` is for CEL-owned loops.
 
@@ -171,5 +179,6 @@ Rules (every external-agent cookbook shares these):
 
 - [docs/agents/README.md](./README.md) — index of all agent cookbooks
 - [docs/adapters-cel-agents.md](../adapters-cel-agents.md) — architecture
+- [docs/trust-execution-layer.md](../trust-execution-layer.md) — trust loop and receipt contract
 - [docs/mcp-server.md](../mcp-server.md) — full tool reference
 - [docs/agent-integration-roadmap.md](../agent-integration-roadmap.md) — raw MCP client is P0 (reference integration)

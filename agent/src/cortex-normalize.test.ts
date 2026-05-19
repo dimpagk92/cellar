@@ -11,7 +11,10 @@ describe("normalizeCortexModel", () => {
         timestamp_ms: 123,
       },
       focused_element: { id: "dom:submit", label: "Submit" },
-      recent_diffs: [{ addedCount: 1, removedCount: 0, changedCount: 0, unchangedCount: 5, addedLabels: [], changedLabels: [] }],
+      // Rust serializer emits snake_case here — test that recentDiffs items
+      // get normalised, not just renamed. cel_perceive feed reads
+      // `latestDiff.addedCount` (camelCase) for its actionLanded check.
+      recent_diffs: [{ added_count: 1, removed_count: 0, changed_count: 0, unchanged_count: 5, added_labels: [], changed_labels: [] }],
       last_diff_summary: {
         added_count: 2,
         removed_count: 1,
@@ -56,6 +59,10 @@ describe("normalizeCortexModel", () => {
     expect(normalized?.lastDiffSummary?.removedCount).toBe(1);
     expect(normalized?.lastDiffSummary?.changedCount).toBe(3);
     expect(normalized?.lastDiffSummary?.unchangedCount).toBe(4);
+    // recentDiffs items must also be camelCase-normalised, not just renamed.
+    expect(normalized?.recentDiffs?.[0]?.addedCount).toBe(1);
+    expect(normalized?.recentDiffs?.[0]?.unchangedCount).toBe(5);
+    expect(normalized?.recentDiffs?.[0]?.addedLabels).toEqual([]);
     expect(normalized?.stability.stable.has("dom:submit")).toBe(true);
     expect(normalized?.semantic?.currentActivity).toContain("Browser");
     expect(normalized?.sourceSummary?.accessibility).toBe(0);

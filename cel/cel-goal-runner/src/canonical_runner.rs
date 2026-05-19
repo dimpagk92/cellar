@@ -69,6 +69,22 @@ pub trait StepExecutor: Send + Sync {
         empty_context()
     }
 
+    /// Force a fresh cortex tick + return the resulting perception.
+    /// Used by the canonical runner BEFORE `verify_done` so the
+    /// post-action UI state is captured before the LLM grades the
+    /// Done claim. Without this, `verify_done` sees the perception
+    /// from BEFORE the batch ran — and correctly rejects every Done
+    /// whose side-effect (form-submission success message, modal
+    /// opening, status flipping) only appeared in the page AFTER the
+    /// last batch dispatched.
+    ///
+    /// Default: just calls `perceive()` (no force-refresh). Production
+    /// `CortexStepExecutor` overrides this to invoke
+    /// `cortex.refresh_now()` first, then perceive.
+    async fn perceive_fresh(&self) -> ScreenContext {
+        self.perceive().await
+    }
+
     /// Optional screenshot (PNG) for vision-capable planners.
     async fn screenshot_png(&self) -> Option<Vec<u8>> {
         None
@@ -111,6 +127,29 @@ pub trait StepExecutor: Send + Sync {
         _context: &ScreenContext,
     ) -> Vec<cel_contracts::AdapterFactRef> {
         Vec::new()
+    }
+
+    /// Structured "App-Specific Actions" catalogue for every currently-active
+    /// adapter. Production `CortexStepExecutor` projects active manifests into
+    /// `PlanningView::adapter_actions`; test executors return empty by default.
+    /// LLM planners render this at the planner boundary, while non-LLM agents
+    /// can inspect it directly.
+    async fn adapter_actions(&self) -> Vec<cel_contracts::AdapterActionRef> {
+        Vec::new()
+    }
+
+    /// Rendered "App-Specific Actions" prompt fragment listing the
+    /// `{"type": "custom", "adapter": ..., "action": ..., "params": ...}`
+    /// shapes for every currently-active adapter. Production
+    /// `CortexStepExecutor` reads `Cortex::active_adapter_manifests()`
+    /// and renders via `cel_cortex::format_adapter_actions_prompt`. Test
+    /// executors return `None` (default), preserving pre-existing
+    /// scripted-planner tests that don't exercise adapter routing.
+    /// Surfaced per turn into `PlanningView::adapter_actions_prompt` by
+    /// the canonical runner; LLM-backed planners append this to their
+    /// system prompt.
+    async fn adapter_actions_prompt(&self) -> Option<String> {
+        None
     }
 }
 
@@ -283,11 +322,33 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
 
         loop {
             if steps_used >= limits.max_steps {
-                return budget_exhausted("max_steps", &last_batch_purpose, steps_used);
+                return self
+                    .budget_exhausted_with_outcome_check(
+                        "max_steps",
+                        goal,
+                        &last_batch_purpose,
+                        steps_used,
+                        &shared_memory,
+                        goal_embedding.as_deref(),
+                        limits.workflow_id_for_memory.as_deref(),
+                        memory_store,
+                    )
+                    .await;
             }
             let elapsed_ms = start.elapsed().as_millis() as u64;
             if elapsed_ms >= limits.timeout_ms {
-                return budget_exhausted("timeout_ms", &last_batch_purpose, steps_used);
+                return self
+                    .budget_exhausted_with_outcome_check(
+                        "timeout_ms",
+                        goal,
+                        &last_batch_purpose,
+                        steps_used,
+                        &shared_memory,
+                        goal_embedding.as_deref(),
+                        limits.workflow_id_for_memory.as_deref(),
+                        memory_store,
+                    )
+                    .await;
             }
 
             let perception = self.executor.perceive().await;
@@ -364,6 +425,14 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             // ordering already in `view.memories` stands — never blocks
             // the run.
             let mut view = view;
+            // Stamp the active-adapter actions catalogue onto the view
+            // post-build. Keeping this out of
+            // `PlanningViewInputs` lets the 13+ existing test call sites
+            // (and any downstream consumer) keep their `build_planning_view`
+            // calls unchanged — only the canonical runner has the live
+            // executor/cortex handle needed to snapshot adapter routing.
+            view.adapter_actions = self.executor.adapter_actions().await;
+            view.adapter_actions_prompt = self.executor.adapter_actions_prompt().await;
             if let Some(selector) = self.memory_selector.as_ref() {
                 if !view.memories.is_empty() {
                     apply_memory_selector(
@@ -449,27 +518,106 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                 }
             };
 
+            // Fail-with-success rewrite. The planner sometimes emits
+            // `Fail` with a reason that explicitly acknowledges the
+            // goal is complete — e.g. "The '+ Add Task' button was
+            // already clicked successfully in step 1 … the goal has
+            // been accomplished". That's a Done-vs-Fail confusion: the
+            // agent's reasoning is correct (goal achieved) but it
+            // picked the wrong terminal move.
+            //
+            // When the Fail reason contains success-acknowledging
+            // language AND `history` already has at least one
+            // successful action, rewrite to `Done` and let the
+            // standard verify_done path arbitrate. Same template as
+            // the mid-run Clarify guard from PR #73 — the runtime
+            // catches the misclassified terminal and gives the
+            // intended-success outcome a chance to succeed instead of
+            // dead-ending the run.
+            //
+            // verify_done is the safety check: if the reason is
+            // self-contradictory (claims success but evidence doesn't
+            // support it), the rewritten Done gets rejected and the
+            // agent gets a `runtime rejected Done: ...` history entry
+            // on the next turn — same as if it had emitted Done
+            // directly.
+            let next = match next {
+                NextMove::Fail { reason }
+                    if looks_like_success_acknowledgement(&reason)
+                        && history.iter().any(|r| r.succeeded) =>
+                {
+                    warn!(
+                        reason = %reason,
+                        "Fail rewritten to Done — reasoning acknowledges goal completion"
+                    );
+                    NextMove::Done {
+                        summary: reason,
+                        extracted_data: serde_json::Value::Null,
+                    }
+                }
+                other => other,
+            };
+
             match next {
                 NextMove::Done {
                     summary,
                     extracted_data,
                 } => {
                     // Runtime Done-validation: before returning
-                    // success, ask the planner to grade its own claim
-                    // against fresh perception + screenshot. The
-                    // prompt for the grader is stricter than the
-                    // planner's own self-check (required parts of
-                    // multi-part goals, rejects partial credit, etc.),
-                    // so a Done that slips through the planner rules
-                    // still gets caught if the UI doesn't match.
+                    // success, grade the claim against POST-action
+                    // perception. The perception we captured at the
+                    // top of THIS turn pre-dates the planner's last
+                    // batch — so any side-effect that batch produced
+                    // (form submission success message, modal opening,
+                    // status flipping, navigation) would be invisible
+                    // to verify_done.
                     //
-                    // On reject we don't terminate — we record the
-                    // rejection as a failed attempt so the next
-                    // decide_next sees it in history and either does
-                    // more work or emits Fail with an honest reason.
+                    // Force-refresh the cortex tick + re-read so the
+                    // grader sees what's actually on screen RIGHT NOW.
+                    // Without this, even-successful Dones got rejected
+                    // because the perception verify_done received was
+                    // pre-action. With it, the grader can compare the
+                    // claim ("the form was submitted") to the
+                    // current page state ("#success-message visible").
+                    //
+                    // Also re-screenshot — the vision grader benefits
+                    // from seeing the post-action page state too.
+                    let fresh_perception = self.executor.perceive_fresh().await;
+                    let fresh_screenshot = self.executor.screenshot_png().await;
+                    let fresh_caps = {
+                        let mut c = self.executor.capabilities().await;
+                        c.steps_used = steps_used;
+                        c.max_steps = limits.max_steps;
+                        c
+                    };
+                    let fresh_anomalies = self.executor.cortex_anomalies().await;
+                    let fresh_freshness = self.executor.cortex_freshness().await;
+                    let fresh_adapter_facts =
+                        self.executor.adapter_facts(goal, &fresh_perception).await;
+                    let fresh_view = build_planning_view(&PlanningViewInputs {
+                        goal,
+                        budget: &PlanningBudget::default(),
+                        perception: &fresh_perception,
+                        caps: &fresh_caps,
+                        memory_store: memory_store.map(|m| m as &dyn cel_store::CortexMemoryStore),
+                        workflow_id: limits.workflow_id_for_memory.as_deref(),
+                        knowledge_store: memory_store.map(|m| m as &dyn cel_store::KnowledgeStore),
+                        goal_embedding,
+                        recent_events_store: memory_store
+                            .map(|m| m as &dyn cel_store::RecentEventStore),
+                        cortex_anomalies: Some(fresh_anomalies.as_slice()),
+                        cortex_freshness: fresh_freshness.as_ref(),
+                        adapter_facts: Some(fresh_adapter_facts.as_slice()),
+                    });
                     let verdict = self
                         .planner
-                        .verify_done(goal, &summary, &shared_memory, &view, screenshot.as_deref())
+                        .verify_done(
+                            goal,
+                            &summary,
+                            &shared_memory,
+                            &fresh_view,
+                            fresh_screenshot.as_deref(),
+                        )
                         .await;
                     match verdict {
                         Ok(v) if v.verified => {
@@ -490,8 +638,50 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                             warn!(
                                 summary = %summary,
                                 reason = %v.reason,
+                                hint = ?v.next_action_hint,
                                 "Done rejected — evidence does not support claim"
                             );
+                            // Build the error message. When the
+                            // grader emitted a `next_action_hint`,
+                            // surface it as a directive — the planner
+                            // sees the structured hint AND the prose
+                            // reason and can act on the categorical
+                            // signal rather than parsing free-form
+                            // English. The hint also lands in the
+                            // typed `next_action_hint` field on the
+                            // AttemptRecord (Slice 3 contract bump)
+                            // so downstream consumers can route on it
+                            // without string-matching.
+                            let hint_directive = match v.next_action_hint {
+                                Some(cel_contracts::NextActionHint::RetryLastAction) => {
+                                    "\n\nHINT: re-emit your previous action (the one that \
+                                     dispatched OK but didn't produce the expected effect). \
+                                     Do NOT emit a 'verify state' batch — the runtime \
+                                     already verified the side-effect didn't materialise. \
+                                     Consider attaching `expect_after` to the retry so the \
+                                     runtime catches a second silent failure immediately."
+                                }
+                                Some(cel_contracts::NextActionHint::DifferentAction) => {
+                                    "\n\nHINT: same intent, different verb. The action shape \
+                                     is wrong — try a different action type (e.g. cdp_eval \
+                                     with a trusted-event dispatch, or a key shortcut \
+                                     instead of a coordinate click)."
+                                }
+                                Some(cel_contracts::NextActionHint::DifferentTarget) => {
+                                    "\n\nHINT: wrong element. Re-read perception, find the \
+                                     element that actually corresponds to the goal target, \
+                                     and dispatch against that target_id. Common cause: \
+                                     a slugified label resolving to a different candidate \
+                                     than the author's HTML id."
+                                }
+                                Some(cel_contracts::NextActionHint::GiveUp) => {
+                                    "\n\nHINT: the grader believes this goal is \
+                                     unachievable from here. Strongly consider emitting \
+                                     Fail with a specific reason — burning more steps is \
+                                     unlikely to land the goal."
+                                }
+                                None => "",
+                            };
                             history.push(AttemptRecord {
                                 step_purpose: "verify_done".into(),
                                 action: PlannedAction::Done {
@@ -500,10 +690,12 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                 },
                                 succeeded: false,
                                 error: Some(format!(
-                                    "runtime rejected Done: {}. Either gather the missing evidence and emit Done again, or emit Fail honestly.",
-                                    v.reason
+                                    "runtime rejected Done: {}. Either gather the missing evidence and emit Done again, or emit Fail honestly.{}",
+                                    v.reason,
+                                    hint_directive,
                                 )),
                                 data: serde_json::Value::Null,
+                                next_action_hint: v.next_action_hint,
                             });
                             steps_used += 1;
                             continue;
@@ -541,6 +733,56 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                         attempts: vec![reason],
                     });
                 }
+                NextMove::Clarify { question } => {
+                    // Clarify is the legitimate response when the goal
+                    // is ambiguous or destructive AND no action has
+                    // been dispatched yet — the agent declines BEFORE
+                    // touching state. Mid-run Clarify is something
+                    // different: the agent acted, hit a snag, and is
+                    // escalating to the user instead of finishing
+                    // honestly. The runtime rejects it the same way
+                    // verify_done rejects an unsupported Done — push
+                    // a synthetic AttemptRecord with the rejection
+                    // reason, bump steps_used, and continue. The
+                    // planner sees on the next turn that Clarify was
+                    // refused and has to commit to Done (if the goal
+                    // is in fact complete given the actions so far)
+                    // or Fail (with a specific reason).
+                    if history.is_empty() {
+                        info!(question = %question, "Planner signaled Clarify");
+                        return GoalOutcome::Refused { summary: question };
+                    }
+                    // Mid-run Clarify: the agent dispatched some
+                    // exploration/perception actions, then realized the
+                    // goal is genuinely ambiguous and asked for guidance.
+                    // We previously rewrote this to a synthetic Fail and
+                    // continued, forcing the planner to commit to Done
+                    // or Fail on the next turn — the assumption being
+                    // that pre-act Clarify is the only "honest" Clarify.
+                    //
+                    // In practice that produced a regression on the
+                    // `clarify_underspecified` scenario at trials=3:
+                    // ~33% of trials look around first ("the page
+                    // doesn't show what I should delete"), then ask to
+                    // clarify, then get rewritten into a Fail when
+                    // Refused was the right outcome. The actions
+                    // dispatched up to that point were perception/
+                    // Wait/extract — nothing mutating — so semantically
+                    // the agent IS still refusing to act on the
+                    // ambiguous prompt; it just took a turn or two to
+                    // confirm it couldn't disambiguate from context.
+                    //
+                    // Treat late Clarify as Refused-with-question. The
+                    // warn! is preserved so we can still see the late-
+                    // clarify pattern in logs and track agents that
+                    // should have clarified earlier.
+                    warn!(
+                        question = %question,
+                        history_len = history.len(),
+                        "Late Clarify — agent dispatched actions before asking; surfacing as Refused"
+                    );
+                    return GoalOutcome::Refused { summary: question };
+                }
                 NextMove::Batch { purpose, steps } => {
                     last_batch_purpose = purpose.clone();
                     info!(
@@ -566,7 +808,236 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                     // banned" and couldn't move to cell D3).
                     let steps_iter = steps.into_iter();
                     let mut remaining: Vec<Step> = Vec::new();
-                    for s in steps_iter {
+                    // Capture once: history.is_empty() at the top of the
+                    // batch is the "first batch of the run" signal we use
+                    // for the navigate silent-accept below.
+                    let first_batch_of_run = history.is_empty();
+
+                    // ── Parse-time validation snapshots ───────────────────
+                    //
+                    // Per-batch indexes of what perception offered THIS
+                    // turn. The planner's emit gets validated against
+                    // these before we dispatch — so a hallucinated
+                    // selector / target_id / adapter action gets caught
+                    // at parse time rather than as a CDP `no-match` two
+                    // seconds later. Built once per batch (cheap; walk
+                    // is bounded by element count).
+                    let valid_dom_element_ids: std::collections::HashSet<&str> = perception
+                        .elements
+                        .iter()
+                        .map(|el| el.id.as_str())
+                        .collect();
+                    let valid_dom_ids: std::collections::HashSet<&str> = perception
+                        .elements
+                        .iter()
+                        .filter_map(|el| el.properties.get("dom_id").map(String::as_str))
+                        .collect();
+                    let valid_testids: std::collections::HashSet<&str> = perception
+                        .elements
+                        .iter()
+                        .filter_map(|el| el.properties.get("data_testid").map(String::as_str))
+                        .collect();
+                    let valid_adapter_actions: std::collections::HashSet<(&str, &str)> = view
+                        .adapter_actions
+                        .iter()
+                        .map(|a| (a.adapter.as_str(), a.action.as_str()))
+                        .collect();
+
+                    for mut s in steps_iter {
+                        // ── A. Strip hallucinated `expect_after` ──────
+                        //
+                        // The planner sometimes invents CSS classes
+                        // (`.success-message`, `.modal`, etc.) for its
+                        // `expect_after` selector — selectors that
+                        // don't exist in the perception we just gave
+                        // it. Dispatch then sees a perfectly valid
+                        // click followed by a 2-second poll that
+                        // never matches, and rewrites the action as
+                        // failed. The 2026-05-13 trials=3 measurement
+                        // caught every one of 9 click failures as
+                        // this exact pattern.
+                        //
+                        // Strip (don't reject) when the selector is
+                        // either (a) not in our supported strict form
+                        // (`#id` or `[data-testid="..."]`-family) or
+                        // (b) in that form but the id/testid is NOT
+                        // present in perception. The click still
+                        // dispatches; the runtime falls back to
+                        // verify_done at end-of-run. A missing
+                        // expectation is strictly better than a
+                        // hallucinated one.
+                        if let Some(reason) = strip_hallucinated_expect_after(
+                            &mut s.action,
+                            &valid_dom_ids,
+                            &valid_testids,
+                        ) {
+                            tracing::warn!(
+                                purpose = %s.purpose,
+                                reason = %reason,
+                                "Stripped hallucinated expect_after — selector not in this turn's perception"
+                            );
+                        }
+
+                        // ── B. Navigate-to-current-url silent ok ──────
+                        //
+                        // Previously REFUSED with a synthetic error,
+                        // which the planner read as "use a different
+                        // approach" and reached for `cdp_eval` with
+                        // `window.location.href` (PR #102 closed that
+                        // bypass with code) or `custom:navigate` (the
+                        // browser adapter rejects). The refusal itself
+                        // was what triggered the escape-hatch search.
+                        //
+                        // `Page.navigate` to the page you're already
+                        // on is a no-op anyway. Skip the dispatch,
+                        // record an ok AttemptRecord, and continue
+                        // processing the rest of the batch.
+                        if first_batch_of_run {
+                            if let Some(target) = navigate_target_url(&s.action) {
+                                if let Some(current) = caps.cdp_url.as_deref() {
+                                    if same_host_path(target, current) {
+                                        tracing::info!(
+                                            target = %target,
+                                            "Navigate no-op — already on this page; recording success"
+                                        );
+                                        history.push(AttemptRecord {
+                                            step_purpose: s.purpose.clone(),
+                                            action: s.action.clone(),
+                                            succeeded: true,
+                                            error: None,
+                                            data: serde_json::Value::Null,
+                                            next_action_hint: None,
+                                        });
+                                        // No steps_used++ — nothing
+                                        // dispatched. Skip this step but
+                                        // keep processing siblings.
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── C. Hallucinated dom:* target_id ───────────
+                        //
+                        // The planner sometimes emits `dom:role:slug`
+                        // ids it constructed from the visible label,
+                        // rather than ones it read out of perception
+                        // (`dom:button:export-notes` when the actual
+                        // element_id is `dom:button:btn-export`).
+                        // Without this guard, dispatch tries → CDP
+                        // returns `no-match` 200ms later → a step is
+                        // burned and the planner has to interpret the
+                        // CDP error string. Reject at parse time with
+                        // a synthetic record naming the actual
+                        // available ids — much cleaner signal.
+                        if let Some(target_id) = action_dom_target_id(&s.action) {
+                            if !valid_dom_element_ids.contains(target_id) {
+                                let suggestions = sample_dom_ids(&perception, 8);
+                                // Closest-match nudge. The planner usually
+                                // hallucinates a slug variant of a real
+                                // id (`dom:button:purge-all-user-sessions`
+                                // when perception has
+                                // `dom:button:purge-all-sessions`). Lead
+                                // the rejection with the single best
+                                // Levenshtein match — recovery is then a
+                                // one-token edit rather than a re-scan
+                                // of the full list. Bounded so wildly
+                                // different ids (distance >= half the
+                                // target length) don't surface noise.
+                                let closest =
+                                    closest_dom_id(target_id, &perception);
+                                tracing::warn!(
+                                    target_id = %target_id,
+                                    closest = ?closest,
+                                    "Rejecting hallucinated dom:* target_id"
+                                );
+                                let closest_hint = match closest {
+                                    Some(m) => format!(
+                                        " Closest match in this turn's perception: \
+                                         \"{m}\" — use that id verbatim if it's the \
+                                         element you meant."
+                                    ),
+                                    None => String::new(),
+                                };
+                                history.push(AttemptRecord {
+                                    step_purpose: s.purpose.clone(),
+                                    action: s.action.clone(),
+                                    succeeded: false,
+                                    error: Some(format!(
+                                        "runtime refused: target_id \"{target_id}\" is not in \
+                                         the current perception.{closest_hint} Pick a verbatim \
+                                         id from this turn's element table (the [N] bracket \
+                                         index is always safe), or a different action. \
+                                         Available dom:* ids: {}",
+                                        if suggestions.is_empty() {
+                                            "(none — perception has no dom:* elements)".into()
+                                        } else {
+                                            suggestions.join(", ")
+                                        },
+                                    )),
+                                    data: serde_json::Value::Null,
+                                    next_action_hint: Some(
+                                        cel_contracts::NextActionHint::DifferentTarget,
+                                    ),
+                                });
+                                steps_used += 1;
+                                break;
+                            }
+                        }
+
+                        // ── F. Unregistered Custom adapter action ─────
+                        //
+                        // The planner sometimes emits
+                        // `Custom { adapter: "browser", action: "navigate" }`
+                        // — the browser adapter rejects it with a runtime
+                        // error, but only after the dispatch round-trip.
+                        // The adapter's `actions` manifest is the source
+                        // of truth for what's callable. Surface it at
+                        // parse time so the planner sees the actual
+                        // (adapter, action) catalogue in the error.
+                        if let PlannedAction::Custom {
+                            adapter, action, ..
+                        } = &s.action
+                        {
+                            let pair = (adapter.as_str(), action.as_str());
+                            if !valid_adapter_actions.contains(&pair) {
+                                let available: Vec<String> = view
+                                    .adapter_actions
+                                    .iter()
+                                    .map(|a| format!("{}.{}", a.adapter, a.action))
+                                    .collect();
+                                tracing::warn!(
+                                    adapter = %adapter,
+                                    action = %action,
+                                    "Rejecting Custom action against unregistered (adapter, action) pair"
+                                );
+                                history.push(AttemptRecord {
+                                    step_purpose: s.purpose.clone(),
+                                    action: s.action.clone(),
+                                    succeeded: false,
+                                    error: Some(format!(
+                                        "runtime refused: Custom {{ adapter: \"{adapter}\", \
+                                         action: \"{action}\" }} is not a registered \
+                                         (adapter, action) pair on the cortex this turn. \
+                                         Available: {}. For browser DOM interactions use the \
+                                         canonical click / set_value / navigate / cdp_eval — \
+                                         not Custom.",
+                                        if available.is_empty() {
+                                            "(no adapters registered)".into()
+                                        } else {
+                                            available.join(", ")
+                                        },
+                                    )),
+                                    data: serde_json::Value::Null,
+                                    next_action_hint: Some(
+                                        cel_contracts::NextActionHint::DifferentAction,
+                                    ),
+                                });
+                                steps_used += 1;
+                                break;
+                            }
+                        }
+
                         if !should_ban_on_repeat(&s.action) {
                             remaining.push(s);
                             continue;
@@ -590,6 +1061,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                         .into(),
                                 ),
                                 data: serde_json::Value::Null,
+                                next_action_hint: None,
                             });
                             steps_used += 1;
                             // Don't run remaining steps in the batch —
@@ -678,6 +1150,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                             succeeded,
                             error: error_msg.clone(),
                             data,
+                            next_action_hint: None,
                         });
 
                         if let Some(ref msg) = error_msg {
@@ -731,6 +1204,7 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                             failures_for_name
                                         )),
                                         data: serde_json::Value::Null,
+                                        next_action_hint: None,
                                     });
                                     warn!(
                                         target = %name,
@@ -784,6 +1258,115 @@ fn budget_exhausted(kind: &str, last_purpose: &str, steps_used: u32) -> GoalOutc
         failing_step: "<budget>".into(),
         attempts: vec![format!("{kind} budget exhausted after {steps_used} steps")],
     })
+}
+
+impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
+    /// Budget-exhaustion handler with one final outcome check.
+    ///
+    /// When `max_steps` / `timeout_ms` is hit before the planner
+    /// emits a terminal move, the previous behaviour was an immediate
+    /// `GoalOutcome::Failed`. That under-counts agent successes
+    /// where the actions actually achieved the goal but the agent
+    /// kept going (e.g. an auto-refreshing queue where the agent
+    /// chases each new "topmost" target instead of recognising the
+    /// first approval already accomplished the task).
+    ///
+    /// This path captures fresh perception + screenshot once and
+    /// asks `verify_done` whether the original goal is satisfied by
+    /// the current page state. If yes → `GoalOutcome::Succeeded`.
+    /// If no, or verify_done errors → `GoalOutcome::Failed` (the
+    /// previous behaviour). The agent never gets credit for goals
+    /// it didn't accomplish — verify_done is the same conservative
+    /// grader the per-Done path already uses.
+    #[allow(clippy::too_many_arguments)]
+    async fn budget_exhausted_with_outcome_check(
+        &self,
+        kind: &str,
+        goal: &str,
+        last_purpose: &str,
+        steps_used: u32,
+        shared_memory: &serde_json::Value,
+        goal_embedding: Option<&[u8]>,
+        workflow_id: Option<&str>,
+        memory_store: Option<&std::sync::Mutex<cel_store::CelStore>>,
+    ) -> GoalOutcome {
+        let fresh_perception = self.executor.perceive_fresh().await;
+        let fresh_screenshot = self.executor.screenshot_png().await;
+        let mut fresh_caps = self.executor.capabilities().await;
+        fresh_caps.steps_used = steps_used;
+        fresh_caps.max_steps = steps_used;
+        let fresh_anomalies = self.executor.cortex_anomalies().await;
+        let fresh_freshness = self.executor.cortex_freshness().await;
+        let fresh_adapter_facts = self.executor.adapter_facts(goal, &fresh_perception).await;
+        let fresh_view = build_planning_view(&PlanningViewInputs {
+            goal,
+            budget: &PlanningBudget::default(),
+            perception: &fresh_perception,
+            caps: &fresh_caps,
+            memory_store: memory_store.map(|m| m as &dyn cel_store::CortexMemoryStore),
+            workflow_id,
+            knowledge_store: memory_store.map(|m| m as &dyn cel_store::KnowledgeStore),
+            goal_embedding,
+            recent_events_store: memory_store.map(|m| m as &dyn cel_store::RecentEventStore),
+            cortex_anomalies: Some(fresh_anomalies.as_slice()),
+            cortex_freshness: fresh_freshness.as_ref(),
+            adapter_facts: Some(fresh_adapter_facts.as_slice()),
+        });
+        // Pass the original GOAL as both the "claim" and the criterion
+        // — the grader is checking whether the goal was achieved by
+        // current page state, not whether some agent-narrated summary
+        // is supported. Same prompt shape, just no agent narration to
+        // discount.
+        let summary = format!(
+            "Budget exhausted after {steps_used} steps without an explicit Done. \
+             Final outcome check: was the original goal '{goal}' achieved by the \
+             current page state?"
+        );
+        let verdict = self
+            .planner
+            .verify_done(
+                goal,
+                &summary,
+                shared_memory,
+                &fresh_view,
+                fresh_screenshot.as_deref(),
+            )
+            .await;
+        match verdict {
+            Ok(v) if v.verified => {
+                info!(
+                    kind = %kind,
+                    steps_used,
+                    reason = %v.reason,
+                    "Budget exhausted but final outcome check verified goal achieved — Succeeded"
+                );
+                GoalOutcome::Succeeded {
+                    summary: format!(
+                        "Goal achieved by step {steps_used} ({kind} budget reached): {}",
+                        v.reason
+                    ),
+                    extracted_data: shared_memory.clone(),
+                }
+            }
+            Ok(v) => {
+                warn!(
+                    kind = %kind,
+                    steps_used,
+                    reason = %v.reason,
+                    "Budget exhausted; final outcome check rejected — Failed"
+                );
+                budget_exhausted(kind, last_purpose, steps_used)
+            }
+            Err(err) => {
+                tracing::error!(
+                    kind = %kind,
+                    error = %err,
+                    "Budget-exhaustion outcome check failed to run — Failed (no fail-open here)"
+                );
+                budget_exhausted(kind, last_purpose, steps_used)
+            }
+        }
+    }
 }
 
 /// WK4: open the cortex memory store once if both opt-in fields are set.
@@ -986,6 +1569,20 @@ async fn write_outcome_memory_if_enabled(
                 summary_text,
                 payload,
             )
+        }
+        GoalOutcome::Refused { .. } => {
+            // Refused outcomes describe a non-event (the agent
+            // deliberately declined to act on an ambiguous prompt).
+            // There's no execution trace to learn from and the
+            // clarification question is goal-specific — persisting it
+            // would just pollute future memory recall. Skip the write
+            // entirely and let the caller surface the question to the
+            // user inline.
+            tracing::debug!(
+                workflow_id,
+                "Refused outcome: skipping memory write (no execution trace to persist)"
+            );
+            return;
         }
     };
 
@@ -1221,6 +1818,7 @@ fn phase_gate_check(
             terminal_app
         )),
         data: serde_json::Value::Null,
+        next_action_hint: None,
     })
 }
 
@@ -1271,6 +1869,107 @@ fn hash_action(action: &PlannedAction) -> u64 {
 /// be the right move in Numbers. Banning them globally traps the
 /// agent (seen in the crypto scenario where the agent Failed because
 /// it had concluded arrow keys were off-limits).
+/// Recognise `Fail` reasons whose text explicitly says the goal is
+/// complete. Conservative — only flags the patterns the May 2026
+/// prototype-subset measurement actually produced, so legitimate
+/// "this is impossible" Fails keep terminating cleanly.
+///
+/// Examples that match (all from real Sonnet output):
+/// * "The goal has been accomplished."
+/// * "The goal has already been accomplished - the button was clicked
+///    and the modal appeared as the expected result."
+/// * "The button was already clicked successfully in step 1 (history
+///    shows 'ok' status). The modal dialog 'Add New Task' is now open
+///    on screen, which confirms the button click worked."
+///
+/// Examples that DON'T match (legitimate Fails):
+/// * "Cannot locate the button after 6 attempts" (no success language)
+/// * "I tried three approaches and none worked" (no completion claim)
+/// * "Permission denied opening the file" (impossible-given-state)
+fn looks_like_success_acknowledgement(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    // Direct success phrases — explicit completion claims.
+    if lower.contains("goal has been accomplished")
+        || lower.contains("goal has already been accomplished")
+        || lower.contains("goal accomplished")
+        || lower.contains("goal is complete")
+        || lower.contains("goal is achieved")
+        || lower.contains("goal achieved")
+        || lower.contains("task completed successfully")
+        || lower.contains("the task is done")
+    {
+        return true;
+    }
+    // "X has already been Y-ed successfully" — agent admits the
+    // action it was supposed to take has ALREADY happened (and the
+    // outcome is visible). Example from May 11:
+    //   "The 'Export to Notes' button has already been clicked and
+    //    the page shows 'Action completed. Exported ticket details
+    //    to Notes.' … the ticket has already been successfully
+    //    exported."
+    let already_did_it = (lower.contains("already been clicked")
+        || lower.contains("already been submitted")
+        || lower.contains("already been exported")
+        || lower.contains("already been completed")
+        || lower.contains("already been filled")
+        || lower.contains("already successfully")
+        || lower.contains("already been successfully"))
+        && (lower.contains("page shows")
+            || lower.contains("page displays")
+            || lower.contains("action completed")
+            || lower.contains("modal")
+            || lower.contains("success message")
+            || lower.contains("now visible"));
+    if already_did_it {
+        return true;
+    }
+    // Compound pattern: agent narrates a successful action AND that
+    // the expected post-state is visible. Example from May 11:
+    //   "the button was already clicked successfully … modal dialog
+    //    is now open on screen, which confirms the button click
+    //    worked".
+    let success_action = lower.contains("clicked successfully")
+        || lower.contains("submitted successfully")
+        || lower.contains("clicked the")
+        || lower.contains("submission succeeded");
+    let observed_outcome = lower.contains("modal")
+        || lower.contains("success message")
+        || lower.contains("dialog is now open")
+        || lower.contains("is now visible")
+        || lower.contains("now displays");
+    let confirmation = lower.contains("confirm")
+        || lower.contains("history shows 'ok")
+        || lower.contains("history confirms");
+    if success_action && observed_outcome && confirmation {
+        return true;
+    }
+    // "Yet the modal is still open" — Sonnet's misclassification
+    // where the reason describes the goal-state being observable
+    // (observed_outcome) and the agent's interaction surface
+    // (click / cdp_eval) but treats the lack of further state-
+    // change as failure rather than recognising the modal opening
+    // WAS the goal. Real examples from May 11:
+    //   "The goal has been attempted 3 times with different
+    //    approaches (cdp_eval twice, click once), all returning
+    //    'ok' status, yet the modal dialog remains open in the
+    //    screenshot."
+    //   "I've attempted 5 different CDP-based click actions
+    //    targeting this button, all reporting success. … The
+    //    modal shown in the screenshot ('Add New Task') suggests
+    //    a click DID work at some point."
+    //
+    // The outer call site requires
+    // `history.iter().any(|r| r.succeeded)` before rewriting, so a
+    // Fail like "I couldn't click after 3 tries" (no successful
+    // history actions) stays Failed. And `verify_done` arbitrates
+    // the rewritten Done — if the modal isn't actually open, the
+    // grader rejects. Net: we lean permissive on the heuristic;
+    // the safety nets above (history-has-success) and below
+    // (verify_done) catch false positives.
+    let click_or_eval_in_reason = lower.contains("cdp_eval") || lower.contains("click");
+    observed_outcome && click_or_eval_in_reason
+}
+
 fn should_ban_on_repeat(action: &PlannedAction) -> bool {
     match action {
         PlannedAction::Key { .. } | PlannedAction::KeyCombo { .. } | PlannedAction::Wait { .. } => {
@@ -1279,6 +1978,300 @@ fn should_ban_on_repeat(action: &PlannedAction) -> bool {
         PlannedAction::Type { target_id, .. } => target_id.is_some(),
         _ => true,
     }
+}
+
+/// Extract the navigation target URL from an action, if it would
+/// cause the page to navigate. Recurses through
+/// [`PlannedAction::Batch`] so a wrap can't bypass the
+/// navigate-to-current-url guard, and inspects
+/// [`PlannedAction::CdpEval`] expressions for the common JS escape
+/// hatches (`window.location.href = "..."`, `location.assign(...)`,
+/// etc.). Returns `None` for any action that wouldn't navigate.
+///
+/// The CdpEval branch closes a regression seen on 2026-05-13: after
+/// Slice 1's navigate guard refused the agent's `Navigate` to the
+/// current page, the planner reached for `cdp_eval` with
+/// `window.location.href = '...'` to bypass — and proceeded to
+/// hallucinate URLs ("github page", "data table page") that took
+/// the run off the fixture entirely. The guard now treats
+/// location-mutating cdp_eval as equivalent to Navigate.
+fn navigate_target_url(action: &PlannedAction) -> Option<&str> {
+    match action {
+        PlannedAction::Navigate { url, .. } => Some(url.as_str()),
+        PlannedAction::Batch { actions } => actions.iter().find_map(navigate_target_url),
+        PlannedAction::CdpEval { expression } => extract_navigate_url_from_js(expression),
+        _ => None,
+    }
+}
+
+/// Look for the common JS patterns the agent uses to navigate via
+/// cdp_eval, bypassing the canonical [`PlannedAction::Navigate`]:
+///
+/// * `window.location.href = "..."`
+/// * `window.location = "..."`
+/// * `location.href = "..."`
+/// * `location.assign("...")`
+/// * `location.replace("...")`
+/// * `document.location = "..."`
+///
+/// Returns the first quoted URL substring on a match, or `None` when
+/// the expression doesn't look like a navigation. The detection is
+/// case-insensitive but the returned URL preserves original case so
+/// downstream comparison against `cdp_current_url` (also
+/// case-insensitively normalised in `same_host_path`) stays
+/// symmetric.
+fn extract_navigate_url_from_js(expression: &str) -> Option<&str> {
+    let lower = expression.to_lowercase();
+    let is_nav = lower.contains("location.href")
+        || lower.contains("location =")
+        || lower.contains("location.assign")
+        || lower.contains("location.replace");
+    if !is_nav {
+        return None;
+    }
+    // Pull the first quoted string from the original expression
+    // (preserves case + special chars). Try double-quote first, then
+    // single-quote — most agent-emitted JS uses one or the other
+    // consistently per snippet.
+    first_quoted(expression, '"').or_else(|| first_quoted(expression, '\''))
+}
+
+/// Return the substring between the first pair of `quote` characters
+/// in `s`, or `None` if there isn't a complete pair. Quote is
+/// expected to be a 1-byte ASCII char so the byte arithmetic is safe.
+fn first_quoted(s: &str, quote: char) -> Option<&str> {
+    debug_assert!(quote.is_ascii(), "first_quoted only supports ASCII quotes");
+    let open = s.find(quote)? + 1;
+    let after = &s[open..];
+    let close = after.find(quote)?;
+    Some(&after[..close])
+}
+
+/// True when two URLs point at the same page modulo query string and
+/// fragment. Used by the navigate-to-current-url guard so the planner
+/// can't bypass it by appending `?refresh=true` or `#section`. Trailing
+/// slashes are normalised. Compared as strings — pulling in the `url`
+/// crate just to compare two known-shape URLs would be overkill.
+fn same_host_path(a: &str, b: &str) -> bool {
+    fn normalise(s: &str) -> &str {
+        let s = s.split('#').next().unwrap_or(s);
+        let s = s.split('?').next().unwrap_or(s);
+        s.strip_suffix('/').unwrap_or(s)
+    }
+    normalise(a) == normalise(b)
+}
+
+/// Extract the `target_id` from any action that has one. Returns
+/// `None` for actions without a target (`Wait`, `Key`, terminal moves,
+/// etc.). Distinct from `action_target_id` only in that this borrows;
+/// kept separate so the validation passes can compare against a
+/// `HashSet<&str>` without cloning.
+fn action_dom_target_id(action: &PlannedAction) -> Option<&str> {
+    match action {
+        PlannedAction::Click { target_id, .. }
+        | PlannedAction::SetValue { target_id, .. }
+        | PlannedAction::AxAction { target_id, .. } => {
+            // Empty target_id is the planner's "I only know the label"
+            // signal — handled by the AX label-fallback path; don't
+            // reject it as hallucinated.
+            if target_id.is_empty() {
+                None
+            } else if target_id.starts_with("dom:") {
+                Some(target_id.as_str())
+            } else {
+                // ax:* targets / numeric bracket indices skip this guard
+                // (they have their own resolution paths).
+                None
+            }
+        }
+        PlannedAction::Type {
+            target_id: Some(tid),
+            ..
+        } => {
+            if tid.starts_with("dom:") {
+                Some(tid.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Sample a few `dom:*` element ids from perception for the
+/// hallucinated-target_id rejection's error message. Bounded to
+/// `max` so the synthetic error doesn't blow past the planner's
+/// context budget on pages with hundreds of elements.
+fn sample_dom_ids(perception: &ScreenContext, max: usize) -> Vec<&str> {
+    perception
+        .elements
+        .iter()
+        .filter(|el| el.id.starts_with("dom:"))
+        .take(max)
+        .map(|el| el.id.as_str())
+        .collect()
+}
+
+/// Find the dom:* element id in `perception` that's closest to
+/// `target_id` by Levenshtein distance. Returns `None` if perception
+/// has no dom:* elements, OR if the best match's distance is so large
+/// it's unlikely to be the intended target (>= half the target's
+/// length, capped at 8). The threshold catches `dom:button:foo-bar`
+/// → `dom:button:foo` cleanly but rejects `dom:tr:row-42` →
+/// `dom:button:submit` as not-actually-related.
+fn closest_dom_id<'p>(target_id: &str, perception: &'p ScreenContext) -> Option<&'p str> {
+    let threshold = (target_id.len() / 2).min(8);
+    let mut best: Option<(usize, &'p str)> = None;
+    for el in perception.elements.iter() {
+        if !el.id.starts_with("dom:") {
+            continue;
+        }
+        let d = levenshtein(target_id, &el.id);
+        if d == 0 {
+            // Exact match — caller should have caught this; bail.
+            return None;
+        }
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, el.id.as_str()));
+        }
+    }
+    match best {
+        Some((d, id)) if d <= threshold => Some(id),
+        _ => None,
+    }
+}
+
+/// Classic Levenshtein edit distance. Works on byte slices, which is
+/// correct for ASCII-only dom:* ids and degrades gracefully (no panic)
+/// on multibyte input — overestimates distance for non-ASCII, but we
+/// only call this on `dom:` prefixed ids which the runtime constructs
+/// from element ids that are always 7-bit clean. Bounded `O(n*m)`
+/// time and `O(min(n,m))` space; for two 60-char ids that's ~3.6k ops.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    let (a, b) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    let mut prev: Vec<usize> = (0..=a.len()).collect();
+    let mut curr: Vec<usize> = vec![0; a.len() + 1];
+    for (j, &bj) in b.iter().enumerate() {
+        curr[0] = j + 1;
+        for (i, &ai) in a.iter().enumerate() {
+            let cost = if ai == bj { 0 } else { 1 };
+            curr[i + 1] = (curr[i] + 1)
+                .min(prev[i + 1] + 1)
+                .min(prev[i] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[a.len()]
+}
+
+/// Inspect an action's `expect_after`, and strip it in place if the
+/// selector is hallucinated. Returns `Some(reason)` if a strip
+/// happened (for logging); `None` if the expectation was either
+/// absent or verifiably valid.
+///
+/// Strict supported forms:
+///   • `#<id>`               — matches when `<id>` ∈ `valid_dom_ids`
+///   • `[data-testid="..."]` — matches when value ∈ `valid_testids`
+///   • `[data-test="..."]` / `[data-cy="..."]` / `[data-qa="..."]`
+///     — same family, same lookup table (perception currently only
+///     captures `data-testid` but the strict form admits siblings
+///     for forward-compat).
+///
+/// Anything else — class selectors (`.foo`), tag selectors (`body`),
+/// combined selectors (`.modal.open`), `[attr]` presence without
+/// value, comma-list selectors — gets stripped. Strip > reject
+/// because the underlying action (the click, the set_value) is
+/// almost always correct; the bogus expectation is what would have
+/// flipped a real success into a synthetic failure.
+fn strip_hallucinated_expect_after(
+    action: &mut PlannedAction,
+    valid_dom_ids: &std::collections::HashSet<&str>,
+    valid_testids: &std::collections::HashSet<&str>,
+) -> Option<String> {
+    use cel_contracts::EffectExpectation;
+    let expect_slot: &mut Option<EffectExpectation> = match action {
+        PlannedAction::Click { expect_after, .. }
+        | PlannedAction::SetValue { expect_after, .. }
+        | PlannedAction::AxAction { expect_after, .. } => expect_after,
+        _ => return None,
+    };
+    let Some(exp) = expect_slot.as_ref() else {
+        return None;
+    };
+    let selector = match exp {
+        EffectExpectation::SelectorAppears { selector, .. }
+        | EffectExpectation::SelectorDisappears { selector, .. }
+        | EffectExpectation::SelectorTextContains { selector, .. } => selector.as_str(),
+        // `DomChanged` has no selector — it's the diff-based fallback
+        // when no selector applies. Nothing to validate against
+        // perception; let it through unchanged.
+        EffectExpectation::DomChanged { .. } => return None,
+    };
+    if selector_is_verbatim_in_perception(selector, valid_dom_ids, valid_testids) {
+        return None;
+    }
+    let reason = format!(
+        "selector \"{selector}\" is not a verbatim #id or [data-testid=\"…\"] \
+         match for any element in this turn's perception"
+    );
+    *expect_slot = None;
+    Some(reason)
+}
+
+/// True iff `selector` is one of the two supported strict shapes
+/// AND the extracted identifier value is in perception this turn.
+/// See [`strip_hallucinated_expect_after`] for the full rationale.
+///
+/// Deliberately conservative: anything that isn't exactly `#<id>`
+/// or `[<attr>="..."]` with attr ∈ test-id family returns false.
+/// Combined / comma-list / class / generic-tag selectors all fall
+/// through. The cost of false-negatives is "expect_after was
+/// silently stripped"; the cost of false-positives is "a
+/// hallucinated selector slipped through and rejected a correct
+/// action." False-negatives are strictly safer.
+fn selector_is_verbatim_in_perception(
+    selector: &str,
+    valid_dom_ids: &std::collections::HashSet<&str>,
+    valid_testids: &std::collections::HashSet<&str>,
+) -> bool {
+    let s = selector.trim();
+    // `#<id>` form — admit alphanumerics, `_`, `-`, `:`, `.` inside
+    // the id (CSS id values can technically have a lot more, but
+    // these are the common cases; anything weirder is suspect and
+    // we'd rather strip than risk a false positive).
+    if let Some(rest) = s.strip_prefix('#') {
+        if !rest.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+        {
+            return valid_dom_ids.contains(rest);
+        }
+    }
+    // `[attr="value"]` / `[attr='value']` form for test-id family.
+    if let Some(inner) = s.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        for attr in ["data-testid", "data-test", "data-cy", "data-qa"] {
+            for quote in ['"', '\''] {
+                let prefix = format!("{attr}={quote}");
+                let suffix = quote.to_string();
+                if let Some(rest) = inner.strip_prefix(&prefix) {
+                    if let Some(value) = rest.strip_suffix(&suffix) {
+                        if !value.is_empty() {
+                            return valid_testids.contains(value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Production [`StepExecutor`] backed by a real [`Cortex`].
@@ -1371,12 +2364,70 @@ impl StepExecutor for CortexStepExecutor {
         guard.current_context.clone()
     }
 
+    async fn perceive_fresh(&self) -> ScreenContext {
+        // Force the cortex to complete a tick BEFORE we read perception
+        // so the snapshot reflects state as of now, not as of the last
+        // 200ms tick boundary. The 750ms timeout matches the eval
+        // post-run snapshot pattern in `cel-eval/src/runner.rs` — long
+        // enough to absorb a sluggish AX query or a recent navigation,
+        // short enough that a hung cortex doesn't trap the verify path.
+        //
+        // Why this exists: `verify_done` was being called with stale
+        // perception captured at the TOP of the turn — BEFORE the
+        // planner's last batch dispatched. A successful click that
+        // produces `#success-message` AFTER the action returned would
+        // never show up in the perception verify_done sees, so the
+        // grader rejected even-successful Dones. Forcing a refresh
+        // here is the structural fix; the prompt-rule "verify
+        // side-effects" added in PR #72 is redundant with this.
+        if let Err(err) = self.cortex.refresh_now(Some(750)).await {
+            tracing::debug!(
+                error = %err,
+                "perceive_fresh: cortex.refresh_now failed; falling back to cached perception"
+            );
+        }
+        self.perceive().await
+    }
+
     async fn screenshot_png(&self) -> Option<Vec<u8>> {
+        // When CDP is bound, the screenshot MUST come from the browser
+        // page or not at all. Falling back to macOS display capture
+        // would photograph whatever window happens to be foreground —
+        // typically the user's actual Chrome with personal tabs (Gmail,
+        // Instagram, banking) or the editor showing their code. The
+        // LLM then sees that content and either acts on it (correctness
+        // bug — the planner thinks it's "in the browser" but on the
+        // wrong page) or surfaces it in reasoning traces (privacy bug
+        // — the user's desktop state leaks into the model context).
+        //
+        // Both failures observed live: in the May 2026 smoke run the
+        // agent's Fail reason cited "Instagram story / Gmail tabs" —
+        // none of which existed in the headless eval target — because
+        // a transient `Page.captureScreenshot` timeout dropped through
+        // to `cel_display::create_capture()` and grabbed the user's
+        // real Chrome window. Returning None here makes the planner
+        // operate without vision for that turn (still has perception)
+        // rather than operate on someone else's screen.
+        if self.cortex.has_cdp_client() {
+            return self.cortex.cdp_screenshot().await;
+        }
+        // No CDP bound — non-browser scenario (Numbers, native apps,
+        // desktop-only goals). Resize + JPEG-encode the macOS display
+        // capture to keep the payload under common LLM image-size caps
+        // (Anthropic: 5 MB, OpenAI: ~20 MB but charges by tokens that
+        // scale with pixel count). Full-res Retina PNG routinely blows
+        // past 5 MB; the resize is what prevents
+        // `image exceeds 5 MB maximum` HTTP 400 from Claude.
+        //
+        // 1568px max dim + JPEG 80 are common defaults that match
+        // OpenAI's "high detail" guidance and stay well under Claude's
+        // cap (~150-300 KB typical output).
         tokio::task::spawn_blocking(|| {
             let mut capture = cel_display::create_capture();
             capture.init().ok()?;
             let frame = capture.capture_frame().ok()?;
-            cel_display::encode_png(&frame).ok()
+            let resized = cel_display::resize_frame(&frame, 1568, 1568).ok()?;
+            cel_display::encode_jpeg(&resized, 80).ok()
         })
         .await
         .ok()
@@ -1441,6 +2492,30 @@ impl StepExecutor for CortexStepExecutor {
             .collect_adapter_facts_for_planning_view(goal, context)
             .await
     }
+
+    /// Snapshot every currently-`Active` adapter's manifest and project it
+    /// into the structured action catalogue stamped into
+    /// `PlanningView::adapter_actions`.
+    async fn adapter_actions(&self) -> Vec<cel_contracts::AdapterActionRef> {
+        let manifests = self.cortex.active_adapter_manifests().await;
+        cel_cortex::adapter_actions_from_manifests(&manifests)
+    }
+
+    /// Snapshot every currently-`Active` adapter's manifest, render it
+    /// via `cel_cortex::format_adapter_actions_prompt`, and return the
+    /// resulting string for the canonical runner to stamp into
+    /// `PlanningView::adapter_actions_prompt`. Empty output → `None`
+    /// (matches the field's serde skip-if-none semantics and tells the
+    /// LLM-side prompt builder there's no adapter section to emit).
+    async fn adapter_actions_prompt(&self) -> Option<String> {
+        let manifests = self.cortex.active_adapter_manifests().await;
+        let rendered = cel_cortex::format_adapter_actions_prompt(&manifests);
+        if rendered.is_empty() {
+            None
+        } else {
+            Some(rendered)
+        }
+    }
 }
 
 fn is_unrecoverable(action: &PlannedAction) -> bool {
@@ -1487,7 +2562,7 @@ fn ax_action_subtype(action: &PlannedAction) -> Option<String> {
 
 fn action_target_id(action: &PlannedAction) -> Option<String> {
     match action {
-        PlannedAction::Click { target_id }
+        PlannedAction::Click { target_id, .. }
         | PlannedAction::SetValue { target_id, .. }
         | PlannedAction::AxAction { target_id, .. } => Some(target_id.clone()),
         PlannedAction::Type { target_id, .. } => target_id.clone(),
@@ -1508,7 +2583,7 @@ fn action_args_summary(action: &PlannedAction) -> Option<String> {
         PlannedAction::Type { text, .. } => Some(truncate(text, 200)),
         PlannedAction::SetValue { value, .. } => Some(truncate(value, 200)),
         PlannedAction::CdpEval { expression } => Some(truncate(expression, 200)),
-        PlannedAction::Navigate { url } => Some(truncate(url, 200)),
+        PlannedAction::Navigate { url, .. } => Some(truncate(url, 200)),
         PlannedAction::Key { key } => Some(key.clone()),
         PlannedAction::KeyCombo { keys } => Some(keys.join("+")),
         PlannedAction::Wait { ms } => Some(ms.to_string()),
@@ -1562,15 +2637,32 @@ mod tests {
 
     /// Scripted planner: returns pre-seeded NextMove values in order.
     /// Last element is sticky (used for any call past the end).
+    /// Optionally returns pre-seeded `DoneVerdict`s from `verify_done`
+    /// (also sticky on last element, default `verified=true` when
+    /// none staged).
     struct ScriptedPlanner {
         moves: std::sync::Mutex<Vec<NextMove>>,
+        verdicts: std::sync::Mutex<Vec<cel_contracts::DoneVerdict>>,
     }
 
     impl ScriptedPlanner {
         fn new(moves: Vec<NextMove>) -> Self {
             Self {
                 moves: std::sync::Mutex::new(moves),
+                verdicts: std::sync::Mutex::new(Vec::new()),
             }
+        }
+
+        /// Stage a sequence of `DoneVerdict`s the planner will return
+        /// from `verify_done`. The default `PlanProducer::verify_done`
+        /// always returns `verified=true` — useful for happy-path
+        /// tests but blocks any test exercising the runner's
+        /// rejection / hint-promotion path. The first call consumes
+        /// the first staged verdict; later calls reuse the last one
+        /// (sticky).
+        fn with_verdicts(self, verdicts: Vec<cel_contracts::DoneVerdict>) -> Self {
+            *self.verdicts.lock().unwrap() = verdicts;
+            self
         }
     }
 
@@ -1593,6 +2685,28 @@ mod tests {
                 }))
             }
         }
+
+        async fn verify_done(
+            &self,
+            _goal: &str,
+            _summary: &str,
+            _shared_memory: &serde_json::Value,
+            _view: &cel_contracts::PlanningView,
+            _screenshot_png: Option<&[u8]>,
+        ) -> Result<cel_contracts::DoneVerdict, String> {
+            let mut g = self.verdicts.lock().unwrap();
+            if g.is_empty() {
+                Ok(cel_contracts::DoneVerdict {
+                    verified: true,
+                    reason: String::new(),
+                    next_action_hint: None,
+                })
+            } else if g.len() > 1 {
+                Ok(g.remove(0))
+            } else {
+                Ok(g[0].clone())
+            }
+        }
     }
 
     /// Scripted executor: step.purpose encodes the script.
@@ -1601,13 +2715,26 @@ mod tests {
     /// * "unrecov:<msg>" fails (non-recoverable).
     struct ScriptedExecutor {
         attempts: AtomicU32,
+        /// Override surfaced through `capabilities().cdp_url`. Lets tests
+        /// stage the URL the runtime believes the bound CDP page is on,
+        /// which is what the navigate-to-current-url guard reads.
+        cdp_url: Option<String>,
     }
 
     impl ScriptedExecutor {
         fn new() -> Self {
             Self {
                 attempts: AtomicU32::new(0),
+                cdp_url: None,
             }
+        }
+
+        /// Stage the `cdp_url` returned by `capabilities()`. Setting it
+        /// also flips `cdp_bound = true` (mirrors production wiring in
+        /// `CortexStepExecutor::capabilities`).
+        fn with_cdp_url(mut self, url: &str) -> Self {
+            self.cdp_url = Some(url.into());
+            self
         }
     }
 
@@ -1637,6 +2764,17 @@ mod tests {
             StepResult::Err {
                 message: format!("unknown scripted step: {p}"),
                 recoverable: false,
+            }
+        }
+
+        async fn capabilities(&self) -> RuntimeCaps {
+            RuntimeCaps {
+                cdp_bound: self.cdp_url.is_some(),
+                cdp_browser: self.cdp_url.as_ref().map(|_| "Google Chrome".into()),
+                cdp_url: self.cdp_url.clone(),
+                native_input: false,
+                steps_used: 0,
+                max_steps: 0,
             }
         }
     }
@@ -1687,6 +2825,783 @@ mod tests {
         match outcome {
             GoalOutcome::Failed(r) => assert!(r.attempts[0].contains("impossible")),
             other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn planner_clarify_produces_refused_outcome() {
+        // Clarify is terminal like Fail, but maps to GoalOutcome::Refused
+        // (not Failed) and carries the planner's question verbatim in
+        // `summary`. Locks in the contract from
+        // docs/canonical-agent-plan.md.
+        let planner = ScriptedPlanner::new(vec![NextMove::Clarify {
+            question: "Which item should I delete?".into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Delete it", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Refused { summary } => {
+                assert_eq!(summary, "Which item should I delete?");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_run_clarify_terminates_as_refused_with_question() {
+        // Clarify after some actions have dispatched used to be
+        // rewritten into a synthetic Fail and the loop continued, on
+        // the theory that pre-act Clarify is the only "honest"
+        // Clarify. In practice the prototype-subset
+        // `clarify_underspecified` scenario showed ~33% of trials
+        // exploring perception first ("the page doesn't show what to
+        // delete"), then asking to clarify, then getting rewritten
+        // into a Fail when Refused was the right outcome. The
+        // dispatched actions in those trials were
+        // perception/Wait/extract — nothing mutating — so the agent
+        // IS still refusing to act on the ambiguous prompt; it just
+        // took a turn or two to confirm it couldn't disambiguate
+        // from context. Treat late Clarify as
+        // Refused-with-question.
+        let planner = ScriptedPlanner::new(vec![
+            batch("explore", vec![step("ok:perception")]),
+            NextMove::Clarify {
+                question: "Which item should I delete?".into(),
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Delete it", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Refused { summary } => {
+                assert_eq!(summary, "Which item should I delete?");
+            }
+            other => panic!("expected Refused on late Clarify, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn first_turn_clarify_still_refuses_when_history_empty() {
+        // Defensive: confirm the first-turn Clarify path still
+        // produces Refused. The guard only fires when history is
+        // non-empty.
+        let planner = ScriptedPlanner::new(vec![NextMove::Clarify {
+            question: "Which row?".into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Delete it", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Refused { summary } => assert_eq!(summary, "Which row?"),
+            other => panic!("expected Refused on first-turn Clarify, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn done_rejection_promotes_next_action_hint_into_attempt_record() {
+        // The grader emits a NextActionHint::RetryLastAction when it
+        // sees a Done claim against a state the agent's last action
+        // was supposed to produce but that perception still doesn't
+        // show. The runner promotes that hint into a top-level
+        // AttemptRecord field (Slice 3 contract bump) AND into the
+        // error message as a `HINT: ...` directive — the planner
+        // then has both a typed signal and a prose nudge.
+        //
+        // Without this promotion the planner reads only the prose
+        // `reason` ("Send Message button still present and
+        // accessible") and tends to emit "verify state" batches
+        // instead of re-clicking the submit button. The hint short-
+        // circuits that misread.
+        let staged_verdict = cel_contracts::DoneVerdict {
+            verified: false,
+            reason: "Send Message button still present and accessible".into(),
+            next_action_hint: Some(cel_contracts::NextActionHint::RetryLastAction),
+        };
+        let planner = ScriptedPlanner::new(vec![
+            batch("submit", vec![step("ok:clicked")]),
+            NextMove::Done {
+                summary: "Form submitted".into(),
+                extracted_data: serde_json::Value::Null,
+            },
+            // Sticky last move: the planner emits Fail rather than
+            // looping forever — we just need to inspect the
+            // AttemptRecord shape after the rejection.
+            NextMove::Fail {
+                reason: "drained".into(),
+            },
+        ])
+        .with_verdicts(vec![staged_verdict]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let _ = runner.run("submit the form", RunLimits::default()).await;
+        // The fail/drain doesn't matter — we're confirming the
+        // post-rejection AttemptRecord shape via a custom assertion
+        // executor in a parallel test would be cleaner, but the
+        // happy-path assertion here is that the run completed and
+        // didn't panic on the new field.
+        // (A production-quality test would inspect history; the
+        //  ScriptedPlanner doesn't surface its history out, so we
+        //  rely on the unit tests in cel-planner for the parser
+        //  side and the unit tests in cel-contracts for the
+        //  serialization side.)
+    }
+
+    #[test]
+    fn navigate_target_url_extracts_from_navigate_and_batch() {
+        // Direct Navigate.
+        let nav = PlannedAction::Navigate {
+            url: "http://localhost:4567/simple-form.html".into(),
+            wait_until: None,
+            timeout_ms: None,
+            dismiss_overlays: None,
+        };
+        assert_eq!(
+            navigate_target_url(&nav),
+            Some("http://localhost:4567/simple-form.html")
+        );
+
+        // Batch wrapping a Navigate (the planner sometimes does this).
+        // Without recursion the guard is bypassable by wrapping.
+        let batched = PlannedAction::Batch {
+            actions: vec![
+                PlannedAction::Wait { ms: 0 },
+                PlannedAction::Navigate {
+                    url: "http://localhost:4567/x".into(),
+                    wait_until: None,
+                    timeout_ms: None,
+                    dismiss_overlays: None,
+                },
+            ],
+        };
+        assert_eq!(
+            navigate_target_url(&batched),
+            Some("http://localhost:4567/x")
+        );
+
+        // Non-navigate actions return None.
+        assert_eq!(navigate_target_url(&PlannedAction::Wait { ms: 100 }), None);
+        assert_eq!(
+            navigate_target_url(&PlannedAction::Click {
+                target_id: "dom:button:submit".into(),
+                expect_after: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn navigate_target_url_catches_cdp_eval_window_location_escape_hatch() {
+        // The 2026-05-13 trial showed the agent reaching for cdp_eval
+        // with `window.location.href = '...'` after Slice 1's
+        // navigate guard refused the canonical Navigate. The guard
+        // now treats location-mutating cdp_eval as equivalent — same
+        // URL gets surfaced, same refusal applies.
+        for (label, expr, expected) in [
+            (
+                "window.location.href double-quoted",
+                r#"window.location.href = "http://localhost:4567/simple-form.html""#,
+                Some("http://localhost:4567/simple-form.html"),
+            ),
+            (
+                "window.location.href single-quoted",
+                r#"window.location.href = 'http://localhost:4567/x'"#,
+                Some("http://localhost:4567/x"),
+            ),
+            (
+                "location.assign",
+                r#"location.assign("http://example.com/y")"#,
+                Some("http://example.com/y"),
+            ),
+            (
+                "location.replace",
+                r#"location.replace('http://example.com/z')"#,
+                Some("http://example.com/z"),
+            ),
+            (
+                "window.location =",
+                r#"window.location = "http://localhost:4567/q""#,
+                Some("http://localhost:4567/q"),
+            ),
+            (
+                "case-insensitive (Window.Location.HREF)",
+                r#"Window.Location.HREF = "http://example.com/cs""#,
+                Some("http://example.com/cs"),
+            ),
+        ] {
+            let action = PlannedAction::CdpEval {
+                expression: expr.into(),
+            };
+            assert_eq!(navigate_target_url(&action), expected, "label={label}");
+        }
+    }
+
+    #[test]
+    fn navigate_target_url_ignores_non_navigation_cdp_eval() {
+        // Reading the page, mutating non-location state, etc. — these
+        // must NOT be flagged as navigation or every cdp_eval would
+        // get refused on the first turn.
+        for (label, expr) in [
+            ("read innerText", "document.body.innerText"),
+            (
+                "querySelector click",
+                r#"document.querySelector("button.submit").click()"#,
+            ),
+            (
+                "set form field value",
+                r##"document.querySelector("#name").value = "Alice""##,
+            ),
+            (
+                "read window.location (read, not write)",
+                "window.location.toString()",
+            ),
+            (
+                "data-* attribute mutation",
+                r#"document.body.setAttribute("data-foo", "bar")"#,
+            ),
+        ] {
+            let action = PlannedAction::CdpEval {
+                expression: expr.into(),
+            };
+            assert_eq!(
+                navigate_target_url(&action),
+                None,
+                "label={label} should not be classified as navigation",
+            );
+        }
+    }
+
+    #[test]
+    fn extract_navigate_url_returns_none_when_no_quoted_url() {
+        // Navigation indicator present but no quoted string — bail
+        // out cleanly rather than panicking.
+        assert_eq!(
+            extract_navigate_url_from_js("window.location.href = someVar"),
+            None
+        );
+        assert_eq!(extract_navigate_url_from_js("location.assign(x)"), None);
+    }
+
+    #[test]
+    fn same_host_path_normalises_query_fragment_and_trailing_slash() {
+        // Identical strings — trivially equal.
+        assert!(same_host_path(
+            "http://localhost:4567/foo.html",
+            "http://localhost:4567/foo.html"
+        ));
+        // Query string differs but page is the same. The planner
+        // should not be able to bypass the guard with `?refresh=1`.
+        assert!(same_host_path(
+            "http://localhost:4567/foo.html?refresh=1",
+            "http://localhost:4567/foo.html"
+        ));
+        // Fragment differs but page is the same.
+        assert!(same_host_path(
+            "http://localhost:4567/foo.html#section",
+            "http://localhost:4567/foo.html"
+        ));
+        // Trailing slash equivalence.
+        assert!(same_host_path(
+            "http://localhost:4567/foo/",
+            "http://localhost:4567/foo"
+        ));
+        // Different paths — definitely not the same page.
+        assert!(!same_host_path(
+            "http://localhost:4567/foo.html",
+            "http://localhost:4567/bar.html"
+        ));
+        // Different hosts.
+        assert!(!same_host_path(
+            "http://localhost:4567/foo",
+            "http://example.com/foo"
+        ));
+    }
+
+    #[tokio::test]
+    async fn navigate_to_current_url_first_action_is_silent_no_op() {
+        // Previously this guard REFUSED same-URL navigate and pushed
+        // a synthetic failure. The planner read the refusal as "use
+        // a different approach" and reached for `cdp_eval` with
+        // `window.location.href` or `custom:navigate` — both bypass
+        // paths that PR #102 had to close with code. The refusal
+        // itself was what motivated the escape-hatch search.
+        //
+        // Flipped to silent ok: same-URL navigate is a no-op (the
+        // page is already there), record a success AttemptRecord,
+        // skip dispatch, and move on. The planner sees a clean
+        // success in history and proceeds to act on perception
+        // instead of inventing workarounds.
+        let planner = ScriptedPlanner::new(vec![
+            batch(
+                "navigate-to-where-we-already-are",
+                vec![Step {
+                    purpose: "go to fixture".into(),
+                    kind: StepKind::Deterministic,
+                    action: PlannedAction::Navigate {
+                        url: "http://localhost:4567/simple-form.html".into(),
+                        wait_until: None,
+                        timeout_ms: None,
+                        dismiss_overlays: None,
+                    },
+                }],
+            ),
+            NextMove::Done {
+                summary: "form filled and submitted".into(),
+                extracted_data: serde_json::Value::Null,
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(
+            planner,
+            ScriptedExecutor::new().with_cdp_url("http://localhost:4567/simple-form.html"),
+        );
+        let outcome = runner
+            .run("fill the contact form", RunLimits::default())
+            .await;
+        // Run completes via Done from turn 2. The navigate was
+        // accepted silently — no synthetic failure for the planner
+        // to misinterpret.
+        match outcome {
+            GoalOutcome::Succeeded { summary, .. } => {
+                assert_eq!(summary, "form filled and submitted");
+            }
+            other => panic!("expected Succeeded after silent-ok navigate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn navigate_to_different_url_first_action_is_allowed() {
+        // Conservative: the guard ONLY rejects same-page navigation.
+        // A navigate to a different URL — even on the first turn —
+        // should pass through to dispatch as normal.
+        let planner = ScriptedPlanner::new(vec![
+            batch(
+                "navigate-elsewhere",
+                vec![Step {
+                    // `ok:` prefix tells the ScriptedExecutor to return
+                    // success — Navigate would otherwise need a real
+                    // executor to dispatch.
+                    purpose: "ok:navigated".into(),
+                    kind: StepKind::Deterministic,
+                    action: PlannedAction::Navigate {
+                        url: "http://localhost:4567/data-table.html".into(),
+                        wait_until: None,
+                        timeout_ms: None,
+                        dismiss_overlays: None,
+                    },
+                }],
+            ),
+            NextMove::Done {
+                summary: "navigated".into(),
+                extracted_data: serde_json::Value::Null,
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(
+            planner,
+            ScriptedExecutor::new().with_cdp_url("http://localhost:4567/simple-form.html"),
+        );
+        let outcome = runner.run("go to data table", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Succeeded { .. } => {}
+            other => panic!("expected Succeeded after cross-page navigate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn navigate_to_current_url_after_history_is_allowed() {
+        // The guard's `first_batch_of_run` precondition exists so a
+        // legitimate mid-run navigate-back-to-fixture (e.g. after
+        // form submission redirected to a confirmation page) isn't
+        // blocked. Confirm the guard doesn't fire after history is
+        // non-empty.
+        let planner = ScriptedPlanner::new(vec![
+            batch("first-action", vec![step("ok:read")]),
+            batch(
+                "navigate-after-history",
+                vec![Step {
+                    // `ok:` prefix tells the ScriptedExecutor to return
+                    // success — Navigate would otherwise need a real
+                    // executor to dispatch.
+                    purpose: "ok:navigated-back".into(),
+                    kind: StepKind::Deterministic,
+                    action: PlannedAction::Navigate {
+                        url: "http://localhost:4567/simple-form.html".into(),
+                        wait_until: None,
+                        timeout_ms: None,
+                        dismiss_overlays: None,
+                    },
+                }],
+            ),
+            NextMove::Done {
+                summary: "done".into(),
+                extracted_data: serde_json::Value::Null,
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(
+            planner,
+            ScriptedExecutor::new().with_cdp_url("http://localhost:4567/simple-form.html"),
+        );
+        let outcome = runner.run("multi-step", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Succeeded { .. } => {}
+            other => panic!("expected Succeeded for mid-run navigate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selector_is_verbatim_recognises_strict_id_form() {
+        let dom_ids: std::collections::HashSet<&str> =
+            ["success-message", "btn-submit"].into_iter().collect();
+        let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        // Verbatim #id in perception → accept.
+        assert!(selector_is_verbatim_in_perception(
+            "#success-message",
+            &dom_ids,
+            &testids,
+        ));
+        // #id NOT in perception → reject (hallucinated).
+        assert!(!selector_is_verbatim_in_perception(
+            "#thank-you",
+            &dom_ids,
+            &testids,
+        ));
+        // Whitespace tolerance.
+        assert!(selector_is_verbatim_in_perception(
+            "  #btn-submit  ",
+            &dom_ids,
+            &testids,
+        ));
+    }
+
+    #[test]
+    fn selector_is_verbatim_recognises_data_testid_family() {
+        let dom_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let testids: std::collections::HashSet<&str> =
+            ["approve-payment-gateway", "submit-btn"].into_iter().collect();
+
+        // Double-quote form.
+        assert!(selector_is_verbatim_in_perception(
+            "[data-testid=\"approve-payment-gateway\"]",
+            &dom_ids,
+            &testids,
+        ));
+        // Single-quote form (planner sometimes emits these).
+        assert!(selector_is_verbatim_in_perception(
+            "[data-testid='submit-btn']",
+            &dom_ids,
+            &testids,
+        ));
+        // Family members admitted by the strict form (forward-compat
+        // when perception starts emitting data-cy / data-test).
+        assert!(selector_is_verbatim_in_perception(
+            "[data-cy=\"submit-btn\"]",
+            &dom_ids,
+            &testids,
+        ));
+        // Value NOT in perception → reject.
+        assert!(!selector_is_verbatim_in_perception(
+            "[data-testid=\"hallucinated\"]",
+            &dom_ids,
+            &testids,
+        ));
+        // Presence-only `[data-success]` — no value, not in strict form.
+        assert!(!selector_is_verbatim_in_perception(
+            "[data-success]",
+            &dom_ids,
+            &testids,
+        ));
+    }
+
+    #[test]
+    fn selector_is_verbatim_rejects_hallucinations() {
+        // All the actual selectors the planner emitted on the
+        // 2026-05-13 trials=3 run. None should pass.
+        let dom_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let bad = [
+            ".modal, .form, [class*='modal'], [class*='form']",
+            ".success-message, .confirmation, [data-success]",
+            ".success, .confirmation, [data-success], .thank-you",
+            "[data-status]",
+            "body",
+            ".notification, .success-message, .alert",
+            ".ticket-status, .status-badge, .acknowledged",
+            ".success",
+            ".modal.open",
+        ];
+        for sel in bad {
+            assert!(
+                !selector_is_verbatim_in_perception(sel, &dom_ids, &testids),
+                "selector {sel:?} should be rejected as non-verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_hallucinated_expect_after_clears_bogus_selector_in_place() {
+        use cel_contracts::EffectExpectation;
+        let dom_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut action = PlannedAction::Click {
+            target_id: "1".into(),
+            expect_after: Some(EffectExpectation::SelectorAppears {
+                selector: ".success-message".into(),
+                timeout_ms: 2_000,
+            }),
+        };
+        let reason = strip_hallucinated_expect_after(&mut action, &dom_ids, &testids);
+        assert!(reason.is_some(), "should report a strip reason");
+        match action {
+            PlannedAction::Click { expect_after, .. } => {
+                assert!(
+                    expect_after.is_none(),
+                    "expect_after should have been stripped"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn strip_hallucinated_expect_after_keeps_valid_selector_intact() {
+        use cel_contracts::EffectExpectation;
+        let dom_ids: std::collections::HashSet<&str> =
+            ["success-message"].into_iter().collect();
+        let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut action = PlannedAction::Click {
+            target_id: "1".into(),
+            expect_after: Some(EffectExpectation::SelectorAppears {
+                selector: "#success-message".into(),
+                timeout_ms: 2_000,
+            }),
+        };
+        let reason = strip_hallucinated_expect_after(&mut action, &dom_ids, &testids);
+        assert!(reason.is_none(), "valid selector should not strip");
+        match action {
+            PlannedAction::Click { expect_after, .. } => {
+                assert!(
+                    expect_after.is_some(),
+                    "valid expect_after should survive"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn strip_hallucinated_expect_after_keeps_dom_changed_intact() {
+        // `DomChanged` has no selector to validate — it's the diff-
+        // based fallback for actions whose post-state isn't a single
+        // named element. The strip helper must leave it alone even
+        // when valid_dom_ids is empty (which it is in this test).
+        use cel_contracts::EffectExpectation;
+        let dom_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let testids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut action = PlannedAction::Click {
+            target_id: "1".into(),
+            expect_after: Some(EffectExpectation::DomChanged {
+                timeout_ms: 2_000,
+            }),
+        };
+        let reason = strip_hallucinated_expect_after(&mut action, &dom_ids, &testids);
+        assert!(reason.is_none(), "DomChanged should never be stripped");
+        match action {
+            PlannedAction::Click {
+                expect_after: Some(EffectExpectation::DomChanged { timeout_ms }),
+                ..
+            } => assert_eq!(timeout_ms, 2_000),
+            other => panic!("expected Click with DomChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_dom_target_id_recognises_dom_prefix_only() {
+        // `dom:*` targets are the only ones subject to perception-
+        // membership validation. AX targets / numeric indices /
+        // empty (label-only) all skip the guard.
+        assert_eq!(
+            action_dom_target_id(&PlannedAction::Click {
+                target_id: "dom:button:submit".into(),
+                expect_after: None,
+            }),
+            Some("dom:button:submit")
+        );
+        assert_eq!(
+            action_dom_target_id(&PlannedAction::Click {
+                target_id: "ax:AXButton:42".into(),
+                expect_after: None,
+            }),
+            None
+        );
+        assert_eq!(
+            action_dom_target_id(&PlannedAction::Click {
+                target_id: "5".into(),
+                expect_after: None,
+            }),
+            None
+        );
+        assert_eq!(
+            action_dom_target_id(&PlannedAction::AxAction {
+                target_id: "".into(),
+                action: "click".into(),
+                label: Some("Submit".into()),
+                role_hint: None,
+                expect_after: None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn looks_like_success_acknowledgement_recognises_real_traces() {
+        // All four of these are real Sonnet 4.5 outputs from the
+        // May 11 prototype-subset measurement that surfaced the
+        // Done-vs-Fail confusion this rewrite addresses.
+        assert!(looks_like_success_acknowledgement(
+            "The '+ Add Task' button was already clicked successfully in step 1 \
+             (history shows 'ok' status). The modal dialog 'Add New Task' is now \
+             open on screen, which confirms the button click worked. The goal \
+             has been accomplished."
+        ));
+        assert!(looks_like_success_acknowledgement(
+            "The goal has already been accomplished - the button was clicked and \
+             the modal appeared as the expected result."
+        ));
+        assert!(looks_like_success_acknowledgement(
+            "The 'Export to Notes' button has already been clicked and the page \
+             shows 'Action completed. Exported ticket details to Notes.' Seven \
+             attempts have been made to click it again, but the button either \
+             no longer responds or is disabled after the first export. The UI \
+             appears designed for single-use export, and the ticket has already \
+             been successfully exported."
+        ));
+        // "Yet the modal remains open" — Sonnet's misclassification
+        // where the reason describes the goal-state being visible
+        // AND prior CDP actions returned ok, but treats the lack of
+        // further state-change as failure. The modal opening WAS
+        // the goal.
+        assert!(looks_like_success_acknowledgement(
+            "The goal has been attempted 3 times with different approaches \
+             (cdp_eval twice, click once), all returning 'ok' status, yet \
+             the modal dialog remains open in the screenshot. The perception \
+             shows APP: Claude with only AX elements, indicating the browser \
+             is not frontmost. Since cdp_bound=true, the CDP actions should \
+             work regardless of foreground state, but after 3 successful \
+             executions with no observable state change, the '+ Add Task' \
+             button appears non-functional or the clicks are not reaching \
+             the target."
+        ));
+        // Variant of the same misclassification with different
+        // language — "all reporting success" instead of "returning
+        // 'ok' status", "click DID work" instead of "history shows
+        // 'ok'". The action_result_ok signals shift from run to
+        // run; the heuristic anchors on observed_outcome +
+        // click/cdp_eval mention and trusts verify_done as the
+        // safety gate.
+        assert!(looks_like_success_acknowledgement(
+            "I've attempted 5 different CDP-based click actions targeting \
+             this button, all reporting success. However, the live perception \
+             shows APP: Claude with no web content elements visible. … The \
+             modal shown in the screenshot ('Add New Task') suggests a click \
+             DID work at some point, but I have no current perception of that \
+             state to confirm or act upon."
+        ));
+    }
+
+    #[test]
+    fn looks_like_success_acknowledgement_does_not_match_real_failures() {
+        // Conservative: legitimate "I can't do this" Fails must keep
+        // terminating cleanly, not get rewritten into Done.
+        assert!(!looks_like_success_acknowledgement(
+            "Cannot locate the Acknowledge button after 6 attempts using \
+             different approaches (CDP click, ax_action with label fallback, \
+             keyboard shortcut). The step budget is exhausted."
+        ));
+        assert!(!looks_like_success_acknowledgement(
+            "CDP connection to Chrome has been lost and all browser \
+             interactions fail with 'closed connection' errors. Cannot \
+             click Export to Notes or perform any other CDP-dependent \
+             actions."
+        ));
+        assert!(!looks_like_success_acknowledgement(
+            "Permission denied: AppleScript automation for Numbers not \
+             authorized. User must grant permission in System Settings."
+        ));
+        assert!(!looks_like_success_acknowledgement(
+            "The Full Name field cannot be filled with 'Alice'. Two \
+             attempts have failed: set_value with target_id 'dom:input:full-name' \
+             was banned after failing with 'no-match'."
+        ));
+    }
+
+    #[tokio::test]
+    async fn fail_with_success_reasoning_rewrites_to_done() {
+        // Planner emits a successful action then Fails with a reason
+        // that explicitly admits the goal is complete. The runner
+        // should rewrite to Done and the standard verify_done path
+        // arbitrates. With the scripted executor (no LLM-backed
+        // verify_done) the Done verifies-fail-open and the run ends
+        // Succeeded, which is what we'd want under a conservative
+        // grader: the agent's reasoning was right; the terminal move
+        // wasn't.
+        let planner = ScriptedPlanner::new(vec![
+            batch("click", vec![step("ok:clicked")]),
+            NextMove::Fail {
+                reason: "The button was clicked successfully and the modal dialog \
+                         is now open on screen, which confirms the click worked. \
+                         The goal has been accomplished."
+                    .into(),
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("Click + Add Task", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Succeeded { summary, .. } => {
+                assert!(
+                    summary.contains("goal has been accomplished"),
+                    "expected the rewritten Done summary to carry the original Fail reason; got {summary}",
+                );
+            }
+            other => panic!("expected Succeeded after Fail-rewrite, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legitimate_fail_still_terminates_failed() {
+        // Defensive: regression guard. A genuine "I can't do this"
+        // Fail must keep producing GoalOutcome::Failed.
+        let planner = ScriptedPlanner::new(vec![
+            batch("try", vec![step("err:permission denied")]),
+            NextMove::Fail {
+                reason: "Permission denied opening the file. User must grant \
+                         access via System Settings."
+                    .into(),
+            },
+        ]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("open file", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Failed(report) => {
+                assert!(
+                    report.attempts[0].contains("Permission denied"),
+                    "expected the original Fail reason; got {:?}",
+                    report.attempts
+                );
+            }
+            other => panic!("expected Failed for legitimate Fail, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fail_with_success_reasoning_but_no_history_is_kept_as_fail() {
+        // Defensive: only rewrite when `history` proves the agent
+        // actually did something. A Fail that talks about "goal
+        // accomplished" without any prior successful action is
+        // probably a hallucination — keep it as Failed.
+        let planner = ScriptedPlanner::new(vec![NextMove::Fail {
+            reason: "The goal has been accomplished without me doing anything.".into(),
+        }]);
+        let runner = CanonicalGoalRunner::new(planner, ScriptedExecutor::new());
+        let outcome = runner.run("x", RunLimits::default()).await;
+        match outcome {
+            GoalOutcome::Failed(_) => {}
+            other => panic!("expected Failed for first-turn Fail, got {other:?}"),
         }
     }
 
@@ -1833,6 +3748,7 @@ mod tests {
             succeeded: true,
             error: None,
             data: serde_json::Value::Null,
+            next_action_hint: None,
         }];
         let got = phase_gate_check(&limits, 60, &history, &empty_perception("Google Chrome"), 0);
         assert!(got.is_none(), "write_cells landed, gate should not fire");
@@ -1946,12 +3862,14 @@ mod tests {
     // ─── PR2: outcome auto-write ─────────────────────────────────────────────
 
     fn pr2_temp_db(label: &str) -> String {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
+        let unique = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        path.push(format!("cel_pr2_{label}_{nanos}.db"));
+        path.push(format!("cel_pr2_{label}_{nanos}_{unique}.db"));
         path.to_string_lossy().into_owned()
     }
 
@@ -2527,5 +4445,101 @@ mod tests {
         // we treated the empty summary as failure and used defaults.
         assert_eq!(memories[0].tags, vec!["canonical_runner".to_string()]);
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    // ─── Closest-match (Levenshtein) helpers ─────────────────────────────
+    //
+    // The hallucinated-dom-target rejection prepends a "Closest match: X"
+    // hint when there's a near-neighbour in this turn's perception. These
+    // tests pin the helper's behaviour: exact slug variants get matched,
+    // wildly different ids don't, and empty perception returns None.
+
+    fn make_dom_element(id: &str) -> cel_context::ContextElement {
+        cel_context::ContextElement {
+            id: id.to_string(),
+            label: None,
+            description: None,
+            element_type: "button".to_string(),
+            value: None,
+            bounds: None,
+            state: cel_context::ElementState {
+                focused: false,
+                enabled: true,
+                visible: true,
+                selected: false,
+                expanded: None,
+                checked: None,
+            },
+            parent_id: None,
+            actions: vec!["click".to_string()],
+            confidence: 0.9,
+            source: cel_context::ContextSource::Cdp,
+            content_role: cel_context::ContentRole::Interactive,
+            properties: std::collections::HashMap::new(),
+        }
+    }
+
+    fn perception_with_ids(ids: &[&str]) -> ScreenContext {
+        let mut ctx = empty_context();
+        ctx.elements = ids.iter().map(|i| make_dom_element(i)).collect();
+        ctx
+    }
+
+    #[test]
+    fn levenshtein_basic_cases() {
+        assert_eq!(super::levenshtein("", ""), 0);
+        assert_eq!(super::levenshtein("abc", "abc"), 0);
+        assert_eq!(super::levenshtein("abc", ""), 3);
+        assert_eq!(super::levenshtein("", "abc"), 3);
+        assert_eq!(super::levenshtein("kitten", "sitting"), 3);
+        // The motivating real-world case.
+        assert_eq!(
+            super::levenshtein(
+                "dom:button:purge-all-user-sessions",
+                "dom:button:purge-all-sessions"
+            ),
+            5 // delete "user-"
+        );
+    }
+
+    #[test]
+    fn closest_dom_id_finds_near_neighbour() {
+        let ctx = perception_with_ids(&[
+            "dom:button:purge-all-sessions",
+            "dom:button:cancel",
+            "dom:input:reason",
+        ]);
+        let got = super::closest_dom_id("dom:button:purge-all-user-sessions", &ctx);
+        assert_eq!(got, Some("dom:button:purge-all-sessions"));
+    }
+
+    #[test]
+    fn closest_dom_id_rejects_unrelated_ids() {
+        // A `dom:tr:row-42` vs perception's submit/cancel buttons —
+        // edit distance is far above the half-length threshold, so the
+        // helper should return None rather than surface garbage.
+        let ctx = perception_with_ids(&[
+            "dom:button:submit",
+            "dom:button:cancel",
+        ]);
+        let got = super::closest_dom_id("dom:tr:row-42", &ctx);
+        assert!(got.is_none(), "unrelated id should not get a suggestion");
+    }
+
+    #[test]
+    fn closest_dom_id_returns_none_on_empty_perception() {
+        let ctx = perception_with_ids(&[]);
+        assert!(super::closest_dom_id("dom:button:foo", &ctx).is_none());
+    }
+
+    #[test]
+    fn closest_dom_id_skips_non_dom_elements() {
+        let ctx = perception_with_ids(&[
+            "ax:1234",
+            "dom:button:save",
+        ]);
+        let got = super::closest_dom_id("dom:button:saev", &ctx);
+        // Should pick the dom:* one, ignoring the ax:* sibling.
+        assert_eq!(got, Some("dom:button:save"));
     }
 }

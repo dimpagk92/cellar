@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { sanitizeElements } from "../sanitizer.js";
-import type { ContextElement } from "@cellar/agent";
+import type { ContextElement } from "@cellar/agent/runtime";
 
 function makeElement(overrides: Partial<ContextElement> = {}): ContextElement {
   return {

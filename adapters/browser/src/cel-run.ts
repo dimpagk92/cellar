@@ -25,9 +25,10 @@ import {
   navigateAndPrepare, detectBotBlock, buildBrowserCallbacks,
 } from "./callback-builder.js";
 import {
-  runGoal, ActCache, MemoryCacheStorage, Cortex,
-  type Cel, type GoalResult, type GoalRunnerCallbacks,
+  runGoal, ActCache, MemoryCacheStorage,
+  type GoalResult, type GoalRunnerCallbacks,
 } from "@cellar/agent";
+import { Cortex, type Cel } from "@cellar/agent/runtime";
 
 /** Try the Rust goal-runner first; fall back to TS on error. */
 async function runGoalWithRustFallback(

@@ -21,7 +21,7 @@ use cel_accessibility::AccessibilityTree;
 #[cfg(target_os = "macos")]
 use cel_accessibility::ElementRole;
 use cel_context::{CelEvent, ContextMerger, ContextWatchdog, ScreenContext};
-use cel_contracts::PlannedAction;
+use cel_contracts::{EffectExpectation, PlannedAction};
 #[cfg(target_os = "macos")]
 use cel_input::InputError;
 use cel_input::{create_controller, MouseButton};
@@ -357,7 +357,31 @@ impl Cortex {
     }
 
     /// Register an adapter driver. Must be called BEFORE boot().
+    ///
+    /// Adapters whose manifest declares a `platform:` list that doesn't
+    /// include the current OS are silently skipped at registration —
+    /// e.g. `adapters/mail` declares `platform: ["macos"]` because it
+    /// drives Mail.app via AppleScript; registering it on Linux just
+    /// produces "Adapter not available" warnings every cortex tick
+    /// (the adapter spawn fails: `target/release/adapter-mail: No such
+    /// file or directory`). Skipping at register time avoids 40+ noise
+    /// lines per scenario in eval logs, and shortens cortex boot by
+    /// not even attempting the spawn.
+    ///
+    /// An empty `platform` list is treated as "all platforms", same as
+    /// before — most workspace-local adapters (browser, browser-rs)
+    /// leave the list empty.
     pub fn register_adapter(&mut self, driver: Box<dyn crate::adapter::AdapterDriver>) {
+        let manifest = driver.manifest();
+        if !manifest.platform.is_empty() && !manifest.platform.iter().any(|p| platform_matches(p)) {
+            tracing::debug!(
+                adapter = %manifest.name,
+                declared_platforms = ?manifest.platform,
+                current_os = %std::env::consts::OS,
+                "Skipping adapter — current OS not in manifest.platform"
+            );
+            return;
+        }
         // Safe: register_adapter is called before boot(), so no contention on the lock.
         let mut guard = self
             .adapters
@@ -377,6 +401,22 @@ impl Cortex {
         guard
             .iter()
             .map(|a| a.driver.manifest().name.clone())
+            .collect()
+    }
+
+    /// Snapshot the manifests of all currently-`Active` adapters. Used by
+    /// the canonical runner to surface available app-specific ops as
+    /// structured `PlanningView::adapter_actions`, with
+    /// `PlanningView::adapter_actions_prompt` kept as a transitional
+    /// prompt-only fallback. Inactive / Error-state adapters are skipped —
+    /// telling the planner about an op that will fail "adapter not active"
+    /// is worse than silence.
+    pub async fn active_adapter_manifests(&self) -> Vec<crate::adapter::AdapterManifest> {
+        let guard = self.adapters.read().await;
+        guard
+            .iter()
+            .filter(|a| a.state == crate::adapter::AdapterState::Active)
+            .map(|a| a.driver.manifest().clone())
             .collect()
     }
 
@@ -429,6 +469,21 @@ impl Cortex {
     pub async fn cdp_current_url(&self) -> Option<String> {
         let client = self.cdp_client.as_ref()?;
         client.get_url().await.ok()
+    }
+
+    /// Capture a JPEG screenshot of the CDP-bound page when one is
+    /// wired. Returns `None` if there is no CDP client, the call fails,
+    /// or the response is malformed — callers should fall back to a
+    /// macOS display capture in that case so screenshot capability
+    /// degrades rather than disappears.
+    ///
+    /// This is the path that lets headless-Chrome eval scenarios photograph
+    /// the rendered page rather than whatever macOS window happens to be
+    /// in front (which is usually an editor or terminal during background
+    /// runs).
+    pub async fn cdp_screenshot(&self) -> Option<Vec<u8>> {
+        let client = self.cdp_client.as_ref()?;
+        client.capture_screenshot().await.ok()
     }
 
     /// Is the cortex currently running?
@@ -634,9 +689,23 @@ impl Cortex {
                             Ok(elements) => {
                                 let adapter_name = adapter.driver.manifest().name.clone();
                                 let confidence = adapter.driver.manifest().context.confidence;
+                                // Adapter manifests can declare a preferred truth surface
+                                // (e.g. "browser_dom" for the Rust browser adapter,
+                                // "document_model" for Numbers). When that's "browser_dom"
+                                // we tag elements as `Cdp` so SourceSummary / dashboards /
+                                // anomaly detection can tell DOM-backed perception apart
+                                // from generic native-API perception. Other surfaces fold
+                                // into `NativeApi` for back-compat with adapters that
+                                // pre-date the distinction (Numbers/Excel/SAP/Bloomberg).
+                                let source = if adapter.driver.manifest().context.truth_surface
+                                    == "browser_dom"
+                                {
+                                    cel_context::ContextSource::Cdp
+                                } else {
+                                    cel_context::ContextSource::NativeApi
+                                };
                                 for mut el in elements {
-                                    // Tag element with adapter source
-                                    el.source = cel_context::ContextSource::NativeApi;
+                                    el.source = source.clone();
                                     el.confidence = confidence;
                                     element_adapter_index
                                         .insert(el.id.clone(), adapter_name.clone());
@@ -1026,6 +1095,74 @@ impl Cortex {
         }
     }
 
+    /// Wait until the CDP page's current URL matches `expected_url`
+    /// (modulo query string, fragment, and trailing slash), then force a
+    /// fresh tick so perception's element cache reflects the new page
+    /// rather than whatever the previous URL had loaded.
+    ///
+    /// This closes a perception-staleness gap that the eval surfaced
+    /// between scenarios: the cortex's previous tick captured the
+    /// previous fixture's elements (e.g. a sign-in page from
+    /// `dynamic-spa.html`), the CDP page then navigated to the next
+    /// fixture (`stale-state.html`), but the cached `MentalModel.
+    /// current_context.elements` still contained the stale "sign in"
+    /// button because the next tick hadn't run yet. The agent reads
+    /// stale perception, decides it needs to log in, and burns its
+    /// budget on a goal that doesn't apply to this scenario.
+    ///
+    /// Two phases:
+    /// 1. Poll `cdp_current_url()` until it normalises equal to
+    ///    `expected_url` (or the timeout fires).
+    /// 2. Call `refresh_now()` so the cortex tick captures the new
+    ///    page's elements before the caller reads perception.
+    ///
+    /// Callers in eval / canonical_runner contexts should pass the
+    /// fixture URL the test setup just navigated to. URL comparison
+    /// strips query and fragment so `?refresh=1` and `#section` don't
+    /// cause spurious mismatches.
+    pub async fn wait_for_url(
+        &self,
+        expected_url: &str,
+        timeout_ms: u64,
+    ) -> Result<(), CortexError> {
+        if !self.running.load(Ordering::Relaxed) {
+            return Err(CortexError::NotRunning(self.id.clone()));
+        }
+        let target = normalise_url(expected_url);
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        let poll = std::time::Duration::from_millis(50);
+
+        loop {
+            let current = self.cdp_current_url().await;
+            if let Some(ref url) = current {
+                if normalise_url(url) == target {
+                    break;
+                }
+            }
+            if start.elapsed() >= timeout {
+                return Err(CortexError::WaitForUrlTimeout {
+                    expected: expected_url.to_string(),
+                    observed: current,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+            tokio::time::sleep(poll).await;
+        }
+
+        // Phase 2: tick AFTER the URL match so perception's element
+        // cache reflects the new page. Without this the next read of
+        // `model.current_context.elements` may still hold whatever the
+        // previous URL had — exactly the regression this method exists
+        // to close.
+        let remaining = timeout
+            .saturating_sub(start.elapsed())
+            .max(std::time::Duration::from_millis(500));
+        let _ = self.refresh_now(Some(remaining.as_millis() as u64)).await; // Best-effort: a stalled tick shouldn't fail an
+                                                                            // otherwise-successful URL wait.
+        Ok(())
+    }
+
     /// Shutdown the cortex — stops the background loop.
     pub fn shutdown(&self) {
         if !self.running.load(Ordering::Relaxed) {
@@ -1147,6 +1284,34 @@ impl Cortex {
     /// target prefix + browser focus, not on element type, and
     /// legitimate browser-chrome AX ids don't come up in web-content
     /// goals in practice.
+    /// Run a CDP `Runtime.evaluate` and return the result as a
+    /// JSON-encoded string (the shape the caller's `data` field
+    /// expects). Prefers the SHARED `self.cdp_client` so the agent's
+    /// many `cdp_eval` / `navigate` / `extract_with_fallback` calls
+    /// reuse one WebSocket instead of opening a fresh one per
+    /// action — which is what was exhausting Chrome's connection
+    /// table mid-eval.
+    ///
+    /// On the shared client the call goes through
+    /// `evaluate_resilient`, which auto-reconnects once if Chrome
+    /// has dropped the underlying WebSocket. Falls back to opening
+    /// a per-action client only when no shared client is bound.
+    async fn cdp_eval_via_shared_or_focused(&self, expression: &str) -> Result<String, String> {
+        if let Some(client) = self.cdp_client.as_ref() {
+            return match client.evaluate_resilient(expression).await {
+                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                Err(e) => Err(format!("CDP eval failed: {e}")),
+            };
+        }
+        match cel_cdp::connect_to_focused_app().await {
+            Some(c) => match c.evaluate(expression).await {
+                Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
+                Err(e) => Err(format!("CDP eval failed: {e}")),
+            },
+            None => Err("No CDP target available".into()),
+        }
+    }
+
     fn refuse_ax_on_browser_page(&self, target_id: &str, action: &str) -> Option<String> {
         self.cdp_client.as_ref()?;
         if !target_id.starts_with("ax:") {
@@ -1268,7 +1433,7 @@ impl Cortex {
         }
 
         let result = match action {
-            PlannedAction::Click { target_id } => {
+            PlannedAction::Click { target_id, .. } => {
                 if let Some(reason) = self.refuse_ax_on_browser_page(target_id, "click") {
                     return Ok(ActionResult::fail(reason));
                 }
@@ -1292,6 +1457,16 @@ impl Cortex {
                 }
             }
             PlannedAction::Type { target_id, text } => {
+                // CDP-bound: dispatch text through Input.insertText
+                // (or set_value if a dom:* target is supplied). The
+                // native path below typed via OS-level enigo, which
+                // can't reach a headless Chrome on Linux and
+                // mis-targets on macOS when the host window has
+                // focus. CDP's insertText writes directly into the
+                // bound page's activeElement.
+                if let Some(client) = self.cdp_client.as_deref() {
+                    return Ok(dispatch_type_via_cdp(client, target_id.as_deref(), text).await);
+                }
                 // No target_id means "type into whatever's focused" — the
                 // exact case the focus gate prevents. Target-bound Type
                 // still clicks first, but typing itself still goes OS-level.
@@ -1324,6 +1499,18 @@ impl Cortex {
                 ActionResult::ok()
             }
             PlannedAction::Key { key } => {
+                // CDP-bound short-circuit: when the cortex is driving a
+                // headless browser there's no OS-level keyboard to send
+                // events to — enigo's key_press is a no-op on Linux
+                // without an X display, and on macOS it lands in the
+                // foreground app (often not the headless Chrome we
+                // actually want). Route through CDP's
+                // Input.dispatchKeyEvent which targets the bound page
+                // directly. See `dispatch_key_via_cdp` for the key-name
+                // → CDP-event mapping.
+                if let Some(client) = self.cdp_client.as_deref() {
+                    return Ok(dispatch_key_via_cdp(client, key).await);
+                }
                 if let Err(e) = self.ensure_browser_focus("key") {
                     return Ok(ActionResult::fail(e.to_string()));
                 }
@@ -1336,6 +1523,9 @@ impl Cortex {
                 ActionResult::ok()
             }
             PlannedAction::KeyCombo { keys } => {
+                if let Some(client) = self.cdp_client.as_deref() {
+                    return Ok(dispatch_keycombo_via_cdp(client, keys).await);
+                }
                 if let Err(e) = self.ensure_browser_focus("key_combo") {
                     return Ok(ActionResult::fail(e.to_string()));
                 }
@@ -1348,7 +1538,9 @@ impl Cortex {
                     .map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 ActionResult::ok()
             }
-            PlannedAction::SetValue { target_id, value } => {
+            PlannedAction::SetValue {
+                target_id, value, ..
+            } => {
                 if try_set_value(target_id, value)? {
                     ActionResult::ok()
                 } else {
@@ -1356,6 +1548,23 @@ impl Cortex {
                 }
             }
             PlannedAction::Scroll { dx, dy } => {
+                // CDP-bound: scroll the page directly via JS. Reliable
+                // even on a headless Linux server where enigo can't
+                // generate scroll events without an X display. The
+                // expression also returns the page's new scrollY so
+                // the planner's history shows the actual scroll
+                // distance (useful when the page hit min/max scroll
+                // and didn't move).
+                if let Some(client) = self.cdp_client.as_deref() {
+                    let js = format!(
+                        "(() => {{ window.scrollBy({dx}, {dy}); \
+                          return 'ok:scroll:' + Math.round(window.scrollY); }})()"
+                    );
+                    return Ok(match client.evaluate(&js).await {
+                        Ok(v) => check_cdp_ok(v, "scrolled"),
+                        Err(e) => ActionResult::fail(format!("cdp scroll: {e}")),
+                    });
+                }
                 let mut controller =
                     create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
                 controller
@@ -1403,6 +1612,7 @@ impl Cortex {
                 action,
                 label,
                 role_hint,
+                ..
             } => {
                 if let Some(reason) = self.refuse_ax_on_browser_page(target_id, action) {
                     return Ok(ActionResult::fail(reason));
@@ -1410,36 +1620,48 @@ impl Cortex {
                 // Primary: try the planner-supplied target_id. AX ids
                 // are bounds-hashed and therefore fragile across tree
                 // mutations (animations, focus shifts, popovers).
-                match try_ax_action(target_id, action) {
-                    Ok(true) => ActionResult::ok(),
-                    Ok(false) | Err(_) => {
-                        // Fallback: if the LLM supplied a `label`, ask
-                        // the live AX tree to resolve role+label → id
-                        // and try again. This recovers from the common
-                        // stale-hash failure mode without the planner
-                        // needing to re-plan.
-                        if let Some(lbl) = label.as_deref() {
-                            if let Some(resolved) = resolve_ax_by_label(lbl, role_hint.as_deref()) {
-                                if try_ax_action(&resolved, action).unwrap_or(false) {
-                                    tracing::info!(
-                                        target_id = %target_id,
-                                        resolved = %resolved,
-                                        label = %lbl,
-                                        "ax_action fell back to label resolution"
-                                    );
-                                    return Ok(ActionResult::ok());
-                                }
-                            }
-                        }
-                        ActionResult::fail(format!(
-                            "AX action \"{action}\" failed on \"{target_id}\"{}",
-                            label
-                                .as_ref()
-                                .map(|l| format!(" (label=\"{l}\" also not found)"))
-                                .unwrap_or_default()
-                        ))
+                //
+                // Skip the primary attempt when target_id is empty —
+                // the planner explicitly emitted `null` / left it
+                // missing (handled leniently in cel-contracts), which
+                // means it only knows the visible label. Calling AX
+                // with an empty id wastes a round trip and produces a
+                // confusing `failed on ""` in the error message.
+                if !target_id.is_empty() {
+                    if let Ok(true) = try_ax_action(target_id, action) {
+                        return Ok(ActionResult::ok());
                     }
                 }
+                // Fallback: if the LLM supplied a `label`, ask the
+                // live AX tree to resolve role+label → id and try
+                // again. Recovers from the common stale-hash failure
+                // mode AND from the planner emitting target_id=null
+                // with label only.
+                if let Some(lbl) = label.as_deref() {
+                    if let Some(resolved) = resolve_ax_by_label(lbl, role_hint.as_deref()) {
+                        if try_ax_action(&resolved, action).unwrap_or(false) {
+                            tracing::info!(
+                                target_id = %target_id,
+                                resolved = %resolved,
+                                label = %lbl,
+                                "ax_action fell back to label resolution"
+                            );
+                            return Ok(ActionResult::ok());
+                        }
+                    }
+                }
+                let target_repr = if target_id.is_empty() {
+                    "<missing>".to_string()
+                } else {
+                    format!("\"{target_id}\"")
+                };
+                ActionResult::fail(format!(
+                    "AX action \"{action}\" failed on {target_repr}{}",
+                    label
+                        .as_ref()
+                        .map(|l| format!(" (label=\"{l}\" also not found)"))
+                        .unwrap_or_default()
+                ))
             }
             PlannedAction::ActivateApp { app_name } => {
                 let result = activate_app_with_verification(app_name)?;
@@ -1479,9 +1701,13 @@ impl Cortex {
                 {
                     if registered.state == crate::adapter::AdapterState::Active {
                         let action_decl = registered.driver.manifest().actions.get(action).cloned();
+                        let caller_opted_out_of_verify =
+                            params.get("verify").and_then(serde_json::Value::as_bool)
+                                == Some(false);
                         match registered.driver.execute(action, params.clone()).await {
                             Ok(result) => {
                                 if result.success
+                                    && !caller_opted_out_of_verify
                                     && action_decl
                                         .as_ref()
                                         .map(|decl| decl.requires_verification)
@@ -1547,6 +1773,7 @@ impl Cortex {
                 }) {
                     let click = PlannedAction::Click {
                         target_id: el.id.clone(),
+                        expect_after: None,
                     };
                     return Box::pin(self.execute(&click, context)).await;
                 }
@@ -1573,20 +1800,7 @@ impl Cortex {
                 // of whether the LLM used set_value, cdp_eval, or whatever
                 // selector it built internally.
                 let full_expression = format!("{CEL_SELECT_PATCH_PRELUDE}\n{expression}");
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let client = cel_cdp::connect_to_focused_app().await;
-                        match client {
-                            Some(c) => match c.evaluate(&full_expression).await {
-                                Ok(result) => {
-                                    Ok(serde_json::to_string(&result).unwrap_or_default())
-                                }
-                                Err(e) => Err(format!("CDP eval failed: {e}")),
-                            },
-                            None => Err("No CDP target available".into()),
-                        }
-                    })
-                }) {
+                match self.cdp_eval_via_shared_or_focused(&full_expression).await {
                     Ok(result) => ActionResult {
                         success: true,
                         error: None,
@@ -1595,37 +1809,19 @@ impl Cortex {
                     Err(e) => ActionResult::fail(e),
                 }
             }
-            PlannedAction::Navigate { url } => {
-                if let Err(e) = cel_cdp::reset_preferred_target(url) {
-                    tracing::debug!("reset_preferred_target({}) failed: {}", url, e);
-                }
-                let sanitized = url.replace('\'', "\\'");
-                let expression = format!(
-                    "(function() {{ window.location.href = '{}'; return 'navigating'; }})()",
-                    sanitized
-                );
-                let full_expression = format!("{CEL_SELECT_PATCH_PRELUDE}\n{expression}");
-                match tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        let client = cel_cdp::connect_to_focused_app().await;
-                        match client {
-                            Some(c) => match c.evaluate(&full_expression).await {
-                                Ok(result) => {
-                                    Ok(serde_json::to_string(&result).unwrap_or_default())
-                                }
-                                Err(e) => Err(format!("CDP eval failed: {e}")),
-                            },
-                            None => Err("No CDP target available".into()),
-                        }
-                    })
-                }) {
-                    Ok(result) => ActionResult {
-                        success: true,
-                        error: None,
-                        data: Some(serde_json::Value::String(result)),
-                    },
-                    Err(e) => ActionResult::fail(e),
-                }
+            PlannedAction::Navigate {
+                url,
+                wait_until,
+                timeout_ms,
+                dismiss_overlays,
+            } => {
+                self.dispatch_navigate(
+                    url,
+                    wait_until.as_deref(),
+                    timeout_ms.unwrap_or(NAVIGATE_DEFAULT_TIMEOUT_MS),
+                    dismiss_overlays.unwrap_or(true),
+                )
+                .await
             }
             PlannedAction::WriteCells {
                 app,
@@ -1701,10 +1897,19 @@ impl Cortex {
         let mut diagnostics: Vec<String> = Vec::with_capacity(selectors.len());
         for sel in selectors {
             let expr = build_extract_expression(sel);
+            // Same shared-client preference as `cdp_eval_via_shared_or_focused` —
+            // every selector probe in this loop fans out to a new
+            // CDP call, and on a 4-selector fallback list with N
+            // extractions per scenario that quickly piles up.
             let eval = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    let client = cel_cdp::connect_to_focused_app().await;
-                    match client {
+                    if let Some(client) = self.cdp_client.as_ref() {
+                        return client
+                            .evaluate_resilient(&expr)
+                            .await
+                            .map_err(|e| e.to_string());
+                    }
+                    match cel_cdp::connect_to_focused_app().await {
                         Some(c) => c.evaluate(&expr).await.map_err(|e| e.to_string()),
                         None => Err("No CDP target available".into()),
                     }
@@ -1813,6 +2018,76 @@ impl Cortex {
                     || candidate.matches_app(app))
                 && candidate.driver.manifest().actions.contains_key(action)
         })?;
+        Some(
+            self.run_registered_adapter_action(registered, action, params)
+                .await,
+        )
+    }
+
+    /// Standard execute → verify_action lifecycle for a specific registered
+    /// adapter, including the `verify: false` opt-out. Shared between the
+    /// Active-adapter path (`dispatch_adapter_standard_action`) and
+    /// adapter-specific routes that need to bypass the Active gate (e.g. the
+    /// Numbers `write_cells` bootstrap fallback in `dispatch_write_cells`).
+    async fn run_registered_adapter_action(
+        &self,
+        registered: &crate::adapter::RegisteredAdapter,
+        action: &str,
+        params: serde_json::Value,
+    ) -> crate::adapter::ActionResult {
+        let action_decl = registered.driver.manifest().actions.get(action).cloned();
+        let caller_opted_out_of_verify =
+            params.get("verify").and_then(serde_json::Value::as_bool) == Some(false);
+        match registered.driver.execute(action, params.clone()).await {
+            Ok(result) => {
+                if result.success
+                    && !caller_opted_out_of_verify
+                    && action_decl
+                        .as_ref()
+                        .map(|decl| decl.requires_verification)
+                        .unwrap_or(false)
+                {
+                    match registered
+                        .driver
+                        .verify_action(action, &params, &result)
+                        .await
+                    {
+                        Ok(Some(verified)) => verified,
+                        Ok(None) => result,
+                        Err(err) => crate::adapter::ActionResult::fail(format!(
+                            "Adapter \"{}\" verification error: {err}",
+                            registered.driver.manifest().name
+                        )),
+                    }
+                } else {
+                    result
+                }
+            }
+            Err(err) => crate::adapter::ActionResult::fail(format!(
+                "Adapter \"{}\" execution error for {action}: {err}",
+                registered.driver.manifest().name
+            )),
+        }
+    }
+
+    /// App-agnostic counterpart to [`Self::dispatch_adapter_standard_action`].
+    /// Picks the first active adapter declaring `truth_surface == "browser_dom"`
+    /// AND the requested action — used by `Navigate`, where there is no
+    /// `app` field to key on, just "the browser." When two browser-dom
+    /// adapters race (TS Playwright + Rust browser-rs), TS wins by being
+    /// the only one declaring `navigate` (browser-rs intentionally exposes
+    /// no actions — see `adapters/browser-rs/src/lib.rs:execute`).
+    async fn dispatch_browser_dom_action(
+        &self,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Option<crate::adapter::ActionResult> {
+        let adapters = self.adapters.read().await;
+        let registered = adapters.iter().find(|candidate| {
+            candidate.state == crate::adapter::AdapterState::Active
+                && candidate.driver.manifest().context.truth_surface == "browser_dom"
+                && candidate.driver.manifest().actions.contains_key(action)
+        })?;
 
         let action_decl = registered.driver.manifest().actions.get(action).cloned();
         match registered.driver.execute(action, params.clone()).await {
@@ -1846,6 +2121,154 @@ impl Cortex {
         }
     }
 
+    /// Canonical navigate dispatch.
+    ///
+    /// Routing order:
+    /// 1. **Browser-DOM adapter** (typically the TS Playwright peer) when
+    ///    one is registered + active and declares `navigate`. Inherits its
+    ///    own waitUntil + cookie-banner handling.
+    /// 2. **In-cortex CDP fallback** when no adapter handles it. Calls
+    ///    `cel_cdp::Page.navigate` (true in-place navigation, not a new
+    ///    tab — fixes the about:blank stray-tab regression that
+    ///    `cdp_eval('window.location.href = ...')` produced) and then
+    ///    polls `document.readyState` to honour `wait_until`. Optionally
+    ///    runs a best-effort cookie/overlay dismiss script.
+    ///
+    /// `wait_until` is matched leniently — unknown strings collapse to
+    /// the default `"domcontentloaded"`. `"none"` skips the poll
+    /// entirely; `"networkidle"` is best-effort (no real network
+    /// quiescence tracking — readyState=complete + small idle).
+    async fn dispatch_navigate(
+        &self,
+        url: &str,
+        wait_until: Option<&str>,
+        timeout_ms: u64,
+        dismiss_overlays: bool,
+    ) -> crate::adapter::ActionResult {
+        use crate::adapter::ActionResult;
+
+        // 1. Adapter-first dispatch. Pass through every canonical knob so
+        // adapters that grow richer wait/dismiss semantics later can opt
+        // in without a contract bump.
+        let adapter_params = serde_json::json!({
+            "url": url,
+            "wait_until": wait_until.unwrap_or("domcontentloaded"),
+            "timeout_ms": timeout_ms,
+            "dismiss_overlays": dismiss_overlays,
+        });
+        if let Some(result) = self
+            .dispatch_browser_dom_action("navigate", adapter_params)
+            .await
+        {
+            return result;
+        }
+
+        // 2. In-cortex CDP fallback. Best-effort reset of the
+        // CEL-dedicated browser's preferred target FIRST so that any
+        // freshly-opened page lands at `url` instead of about:blank.
+        // No-op (debug-logged) when no CEL-dedicated browser is running
+        // on the preferred port.
+        if let Err(e) = cel_cdp::reset_preferred_target(url) {
+            tracing::debug!("reset_preferred_target({}) failed: {}", url, e);
+        }
+
+        let started = std::time::Instant::now();
+        let nav_result = if let Some(client) = self.cdp_client.as_ref() {
+            client
+                .navigate_resilient(url)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            match cel_cdp::connect_to_focused_app().await {
+                Some(c) => c.navigate(url).await.map_err(|e| e.to_string()),
+                None => Err("No CDP target available".into()),
+            }
+        };
+        if let Err(e) = nav_result {
+            return ActionResult::fail(format!("CDP navigate failed: {e}"));
+        }
+
+        // 3. Lifecycle wait via document.readyState polling. Skip
+        // entirely on wait_until="none" (callers that want to fire
+        // their own verification immediately).
+        let target_states = match wait_until.unwrap_or("domcontentloaded") {
+            "none" => &[][..],
+            "load" | "networkidle" => &["complete"][..],
+            _ => &["interactive", "complete"][..],
+        };
+        let mut load_ms = 0u64;
+        if !target_states.is_empty() {
+            let deadline = started + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                let elapsed = started.elapsed();
+                if elapsed >= std::time::Duration::from_millis(timeout_ms) {
+                    return ActionResult::fail(format!(
+                        "navigate({url}): timed out after {timeout_ms}ms waiting for \
+                         readyState in {target_states:?}"
+                    ));
+                }
+                if let Ok(state_json) = self
+                    .cdp_eval_via_shared_or_focused("document.readyState")
+                    .await
+                {
+                    let state = state_json.trim_matches('"').to_string();
+                    if target_states.contains(&state.as_str()) {
+                        load_ms = started.elapsed().as_millis() as u64;
+                        break;
+                    }
+                }
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let sleep_for = remaining.min(std::time::Duration::from_millis(NAVIGATE_POLL_MS));
+                if sleep_for.is_zero() {
+                    return ActionResult::fail(format!(
+                        "navigate({url}): timed out after {timeout_ms}ms waiting for \
+                         readyState in {target_states:?}"
+                    ));
+                }
+                tokio::time::sleep(sleep_for).await;
+            }
+            // Best-effort networkidle approximation — small fixed idle
+            // beyond readyState=complete. cel-cdp has no real network
+            // quiescence tracking, so callers needing precise idle
+            // should rely on the TS adapter path.
+            if wait_until == Some("networkidle") {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                load_ms = started.elapsed().as_millis() as u64;
+            }
+        }
+
+        // 4. Optional overlay dismiss. Failures are swallowed — a
+        // botched cookie-banner dismiss should never fail the navigate.
+        let dismissed = dismiss_overlays
+            && self
+                .cdp_eval_via_shared_or_focused(CEL_DISMISS_OVERLAYS_JS)
+                .await
+                .is_ok();
+
+        // 5. Read back final URL so callers can detect redirects. Best-effort.
+        let final_url = self
+            .cdp_eval_via_shared_or_focused("window.location.href")
+            .await
+            .ok()
+            .map(|s| s.trim_matches('"').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| url.to_string());
+        let redirected = final_url != url;
+
+        ActionResult {
+            success: true,
+            error: None,
+            data: Some(serde_json::json!({
+                "url": url,
+                "final_url": final_url,
+                "redirected": redirected,
+                "load_ms": load_ms,
+                "dismissed_overlays": dismissed,
+                "wait_until": wait_until.unwrap_or("domcontentloaded"),
+            })),
+        }
+    }
+
     async fn dispatch_write_cells(
         &self,
         app: &str,
@@ -1868,7 +2291,7 @@ impl Cortex {
                 .collect::<Vec<_>>(),
         });
         if let Some(result) = self
-            .dispatch_adapter_standard_action(app, "write_cells", adapter_params)
+            .dispatch_adapter_standard_action(app, "write_cells", adapter_params.clone())
             .await
         {
             return result;
@@ -1879,62 +2302,43 @@ impl Cortex {
                  Use Numbers or fall back to cdp_eval for web spreadsheets."
             ));
         }
+        // Numbers adapter is registered but isn't Active (e.g., Cortex started
+        // before Numbers became frontmost). Bootstrap the document, then route
+        // the call through the same adapter — we deliberately don't reproduce
+        // the write/verify/payload logic inline because it diverges from the
+        // adapter over time (this fallback used to predate the fix that adds
+        // `verified` to the payload, the `cell_refs`-from-`writes` derivation,
+        // and the readback-count contract check).
         #[cfg(target_os = "macos")]
         {
-            let cell_writes: Vec<cel_input::CellWrite> = writes
-                .iter()
-                .map(|w| cel_input::CellWrite {
-                    cell_ref: w.cell_ref.clone(),
-                    value: w.value.clone(),
-                })
-                .collect();
-            match self.with_numbers_document_bootstrap("write_cells", || {
-                cel_input::write_numbers_cells(sheet, table, &cell_writes, verify)
+            let probe_refs = [String::from("A1")];
+            if let Err(e) = self.with_numbers_document_bootstrap("write_cells", || {
+                cel_input::read_numbers_cells(sheet, table, &probe_refs).map(|_| ())
             }) {
-                Ok(readbacks) => {
-                    dismiss_numbers_dialog_if_present();
-                    if verify {
-                        // Compare readback vs requested, with numeric
-                        // tolerance (Numbers canonicalizes "108432.50"
-                        // → "108432.5", "$108,432.50" → "108432.5").
-                        let mut mismatches = Vec::new();
-                        for (w, got) in cell_writes.iter().zip(readbacks.iter()) {
-                            if !cells_match(&w.value, got) {
-                                mismatches.push(format!(
-                                    "{}: wrote \"{}\" got \"{}\"",
-                                    w.cell_ref, w.value, got
-                                ));
-                            }
-                        }
-                        if !mismatches.is_empty() {
-                            return ActionResult::fail(format!(
-                                "write_cells verification failed: {}",
-                                mismatches.join("; ")
-                            ));
-                        }
-                    }
-                    let data = serde_json::json!({
-                        "app": app,
-                        "writes": cell_writes
-                            .iter()
-                            .zip(readbacks.iter().chain(std::iter::repeat(&String::new())))
-                            .map(|(w, got)| {
-                                serde_json::json!({
-                                    "ref": w.cell_ref,
-                                    "requested": w.value,
-                                    "readback": got,
-                                })
-                            })
-                            .collect::<Vec<_>>(),
-                    });
-                    ActionResult {
-                        success: true,
-                        error: None,
-                        data: Some(data),
-                    }
-                }
-                Err(e) => ActionResult::fail(format!("write_cells failed: {e}")),
+                return ActionResult::fail(format!("write_cells failed: {e}"));
             }
+            let adapters = self.adapters.read().await;
+            let Some(registered) = adapters.iter().find(|candidate| {
+                candidate
+                    .driver
+                    .manifest()
+                    .name
+                    .eq_ignore_ascii_case("numbers")
+                    && candidate
+                        .driver
+                        .manifest()
+                        .actions
+                        .contains_key("write_cells")
+            }) else {
+                return ActionResult::fail(
+                    "Numbers adapter is not registered in this Cortex.".to_string(),
+                );
+            };
+            let result = self
+                .run_registered_adapter_action(registered, "write_cells", adapter_params)
+                .await;
+            dismiss_numbers_dialog_if_present();
+            result
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2169,31 +2573,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Loose equality for write_cells verification. Numbers canonicalizes
-/// numeric input when the cell format is Number: `"108432.50"` becomes
-/// `"108432.5"`, `"$108,432.50"` becomes `"108432.5"`. Compare as
-/// floats when both sides parse; otherwise fall back to trimmed
-/// string equality.
-#[cfg(target_os = "macos")]
-fn cells_match(requested: &str, got: &str) -> bool {
-    let r = requested.trim();
-    let g = got.trim();
-    if r == g {
-        return true;
-    }
-    let strip = |s: &str| {
-        s.replace(['$', ',', ' '], "")
-            .trim_end_matches('%')
-            .to_string()
-    };
-    let rn = strip(r).parse::<f64>().ok();
-    let gn = strip(g).parse::<f64>().ok();
-    match (rn, gn) {
-        (Some(a), Some(b)) => (a - b).abs() < 1e-6 * a.abs().max(1.0),
-        _ => false,
-    }
-}
-
 fn find_element<'a>(
     context: &'a ScreenContext,
     target_id: &str,
@@ -2341,14 +2720,40 @@ async fn try_cdp_dispatch(
         _ => return Ok(None),
     };
 
-    match action {
+    // Capture a "before" page snapshot when `expect_after` is the
+    // diff-based DomChanged variant. Has to happen BEFORE dispatch
+    // because dispatch will mutate the very state we're comparing
+    // against. Other expectation variants (SelectorAppears, etc.)
+    // don't need a baseline — they poll an absolute predicate — so
+    // we skip the round-trip for them.
+    let before_snapshot = match action_expect_after(action) {
+        Some(EffectExpectation::DomChanged { .. }) => {
+            match client.evaluate(DOM_SNAPSHOT_JS).await {
+                Ok(value) => value
+                    .get("result")
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "dom_changed: pre-dispatch snapshot failed; falling back to dispatch-only"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+
+    let dispatch_result = match action {
         PlannedAction::Click { .. } | PlannedAction::AxAction { .. } => {
             let js = build_click_js(role, id_part);
             let res = client
                 .evaluate(&js)
                 .await
                 .map_err(|e| CortexError::ExecutionFailed(format!("cdp click: {e}")))?;
-            Ok(Some(check_cdp_ok(res, "clicked")))
+            check_cdp_ok(res, "clicked")
         }
         PlannedAction::SetValue { value, .. } => {
             let js = build_set_value_js(role, id_part, value);
@@ -2356,7 +2761,7 @@ async fn try_cdp_dispatch(
                 .evaluate(&js)
                 .await
                 .map_err(|e| CortexError::ExecutionFailed(format!("cdp set_value: {e}")))?;
-            Ok(Some(check_cdp_ok(res, "set")))
+            check_cdp_ok(res, "set")
         }
         PlannedAction::Type { text, .. } => {
             // Browser-safe Type: focus + set value + dispatch input/change.
@@ -2365,15 +2770,183 @@ async fn try_cdp_dispatch(
                 .evaluate(&js)
                 .await
                 .map_err(|e| CortexError::ExecutionFailed(format!("cdp type: {e}")))?;
-            Ok(Some(check_cdp_ok(res, "typed")))
+            check_cdp_ok(res, "typed")
         }
-        _ => Ok(None),
+        _ => return Ok(None),
+    };
+
+    // Effect verification: when the planner attached an `expect_after`
+    // to the action, the dispatch ok above means "the JS function was
+    // called", NOT "the page reacted as expected". A click handler that
+    // calls `e.preventDefault()` (form validation), a remounted DOM
+    // node the click landed on but is no longer wired up, an animation
+    // that swallowed the click — all return ok at dispatch but leave
+    // the page unchanged.
+    //
+    // Poll the page (Runtime.evaluate of the expectation's predicate)
+    // until it holds or the timeout fires. If the timeout fires we
+    // convert the action's ok into a fail with a structured message
+    // that names the expectation and what we observed instead — the
+    // planner sees that immediately in next-turn history and can
+    // retry / pivot without going through verify_done's screenshot
+    // grader.
+    if !dispatch_result.success {
+        return Ok(Some(dispatch_result));
+    }
+    if let Some(expectation) = action_expect_after(action) {
+        match wait_for_effect(client, expectation, before_snapshot.as_deref()).await {
+            Ok(()) => Ok(Some(dispatch_result)),
+            Err(reason) => Ok(Some(crate::adapter::ActionResult::fail(reason))),
+        }
+    } else {
+        Ok(Some(dispatch_result))
+    }
+}
+
+/// The optional `expect_after` field from any [`PlannedAction`] that
+/// supports it. None for actions without the field (Wait, Scroll, etc.)
+/// or when the planner left it unset.
+fn action_expect_after(action: &PlannedAction) -> Option<&EffectExpectation> {
+    match action {
+        PlannedAction::Click { expect_after, .. }
+        | PlannedAction::SetValue { expect_after, .. }
+        | PlannedAction::AxAction { expect_after, .. } => expect_after.as_ref(),
+        _ => None,
+    }
+}
+
+/// Poll the page via CDP until the [`EffectExpectation`] holds or the
+/// expectation's `timeout_ms` fires. Returns `Ok(())` when satisfied;
+/// `Err(reason)` when timed out — the reason names the expectation
+/// shape and the last observed state so the planner sees exactly what
+/// we looked for and what was there instead.
+///
+/// Poll cadence is 100 ms — fast enough to feel snappy (under one
+/// CDP round-trip on a busy page), slow enough not to pin the event
+/// loop. Most expectations resolve on the first poll when the action
+/// actually fired.
+async fn wait_for_effect(
+    client: &cel_cdp::CdpClient,
+    expectation: &EffectExpectation,
+    before_snapshot: Option<&str>,
+) -> Result<(), String> {
+    let (predicate_js, timeout_ms, label) = match expectation {
+        EffectExpectation::SelectorAppears {
+            selector,
+            timeout_ms,
+        } => (
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector({sel});
+                    return !!el && el.offsetParent !== null;
+                }})()"#,
+                sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+            ),
+            *timeout_ms,
+            format!("selector_appears(\"{}\")", selector),
+        ),
+        EffectExpectation::SelectorDisappears {
+            selector,
+            timeout_ms,
+        } => (
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector({sel});
+                    return !el || el.offsetParent === null;
+                }})()"#,
+                sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+            ),
+            *timeout_ms,
+            format!("selector_disappears(\"{}\")", selector),
+        ),
+        EffectExpectation::SelectorTextContains {
+            selector,
+            substring,
+            timeout_ms,
+        } => (
+            format!(
+                r#"(() => {{
+                    const el = document.querySelector({sel});
+                    if (!el) return false;
+                    return (el.textContent || "").includes({sub});
+                }})()"#,
+                sel = serde_json::to_string(selector).unwrap_or_else(|_| "\"\"".into()),
+                sub = serde_json::to_string(substring).unwrap_or_else(|_| "\"\"".into()),
+            ),
+            *timeout_ms,
+            format!(
+                "selector_text_contains(\"{}\", \"{}\")",
+                selector, substring
+            ),
+        ),
+        EffectExpectation::DomChanged { timeout_ms } => {
+            // Compare the post-dispatch snapshot to the baseline we
+            // captured BEFORE the dispatch. Returns true when any
+            // field differs (text length, interactive element count,
+            // or URL). If we couldn't get a baseline (pre-dispatch
+            // snapshot failed — see try_cdp_dispatch's None branch),
+            // degrade gracefully: treat ANY post-dispatch snapshot
+            // success as the effect, since "we got past dispatch
+            // without CDP exploding" is at least weak evidence of a
+            // healthy page.
+            let baseline = before_snapshot.unwrap_or("");
+            let baseline_js = serde_json::to_string(baseline)
+                .unwrap_or_else(|_| "\"\"".into());
+            (
+                format!(
+                    r#"(() => {{
+                        const before = {baseline_js};
+                        {snapshot_body}
+                        return after !== before;
+                    }})()"#,
+                    baseline_js = baseline_js,
+                    snapshot_body = DOM_SNAPSHOT_BODY_JS,
+                ),
+                *timeout_ms,
+                "dom_changed".to_string(),
+            )
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    let poll = std::time::Duration::from_millis(100);
+
+    loop {
+        match client.evaluate(&predicate_js).await {
+            Ok(value) => {
+                let v = value.get("result").and_then(|r| r.get("value")).cloned();
+                if let Some(serde_json::Value::Bool(true)) = v {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                // CDP transient (page navigated mid-poll, socket
+                // hiccup): keep polling — the resilient client
+                // auto-reconnects underneath.
+                tracing::debug!(error = %e, "wait_for_effect: CDP eval transient");
+            }
+        }
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "EffectMissing: {label} did not hold within {ms}ms — the action \
+                 was dispatched (CDP returned ok) but the expected post-state \
+                 never materialised. Likely causes: a validation handler called \
+                 e.preventDefault(), the click landed on a remounted/stale node, \
+                 or the action targeted the wrong element. Re-read perception, \
+                 verify the target_id is current, and either retry with a \
+                 different target or a different action.",
+                label = label,
+                ms = timeout_ms,
+            ));
+        }
+        tokio::time::sleep(poll).await;
     }
 }
 
 fn action_dom_target(action: &PlannedAction) -> Option<&str> {
     match action {
-        PlannedAction::Click { target_id }
+        PlannedAction::Click { target_id, .. }
         | PlannedAction::SetValue { target_id, .. }
         | PlannedAction::AxAction { target_id, .. }
         | PlannedAction::Drag {
@@ -2403,15 +2976,21 @@ fn check_cdp_ok(res: serde_json::Value, op: &'static str) -> crate::adapter::Act
     }
 }
 
-/// Build JS that finds an element by backend_node_id (from the interactive
-/// element index we wrote into the cortex model) and clicks it. Uses a
-/// best-effort path: try matching `data-cel-backend-id` first, then walk
-/// interactive elements by matching role + text/aria-label + index.
+/// Build JS that finds an element by id_part (extracted from a `dom:role:id`
+/// element_id) and clicks it. Tries four resolution paths in order:
+///   1. `document.getElementById(idPart)` — fast path when the planner
+///      passes an HTML id verbatim (e.g. `dom:button:submit-btn` →
+///      `getElementById("submit-btn")`). Most common case after PR #66's
+///      prompt change steered the planner toward typed `dom:*` actions.
+///   2. Numeric → 0-based index into the visible-candidate list.
+///   3. Substring search over ALL identifying attributes concatenated
+///      (id + name + innerText + value + aria-label). The previous
+///      first-truthy-wins chain hid `id`/`name` whenever any other
+///      attribute was set, which caused `set_value dom:input:name` to
+///      miss inputs that did have `name="name"` because `placeholder`
+///      ("John Doe") was tested first. The concat fixes that whole class
+///      of false-negatives.
 fn build_click_js(role: &str, id_part: &str) -> String {
-    // For elements indexed by integer position in the interactive list, we
-    // walk all matching-role elements and pick the one whose 0-based index
-    // among visible interactive elements equals id_part (when parseable as
-    // integer). Otherwise we treat id_part as a text/aria-label substring.
     let role_js = serde_json::to_string(role).unwrap_or_else(|_| "\"button\"".into());
     let id_js = serde_json::to_string(id_part).unwrap_or_else(|_| "\"\"".into());
     format!(
@@ -2430,17 +3009,55 @@ fn build_click_js(role: &str, id_part: &str) -> String {
             const sels = tagFor(role).join(',');
             const candidates = Array.from(document.querySelectorAll(sels))
                 .filter(el => el.offsetParent !== null);
-            // numeric → index into the visible candidate list
             let target = null;
-            const asNum = parseInt(idPart, 10);
-            if (!isNaN(asNum) && String(asNum) === idPart) {{
-                target = candidates[asNum] || null;
+            // 1. Exact HTML id match — the most common case once the
+            //    planner emits dom:* element_ids derived from id="...".
+            //    Restricted to safe id chars so an injected idPart can't
+            //    drop a CSS-injection payload into `getElementById`.
+            if (typeof idPart === 'string' && /^[A-Za-z][\w:.-]*$/.test(idPart)) {{
+                const byId = document.getElementById(idPart);
+                if (byId && candidates.includes(byId)) {{
+                    target = byId;
+                }}
             }}
-            // text/aria fallback
+            // 2. Numeric → index into visible candidates (back-compat
+            //    with index-based dom:* ids the older browser walker
+            //    produced before PR #49 added id/name capture).
+            if (!target) {{
+                const asNum = parseInt(idPart, 10);
+                if (!isNaN(asNum) && String(asNum) === idPart) {{
+                    target = candidates[asNum] || null;
+                }}
+            }}
+            // 3. Substring search over a CONCATENATION of identifying
+            //    attributes (was: first-truthy-wins which silently
+            //    dropped id/name when innerText/value were also set).
+            //    `data-testid` is included because perception's
+            //    `pick_id_part` uses it as a stable-id fallback when
+            //    the element has no HTML `id`/`name`/`aria-label` —
+            //    without it here, the planner emits
+            //    `dom:button:approve-payment-gateway` (correctly
+            //    derived from `data-testid="approve-payment-gateway"`)
+            //    and dispatch returns `no-match` because no
+            //    `id`/`name`/`innerText`/`value`/`aria-label` ever
+            //    contains the slug. Caught on 2026-05-13 trial of
+            //    `recover_from_stale_state`. Same fix mirrored in
+            //    `build_set_value_js` below.
             if (!target) {{
                 const needle = String(idPart).toLowerCase();
                 target = candidates.find(el => {{
-                    const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').toLowerCase();
+                    const parts = [
+                        el.id,
+                        el.name,
+                        el.innerText,
+                        el.value,
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('data-testid'),
+                        el.getAttribute('data-test'),
+                        el.getAttribute('data-cy'),
+                        el.getAttribute('data-qa'),
+                    ];
+                    const t = parts.filter(Boolean).join(' ').toLowerCase();
                     return t.includes(needle);
                 }}) || null;
             }}
@@ -2450,6 +3067,248 @@ fn build_click_js(role: &str, id_part: &str) -> String {
             return 'ok:click';
         }})()"#
     )
+}
+
+/// CDP fallback for `PlannedAction::Key` when the cortex is bound to
+/// a browser. Generates a keyDown+keyUp pair via `Input.dispatchKeyEvent`
+/// targeting the bound page directly — no dependency on OS-level
+/// keyboard focus.
+///
+/// Maps the cellar key vocabulary (`Return`, `Tab`, `Down`, single chars)
+/// to CDP key-event fields. Names follow the W3C `KeyboardEvent.key` /
+/// `KeyboardEvent.code` spec, which is what CDP expects:
+/// see https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-dispatchKeyEvent
+async fn dispatch_key_via_cdp(
+    client: &cel_cdp::CdpClient,
+    key: &str,
+) -> crate::adapter::ActionResult {
+    let event = key_to_cdp_event(key);
+    // keyDown — actual key activation.
+    let down_params = serde_json::json!({
+        "type": "keyDown",
+        "key": event.key,
+        "code": event.code,
+        "text": event.text,
+        "unmodifiedText": event.text,
+        "windowsVirtualKeyCode": event.vk,
+        "nativeVirtualKeyCode": event.vk,
+    });
+    if let Err(e) = client
+        .send_command("Input.dispatchKeyEvent", down_params)
+        .await
+    {
+        return crate::adapter::ActionResult::fail(format!("cdp key keyDown: {e}"));
+    }
+    // keyUp — paired release. Some sites depend on the keyup event
+    // firing (e.g. autocomplete that listens for keyup).
+    let up_params = serde_json::json!({
+        "type": "keyUp",
+        "key": event.key,
+        "code": event.code,
+        "windowsVirtualKeyCode": event.vk,
+        "nativeVirtualKeyCode": event.vk,
+    });
+    if let Err(e) = client
+        .send_command("Input.dispatchKeyEvent", up_params)
+        .await
+    {
+        return crate::adapter::ActionResult::fail(format!("cdp key keyUp: {e}"));
+    }
+    crate::adapter::ActionResult::ok()
+}
+
+/// CDP fallback for `PlannedAction::KeyCombo`. Sends modifier keys
+/// down, then the terminal key down+up, then modifier keys up. The
+/// modifier-bitmask `modifiers` field lets a single Input.dispatchKeyEvent
+/// represent the combined state for OS-level shortcuts (Ctrl+S, Cmd+L).
+///
+/// Maps the cellar modifier vocabulary to CDP's modifier bitmask:
+///   Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8
+async fn dispatch_keycombo_via_cdp(
+    client: &cel_cdp::CdpClient,
+    keys: &[String],
+) -> crate::adapter::ActionResult {
+    // Partition into modifiers + the terminal (non-modifier) key.
+    // Most key combos in the wild are `["Cmd", "S"]` or `["Ctrl", "L"]`
+    // — modifier(s) first, then the terminal key. Reverse modifier-first
+    // forms (where the terminal key precedes the modifier) are rare
+    // enough we don't try to handle them: the runtime treats the LAST
+    // non-modifier as the terminal.
+    let mut modifier_mask: u32 = 0;
+    let mut terminal: Option<&str> = None;
+    for k in keys {
+        match k.to_lowercase().as_str() {
+            "alt" | "option" => modifier_mask |= 1,
+            "ctrl" | "control" => modifier_mask |= 2,
+            "cmd" | "command" | "meta" | "super" | "win" => modifier_mask |= 4,
+            "shift" => modifier_mask |= 8,
+            _ => terminal = Some(k.as_str()),
+        }
+    }
+    let Some(terminal_key) = terminal else {
+        return crate::adapter::ActionResult::fail(
+            "key_combo: no non-modifier terminal key supplied".to_string(),
+        );
+    };
+    let event = key_to_cdp_event(terminal_key);
+    let down_params = serde_json::json!({
+        "type": "keyDown",
+        "key": event.key,
+        "code": event.code,
+        "text": event.text,
+        "unmodifiedText": event.text,
+        "windowsVirtualKeyCode": event.vk,
+        "nativeVirtualKeyCode": event.vk,
+        "modifiers": modifier_mask,
+    });
+    if let Err(e) = client
+        .send_command("Input.dispatchKeyEvent", down_params)
+        .await
+    {
+        return crate::adapter::ActionResult::fail(format!("cdp keycombo keyDown: {e}"));
+    }
+    let up_params = serde_json::json!({
+        "type": "keyUp",
+        "key": event.key,
+        "code": event.code,
+        "windowsVirtualKeyCode": event.vk,
+        "nativeVirtualKeyCode": event.vk,
+        "modifiers": modifier_mask,
+    });
+    if let Err(e) = client.send_command("Input.dispatchKeyEvent", up_params).await {
+        return crate::adapter::ActionResult::fail(format!("cdp keycombo keyUp: {e}"));
+    }
+    crate::adapter::ActionResult::ok()
+}
+
+/// CDP fallback for `PlannedAction::Type`. When `target_id` is a
+/// `dom:*` element, route through the standard set_value path (which
+/// already exists in `try_cdp_dispatch`). Otherwise use
+/// `Input.insertText` to write into whatever element currently has
+/// focus on the bound page.
+///
+/// `Input.insertText` is the CDP-native equivalent of "type these
+/// characters into the focused element" — it generates the input/
+/// change events frameworks listen for and works even when the
+/// browser is headless.
+async fn dispatch_type_via_cdp(
+    client: &cel_cdp::CdpClient,
+    target_id: Option<&str>,
+    text: &str,
+) -> crate::adapter::ActionResult {
+    if let Some(tid) = target_id {
+        if tid.starts_with("dom:") {
+            // Reuse the set_value path's element resolver.
+            let parts: Vec<&str> = tid.splitn(3, ':').collect();
+            if let ["dom", role, id_part] = parts.as_slice() {
+                let js = build_set_value_js(role, id_part, text);
+                return match client.evaluate(&js).await {
+                    Ok(v) => check_cdp_ok(v, "typed"),
+                    Err(e) => crate::adapter::ActionResult::fail(format!("cdp type set_value: {e}")),
+                };
+            }
+        }
+    }
+    let params = serde_json::json!({ "text": text });
+    match client.send_command("Input.insertText", params).await {
+        Ok(_) => crate::adapter::ActionResult::ok(),
+        Err(e) => crate::adapter::ActionResult::fail(format!("cdp type insertText: {e}")),
+    }
+}
+
+/// CDP key-event fields for a single cellar key-name. Mapping is
+/// authoritative for the keys the planner system prompt enumerates
+/// (Return, Tab, Escape, Backspace, Delete, Space, arrows, Home/End,
+/// PageUp/Down, F1-F12, modifiers, single characters). Anything
+/// unrecognised falls through to "treat as single-char text", which
+/// covers letters, digits, punctuation, and any obscure key the
+/// prompt didn't enumerate.
+fn key_to_cdp_event(key: &str) -> CdpKeyEvent {
+    let lower = key.trim().to_lowercase();
+    match lower.as_str() {
+        "return" | "enter" => CdpKeyEvent::named("Enter", "Enter", Some("\r"), 13),
+        "tab" => CdpKeyEvent::named("Tab", "Tab", Some("\t"), 9),
+        "escape" | "esc" => CdpKeyEvent::named("Escape", "Escape", None, 27),
+        "backspace" => CdpKeyEvent::named("Backspace", "Backspace", None, 8),
+        "delete" | "del" => CdpKeyEvent::named("Delete", "Delete", None, 46),
+        "space" | " " => CdpKeyEvent::named(" ", "Space", Some(" "), 32),
+        "up" | "arrowup" => CdpKeyEvent::named("ArrowUp", "ArrowUp", None, 38),
+        "down" | "arrowdown" => CdpKeyEvent::named("ArrowDown", "ArrowDown", None, 40),
+        "left" | "arrowleft" => CdpKeyEvent::named("ArrowLeft", "ArrowLeft", None, 37),
+        "right" | "arrowright" => CdpKeyEvent::named("ArrowRight", "ArrowRight", None, 39),
+        "home" => CdpKeyEvent::named("Home", "Home", None, 36),
+        "end" => CdpKeyEvent::named("End", "End", None, 35),
+        "pageup" => CdpKeyEvent::named("PageUp", "PageUp", None, 33),
+        "pagedown" => CdpKeyEvent::named("PageDown", "PageDown", None, 34),
+        // Function keys F1..F12. CDP virtual key codes: F1=112 .. F12=123.
+        f if f.starts_with('f') && f[1..].parse::<u32>().is_ok() => {
+            let n: u32 = f[1..].parse().unwrap();
+            if (1..=12).contains(&n) {
+                let key_str = Box::leak(format!("F{n}").into_boxed_str());
+                CdpKeyEvent::named(key_str, key_str, None, 111 + n)
+            } else {
+                CdpKeyEvent::char_text(key)
+            }
+        }
+        _ => CdpKeyEvent::char_text(key),
+    }
+}
+
+/// Compact representation of a single CDP key event. Fields map 1:1
+/// to `Input.dispatchKeyEvent` params (`key`, `code`, `text`,
+/// `windowsVirtualKeyCode`).
+struct CdpKeyEvent {
+    key: String,
+    code: String,
+    /// Character to insert. `None` for non-printable keys (Escape,
+    /// arrows, Home/End, function keys); `Some` for chars and the
+    /// few named keys that map to text (Enter → "\r", Tab → "\t",
+    /// Space → " ").
+    text: Option<String>,
+    /// `windowsVirtualKeyCode` — CDP wants the legacy Win32 VK
+    /// constant for each key.
+    vk: u32,
+}
+
+impl CdpKeyEvent {
+    fn named(key: &str, code: &str, text: Option<&str>, vk: u32) -> Self {
+        Self {
+            key: key.to_string(),
+            code: code.to_string(),
+            text: text.map(str::to_string),
+            vk,
+        }
+    }
+
+    /// Single-character key — letters, digits, punctuation. The
+    /// `code` is best-effort (`KeyA` for "a"/"A", `Digit0` for "0",
+    /// etc.); browsers don't usually validate `code` for char keys
+    /// so an approximate value is fine.
+    fn char_text(key: &str) -> Self {
+        let first = key.chars().next().unwrap_or(' ');
+        let code = if first.is_ascii_alphabetic() {
+            format!("Key{}", first.to_ascii_uppercase())
+        } else if first.is_ascii_digit() {
+            format!("Digit{}", first)
+        } else {
+            "Unidentified".to_string()
+        };
+        let vk = if first.is_ascii_alphabetic() {
+            // VK for letters: A=65 ... Z=90.
+            first.to_ascii_uppercase() as u32
+        } else if first.is_ascii_digit() {
+            // VK for digits: 0=48 ... 9=57.
+            first as u32
+        } else {
+            0
+        };
+        Self {
+            key: key.to_string(),
+            code,
+            text: Some(key.to_string()),
+            vk,
+        }
+    }
 }
 
 fn build_set_value_js(role: &str, id_part: &str, value: &str) -> String {
@@ -2471,14 +3330,48 @@ fn build_set_value_js(role: &str, id_part: &str, value: &str) -> String {
             const candidates = Array.from(document.querySelectorAll(sels))
                 .filter(el => el.offsetParent !== null);
             let target = null;
-            const asNum = parseInt(idPart, 10);
-            if (!isNaN(asNum) && String(asNum) === idPart) {{
-                target = candidates[asNum] || null;
+            // 1. Exact HTML id match — fast path for `dom:input:email`
+            //    style ids the planner emits after PR #66's prompt
+            //    update. Restricted to safe id chars so an injected
+            //    idPart can't reach a CSS-injection sink.
+            if (typeof idPart === 'string' && /^[A-Za-z][\w:.-]*$/.test(idPart)) {{
+                const byId = document.getElementById(idPart);
+                if (byId && candidates.includes(byId)) {{
+                    target = byId;
+                }}
             }}
+            // 2. Numeric → index into visible candidates (back-compat).
+            if (!target) {{
+                const asNum = parseInt(idPart, 10);
+                if (!isNaN(asNum) && String(asNum) === idPart) {{
+                    target = candidates[asNum] || null;
+                }}
+            }}
+            // 3. Substring search over CONCATENATION of identifying
+            //    attributes. Was: first-truthy-wins which always picked
+            //    `placeholder` for inputs, hiding `name`/`id`. So
+            //    `set_value dom:input:name` would search "John Doe" for
+            //    the string "name" — never matching the input that did
+            //    have `name="name"`. The concat surfaces every signal.
             if (!target) {{
                 const needle = String(idPart).toLowerCase();
                 target = candidates.find(el => {{
-                    const t = (el.placeholder || el.name || el.id || el.getAttribute('aria-label') || '').toLowerCase();
+                    const parts = [
+                        el.id,
+                        el.name,
+                        el.placeholder,
+                        el.value,
+                        el.getAttribute('aria-label'),
+                        // `data-testid` parity with build_click_js —
+                        // when perception's pick_id_part used testid
+                        // (input has no `id`/`name`), set_value must
+                        // be able to find it the same way.
+                        el.getAttribute('data-testid'),
+                        el.getAttribute('data-test'),
+                        el.getAttribute('data-cy'),
+                        el.getAttribute('data-qa'),
+                    ];
+                    const t = parts.filter(Boolean).join(' ').toLowerCase();
                     return t.includes(needle);
                 }}) || null;
             }}
@@ -2661,6 +3554,45 @@ pub enum CortexError {
     ExecutionFailed(String),
     #[error("Refresh timed out after {elapsed_ms}ms — tick loop may be stalled")]
     RefreshTimeout { elapsed_ms: u64 },
+    #[error(
+        "URL wait timed out after {elapsed_ms}ms — expected \"{expected}\", \
+         last observed \"{observed:?}\""
+    )]
+    WaitForUrlTimeout {
+        expected: String,
+        observed: Option<String>,
+        elapsed_ms: u64,
+    },
+}
+
+/// Normalise a URL for equivalence comparison: strip query, fragment,
+/// trailing slash; lowercase. Used by [`Cortex::wait_for_url`] so the
+/// planner can't pass `?refresh=1` or `#section` and bypass the URL
+/// match. We compare as strings because pulling in the `url` crate
+/// just to normalise two known-shape URLs would be overkill.
+fn normalise_url(s: &str) -> String {
+    let s = s.split('#').next().unwrap_or(s);
+    let s = s.split('?').next().unwrap_or(s);
+    s.trim_end_matches('/').to_lowercase()
+}
+
+/// Whether the given platform string in an adapter manifest matches
+/// the current operating system. Used by [`Cortex::register_adapter`]
+/// to skip adapters that can't possibly work on this OS.
+///
+/// Cellar manifests use the Rust target-OS spellings (`macos`,
+/// `linux`, `windows`). Matched case-insensitively and tolerantly —
+/// "darwin" maps to `macos` (some manifests use the unix name), and
+/// whitespace gets trimmed.
+fn platform_matches(declared: &str) -> bool {
+    let d = declared.trim().to_lowercase();
+    let current = std::env::consts::OS;
+    match d.as_str() {
+        "darwin" | "macos" | "mac" | "osx" => current == "macos",
+        "linux" => current == "linux",
+        "windows" | "win" | "win32" | "win64" => current == "windows",
+        other => other == current,
+    }
 }
 
 /// Browser app names recognized for CDP-aware activation.
@@ -2687,6 +3619,114 @@ const CDP_BROWSERS: &[&str] = &[
 /// navigation (globals evaporate with the page). Patches are best-effort
 /// — a failure in Object.defineProperty etc. silently falls through to
 /// native behavior rather than blocking the caller's eval.
+/// Default `timeout_ms` for `PlannedAction::Navigate` when the caller
+/// doesn't supply one. Matches Playwright's `page.goto` default and the
+/// historical TS adapter behaviour. Bumping this changes the upper
+/// bound for the readyState poll in `dispatch_navigate`.
+const NAVIGATE_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Polling interval for the lifecycle wait inside the in-cortex CDP
+/// fallback. Page.navigate fires acknowledgement before the page has
+/// actually loaded, and `cel_cdp` has no event-stream subscription
+/// surface, so we poll `document.readyState`. 100ms keeps the loop
+/// responsive without flooding Runtime.evaluate.
+const NAVIGATE_POLL_MS: u64 = 100;
+
+/// Best-effort cookie-banner / overlay dismiss script. Runs after the
+/// navigate's lifecycle wait when the caller didn't opt out via
+/// `dismiss_overlays: false`. The TS browser adapter has its own
+/// (richer) dismiss path inside `process-driver.ts`, so this only
+/// fires on the in-cortex fallback path.
+///
+/// Heuristics, in order:
+///   1. Buttons whose visible text contains accept/agree/got it/ok/
+///      dismiss — short list, English-leaning, conservative.
+///   2. Buttons with common consent IDs / aria-labels.
+/// Failure is silent — a botched dismiss should never fail the navigate.
+const CEL_DISMISS_OVERLAYS_JS: &str = r#"(() => {
+    try {
+        const KEYWORDS = [
+            'accept all', 'accept cookies', 'accept', 'agree',
+            'got it', 'ok', 'dismiss', 'allow all', 'i agree',
+        ];
+        const SELECTOR_HINTS = [
+            '#onetrust-accept-btn-handler',
+            '#truste-consent-button',
+            'button[aria-label*="accept" i]',
+            'button[aria-label*="agree" i]',
+            'button[id*="cookie" i][id*="accept" i]',
+            'button[class*="cookie" i][class*="accept" i]',
+        ];
+        for (const sel of SELECTOR_HINTS) {
+            const el = document.querySelector(sel);
+            if (el && typeof el.click === 'function') {
+                el.click();
+                return 'dismissed:selector';
+            }
+        }
+        const buttons = document.querySelectorAll('button, [role="button"], a');
+        for (const btn of buttons) {
+            const text = (btn.textContent || '').trim().toLowerCase();
+            if (!text || text.length > 40) continue;
+            for (const kw of KEYWORDS) {
+                if (text === kw || text.startsWith(kw + ' ') || text.endsWith(' ' + kw)) {
+                    btn.click();
+                    return 'dismissed:text';
+                }
+            }
+        }
+    } catch (e) {}
+    return 'no-overlay';
+})()"#;
+
+/// Body of the page-snapshot computation used by `EffectExpectation::
+/// DomChanged`. Defines a local `after` variable that captures three
+/// cheap-to-compute signals:
+///
+///   • `t` — `document.body.innerText.length`. A coarse but reliable
+///     proxy for "did visible text change?" (modal opening, success
+///     message appearing, row removed).
+///   • `c` — count of interactive elements
+///     (`a, button, input, select, textarea`). Catches "tab switch
+///     swapped the entire panel" / "delete row dropped the action
+///     button" / "submit button vanished after form submit" cases.
+///   • `u` — `location.href`. Catches submit→thank-you-page
+///     navigations the action triggered.
+///
+/// The shape is serialised as JSON so the after vs before comparison
+/// is a single string-inequality check. Tight enough that snapshot
+/// + compare round-trips in ~5 ms; cheap enough to call inside the
+/// 100ms poll cadence.
+///
+/// Volatile content (timestamp tickers, animated counters, live
+/// feeds) will cause false-positive diffs on the order of the page's
+/// natural update rate. The 2s default timeout is short enough that
+/// most ticker-driven changes don't matter much in practice; pages
+/// where they do should prefer a selector-based expectation if they
+/// can name one. Documented in the `DomChanged` rustdoc on
+/// `EffectExpectation`.
+const DOM_SNAPSHOT_BODY_JS: &str = r#"
+    const after = JSON.stringify({
+        t: (document.body && document.body.innerText || '').length,
+        c: document.querySelectorAll('a, button, input, select, textarea').length,
+        u: location.href,
+    });
+"#;
+
+/// Full snapshot expression that returns the JSON string. Used at
+/// pre-dispatch baseline capture in `try_cdp_dispatch`. The polled
+/// predicate (built inside `wait_for_effect`) inlines
+/// `DOM_SNAPSHOT_BODY_JS` and adds the comparison against the
+/// captured baseline.
+const DOM_SNAPSHOT_JS: &str = r#"(() => {
+    const after = JSON.stringify({
+        t: (document.body && document.body.innerText || '').length,
+        c: document.querySelectorAll('a, button, input, select, textarea').length,
+        u: location.href,
+    });
+    return after;
+})()"#;
+
 const CEL_SELECT_PATCH_PRELUDE: &str = r#"(() => {
     if (window.__celSelectPatched) return;
     try {
@@ -3152,6 +4192,136 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalise_url_strips_query_fragment_trailing_slash() {
+        // Same page modulo URL noise — should compare equal.
+        assert_eq!(
+            normalise_url("http://localhost:4567/foo.html?refresh=1"),
+            normalise_url("http://localhost:4567/foo.html")
+        );
+        assert_eq!(
+            normalise_url("http://localhost:4567/foo.html#section"),
+            normalise_url("http://localhost:4567/foo.html")
+        );
+        assert_eq!(
+            normalise_url("http://localhost:4567/foo/"),
+            normalise_url("http://localhost:4567/foo")
+        );
+        assert_eq!(
+            normalise_url("HTTP://Localhost:4567/Foo.HTML"),
+            normalise_url("http://localhost:4567/foo.html")
+        );
+        // Different paths — distinct.
+        assert_ne!(
+            normalise_url("http://localhost:4567/foo.html"),
+            normalise_url("http://localhost:4567/bar.html")
+        );
+        // Different hosts — distinct.
+        assert_ne!(
+            normalise_url("http://localhost:4567/foo"),
+            normalise_url("http://example.com/foo")
+        );
+    }
+
+    #[test]
+    fn key_to_cdp_event_handles_named_keys() {
+        // The exact keys the cellar planner system prompt enumerates.
+        let enter = key_to_cdp_event("Return");
+        assert_eq!(enter.key, "Enter");
+        assert_eq!(enter.code, "Enter");
+        assert_eq!(enter.vk, 13);
+        let tab = key_to_cdp_event("Tab");
+        assert_eq!(tab.key, "Tab");
+        assert_eq!(tab.vk, 9);
+        let down = key_to_cdp_event("Down");
+        assert_eq!(down.key, "ArrowDown");
+        assert_eq!(down.code, "ArrowDown");
+        assert_eq!(down.vk, 40);
+        let esc = key_to_cdp_event("Escape");
+        assert_eq!(esc.vk, 27);
+        assert!(esc.text.is_none());
+    }
+
+    #[test]
+    fn key_to_cdp_event_handles_function_keys() {
+        let f1 = key_to_cdp_event("F1");
+        assert_eq!(f1.key, "F1");
+        assert_eq!(f1.vk, 112);
+        let f12 = key_to_cdp_event("F12");
+        assert_eq!(f12.key, "F12");
+        assert_eq!(f12.vk, 123);
+        // F13+ falls through to char-text (treats "F13" as 3-char text).
+        let f13 = key_to_cdp_event("F13");
+        assert!(f13.text.is_some());
+    }
+
+    #[test]
+    fn key_to_cdp_event_handles_single_chars() {
+        let a = key_to_cdp_event("a");
+        assert_eq!(a.key, "a");
+        assert_eq!(a.code, "KeyA");
+        assert_eq!(a.vk, 65);
+        assert_eq!(a.text.as_deref(), Some("a"));
+        let d5 = key_to_cdp_event("5");
+        assert_eq!(d5.code, "Digit5");
+        assert_eq!(d5.vk, 53);
+    }
+
+    #[test]
+    fn key_to_cdp_event_is_case_insensitive_for_named_keys() {
+        assert_eq!(key_to_cdp_event("enter").vk, 13);
+        assert_eq!(key_to_cdp_event("ENTER").vk, 13);
+        assert_eq!(key_to_cdp_event("EnTeR").vk, 13);
+    }
+
+    #[test]
+    fn platform_matches_handles_known_aliases() {
+        // The exact match cases for each OS — these are what most
+        // cellar manifests actually emit.
+        let current = std::env::consts::OS;
+        assert_eq!(platform_matches(current), true);
+        // Whitespace tolerance.
+        assert_eq!(platform_matches(&format!("  {current}  ")), true);
+        // Case tolerance.
+        assert_eq!(platform_matches(&current.to_uppercase()), true);
+
+        // Aliases for macOS.
+        if current == "macos" {
+            assert!(platform_matches("darwin"));
+            assert!(platform_matches("mac"));
+            assert!(platform_matches("osx"));
+        } else {
+            assert!(!platform_matches("darwin"));
+            assert!(!platform_matches("mac"));
+        }
+
+        // Aliases for Windows.
+        if current == "windows" {
+            assert!(platform_matches("win"));
+            assert!(platform_matches("win32"));
+            assert!(platform_matches("win64"));
+        } else {
+            assert!(!platform_matches("win"));
+        }
+    }
+
+    #[test]
+    fn platform_matches_rejects_other_oses() {
+        // Each of these is "the wrong OS" on at least one of our
+        // build targets, so the test is platform-aware: it asserts
+        // every OS string that ISN'T the current one returns false.
+        let candidates = ["macos", "linux", "windows", "freebsd"];
+        let current = std::env::consts::OS;
+        for c in candidates {
+            assert_eq!(
+                platform_matches(c),
+                c == current,
+                "platform_matches({c:?}) should be {} on {current}",
+                c == current,
+            );
+        }
+    }
+
+    #[test]
     fn build_extract_expression_wraps_bare_css_selector() {
         let expr = build_extract_expression("fin-streamer[data-field='price']");
         // Should wrap with querySelector + textContent + null-guard
@@ -3300,6 +4470,17 @@ mod tests {
         assert!(!cortex.is_running());
     }
 
+    #[tokio::test]
+    async fn cdp_screenshot_returns_none_when_no_client_bound() {
+        // The runner relies on this short-circuit: when no CDP client is
+        // wired (numbers/native-app scenarios, mock harness), the CDP
+        // path must yield None so the caller falls back to the macOS
+        // display capture instead of hanging on a non-existent client.
+        let cortex = Cortex::new("no-cdp".into());
+        assert!(!cortex.has_cdp_client());
+        assert!(cortex.cdp_screenshot().await.is_none());
+    }
+
     // ─── build_set_value_js: <select> handling (eval-smoke Fix) ───────
 
     #[test]
@@ -3343,5 +4524,184 @@ mod tests {
         assert!(js.contains("dispatchValueEvent(el, 'beforeinput')"));
         assert!(js.contains("dispatchValueEvent(el, 'input')"));
         assert!(js.contains("new Event('change'"));
+    }
+
+    // ─── dispatch_browser_dom_action: navigate adapter selection ─────
+
+    mod browser_dom_dispatch {
+        use super::*;
+        use crate::adapter::{
+            ActionResult, AdapterDriver, AdapterError, AdapterManifest, AdapterState,
+        };
+        use async_trait::async_trait;
+        use cel_context::ContextElement;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RecordingDriver {
+            manifest: AdapterManifest,
+            executed: Arc<AtomicBool>,
+            last_params: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+        }
+
+        #[async_trait]
+        impl AdapterDriver for RecordingDriver {
+            fn manifest(&self) -> &AdapterManifest {
+                &self.manifest
+            }
+            async fn activate(&mut self) -> Result<(), AdapterError> {
+                Ok(())
+            }
+            async fn deactivate(&mut self) -> Result<(), AdapterError> {
+                Ok(())
+            }
+            async fn get_context(&self) -> Result<Vec<ContextElement>, AdapterError> {
+                Ok(vec![])
+            }
+            async fn execute(
+                &self,
+                _action: &str,
+                params: serde_json::Value,
+            ) -> Result<ActionResult, AdapterError> {
+                self.executed.store(true, Ordering::SeqCst);
+                *self.last_params.lock().unwrap() = Some(params.clone());
+                Ok(ActionResult {
+                    success: true,
+                    error: None,
+                    data: Some(serde_json::json!({"adapter_received": params})),
+                })
+            }
+            async fn probe(&self) -> bool {
+                true
+            }
+        }
+
+        fn browser_dom_manifest(name: &str, with_navigate: bool) -> AdapterManifest {
+            let actions_json = if with_navigate {
+                r#"{ "navigate": { "params": { "url": "string" }, "mutates_state": true } }"#
+            } else {
+                "{}"
+            };
+            let raw = format!(
+                r#"{{
+                    "name": "{name}",
+                    "display_name": "{name}",
+                    "app_patterns": ["(?i){name}"],
+                    "platform": ["macos"],
+                    "context": {{ "element_types": [], "truth_surface": "browser_dom" }},
+                    "actions": {actions_json}
+                }}"#,
+            );
+            serde_json::from_str(&raw).unwrap()
+        }
+
+        async fn activate_all(cortex: &Cortex) {
+            let mut guard = cortex.adapters.write().await;
+            for entry in guard.iter_mut() {
+                entry.state = AdapterState::Active;
+            }
+        }
+
+        #[tokio::test]
+        async fn picks_first_active_browser_dom_adapter_declaring_navigate() {
+            // Two browser-dom adapters racing: only one declares
+            // navigate. The dispatcher must pick that one — never the
+            // perception-only peer (mirrors the real browser-rs vs TS
+            // peer setup at runtime).
+            let mut cortex = Cortex::new("nav-test".into());
+            let perception_executed = Arc::new(AtomicBool::new(false));
+            let perception_params: Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            cortex.register_adapter(Box::new(RecordingDriver {
+                manifest: browser_dom_manifest("browser-rs", false),
+                executed: Arc::clone(&perception_executed),
+                last_params: Arc::clone(&perception_params),
+            }));
+            let action_executed = Arc::new(AtomicBool::new(false));
+            let action_params: Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            cortex.register_adapter(Box::new(RecordingDriver {
+                manifest: browser_dom_manifest("browser", true),
+                executed: Arc::clone(&action_executed),
+                last_params: Arc::clone(&action_params),
+            }));
+            activate_all(&cortex).await;
+
+            let result = cortex
+                .dispatch_browser_dom_action(
+                    "navigate",
+                    serde_json::json!({
+                        "url": "https://example.com",
+                        "wait_until": "domcontentloaded",
+                        "timeout_ms": 30_000,
+                        "dismiss_overlays": true,
+                    }),
+                )
+                .await
+                .expect("adapter should have handled navigate");
+
+            assert!(result.success, "expected success: {result:?}");
+            assert!(
+                action_executed.load(Ordering::SeqCst),
+                "navigate-declaring adapter should have been dispatched"
+            );
+            assert!(
+                !perception_executed.load(Ordering::SeqCst),
+                "perception-only adapter must not be invoked"
+            );
+            // All canonical knobs flow through to the adapter — keeps
+            // the contract honest as adapters opt into richer semantics.
+            let received = action_params.lock().unwrap().clone().unwrap();
+            assert_eq!(received["url"], "https://example.com");
+            assert_eq!(received["wait_until"], "domcontentloaded");
+            assert_eq!(received["timeout_ms"], 30_000);
+            assert_eq!(received["dismiss_overlays"], true);
+        }
+
+        #[tokio::test]
+        async fn returns_none_when_no_adapter_handles_action() {
+            // No browser-dom adapter registered → caller must fall
+            // through to the in-cortex CDP fallback path. The contract
+            // is "Some only when an adapter actually executed".
+            let cortex = Cortex::new("nav-fallback-test".into());
+            let result = cortex
+                .dispatch_browser_dom_action(
+                    "navigate",
+                    serde_json::json!({"url": "https://example.com"}),
+                )
+                .await;
+            assert!(
+                result.is_none(),
+                "no registered adapter — must return None so caller falls back"
+            );
+        }
+
+        #[tokio::test]
+        async fn skips_inactive_browser_dom_adapter() {
+            // An adapter that declares navigate but is Inactive must
+            // NOT be picked — otherwise we'd dispatch into a browser
+            // we know is offline.
+            let mut cortex = Cortex::new("nav-inactive-test".into());
+            let executed = Arc::new(AtomicBool::new(false));
+            let params: Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            cortex.register_adapter(Box::new(RecordingDriver {
+                manifest: browser_dom_manifest("browser", true),
+                executed: Arc::clone(&executed),
+                last_params: Arc::clone(&params),
+            }));
+            // Skip activate_all — leave the adapter in default Inactive
+            // state.
+            let result = cortex
+                .dispatch_browser_dom_action(
+                    "navigate",
+                    serde_json::json!({"url": "https://example.com"}),
+                )
+                .await;
+            assert!(result.is_none(), "inactive adapter must be skipped");
+            assert!(
+                !executed.load(Ordering::SeqCst),
+                "inactive adapter must not be executed"
+            );
+        }
     }
 }

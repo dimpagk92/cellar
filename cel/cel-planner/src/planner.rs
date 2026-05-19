@@ -331,7 +331,8 @@ impl Planner {
     fn context_matches_expectation(&self, step: &PlannedStep, context: &ScreenContext) -> bool {
         // If the step targets a specific element, check it exists and is interactable
         match &step.action {
-            PlannedAction::Click { target_id } | PlannedAction::AxAction { target_id, .. } => {
+            PlannedAction::Click { target_id, .. }
+            | PlannedAction::AxAction { target_id, .. } => {
                 context
                     .elements
                     .iter()
@@ -403,7 +404,7 @@ impl Planner {
 /// claim "done" while blocking errors are visible.
 pub fn validate_grounding(step: &PlannedStep, context: &ScreenContext) -> Option<String> {
     match &step.action {
-        PlannedAction::Click { target_id }
+        PlannedAction::Click { target_id, .. }
         | PlannedAction::SetValue { target_id, .. }
         | PlannedAction::AxAction { target_id, .. } => {
             let exists = context.elements.iter().any(|el| el.id == *target_id);
@@ -662,7 +663,7 @@ mod tests {
     fn test_grounding_accepts_valid_click() {
         let ctx = make_context(vec![make_element("btn1", "button", "Submit")]);
         let step = make_step(PlannedAction::Click {
-            target_id: "btn1".into(),
+            target_id: "btn1".into(), expect_after: None,
         });
         assert!(validate_grounding(&step, &ctx).is_none());
     }
@@ -671,7 +672,7 @@ mod tests {
     fn test_grounding_rejects_missing_click_target() {
         let ctx = make_context(vec![make_element("btn1", "button", "Submit")]);
         let step = make_step(PlannedAction::Click {
-            target_id: "nonexistent".into(),
+            target_id: "nonexistent".into(), expect_after: None,
         });
         let result = validate_grounding(&step, &ctx);
         assert!(result.is_some());

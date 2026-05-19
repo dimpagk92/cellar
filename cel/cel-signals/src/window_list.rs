@@ -222,7 +222,15 @@ fn list_windows_macos() -> Vec<WindowState> {
         let title = get_dict_string(&dict, "kCGWindowName").unwrap_or_default();
         let layer = get_dict_i32(&dict, "kCGWindowLayer").unwrap_or(0);
         let pid = get_dict_i32(&dict, "kCGWindowOwnerPID").unwrap_or(0) as u32;
-        let on_screen = get_dict_i32(&dict, "kCGWindowIsOnscreen").unwrap_or(0) != 0;
+        // kCGWindowIsOnscreen is documented to come back as a CFBoolean,
+        // not a CFNumber. Reading it through get_dict_i32 silently
+        // returned None for every window → defaulted to false → callers
+        // that filtered on is_on_screen got an empty list. Use the
+        // boolean-aware helper so visible windows actually report true.
+        // We pass kCGWindowListOptionOnScreenOnly above, so any window
+        // present in the array is on-screen by definition; the dict
+        // value is mostly redundant but kept to match Apple's API surface.
+        let on_screen = get_dict_bool(&dict, "kCGWindowIsOnscreen").unwrap_or(true);
 
         // Get bounds from kCGWindowBounds dictionary
         let (x, y, width, height) =
@@ -278,6 +286,46 @@ fn get_dict_string(dict: &core_foundation::dictionary::CFDictionary, key: &str) 
     } else {
         None
     }
+}
+
+/// Read a CFBoolean value out of a CFDictionary. Returns `None` for missing
+/// keys or non-Boolean values; the caller decides the default.
+///
+/// `kCGWindowIsOnscreen` (and similar CG dict booleans) come back as
+/// CFBoolean instances — `get_dict_i32` returns None on these because the
+/// CFNumber TypeID check fails, which silently flips every window to
+/// `is_on_screen: false`. This is the reason the May 11 test session saw
+/// every window enumerated as off-screen on a multi-display setup.
+#[cfg(target_os = "macos")]
+fn get_dict_bool(dict: &core_foundation::dictionary::CFDictionary, key: &str) -> Option<bool> {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::{CFBoolean, CFBooleanRef};
+    use core_foundation::string::CFString;
+
+    let key_cf = CFString::new(key);
+    let value = dict.find(key_cf.as_CFTypeRef())?;
+    let cf_ref = *value;
+    if cf_ref.is_null() {
+        return None;
+    }
+    if unsafe { core_foundation::boolean::CFBooleanGetTypeID() }
+        == unsafe { core_foundation::base::CFGetTypeID(cf_ref) }
+    {
+        let b: CFBoolean = unsafe { CFBoolean::wrap_under_get_rule(cf_ref as CFBooleanRef) };
+        return Some(b == CFBoolean::true_value());
+    }
+    // Some CG dicts surface 0/1 as CFNumber; fall through to that.
+    if unsafe { core_foundation::number::CFNumberGetTypeID() }
+        == unsafe { core_foundation::base::CFGetTypeID(cf_ref) }
+    {
+        let n: core_foundation::number::CFNumber = unsafe {
+            core_foundation::number::CFNumber::wrap_under_get_rule(
+                cf_ref as core_foundation::number::CFNumberRef,
+            )
+        };
+        return n.to_i32().map(|v| v != 0);
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]

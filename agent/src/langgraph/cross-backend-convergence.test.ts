@@ -86,6 +86,7 @@ function stubView(goal: string): PlanningView {
       },
     ],
     adapter_facts: [],
+    adapter_actions: [],
     capabilities: [{ id: "native_input" }],
     run_progress: { steps_used: 0, max_steps: 80 },
     memories: [],

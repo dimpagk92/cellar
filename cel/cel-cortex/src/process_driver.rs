@@ -39,8 +39,11 @@ use tracing::{debug, warn};
 
 use crate::adapter::{ActionResult, AdapterDriver, AdapterError, AdapterManifest};
 
-/// Timeout for adapter responses in milliseconds.
-const RESPONSE_TIMEOUT_MS: u64 = 5_000;
+/// Default timeout for adapter responses in milliseconds. Adapters can
+/// raise this via `LifecycleDeclaration::response_timeout_ms` for slow
+/// native APIs (e.g., AppleScript-driven Reminders.app, where a single
+/// `list` over an iCloud-synced account can take 5–10s).
+const DEFAULT_RESPONSE_TIMEOUT_MS: u64 = 30_000;
 
 /// Max restarts before giving up.
 const MAX_RESTARTS: u32 = 3;
@@ -169,6 +172,16 @@ impl ProcessDriver {
         })
     }
 
+    /// Per-adapter response timeout, defaulting to `DEFAULT_RESPONSE_TIMEOUT_MS`
+    /// when the manifest doesn't override it. Looks at the lifecycle
+    /// declaration's `response_timeout_ms` field.
+    fn response_timeout_ms(&self) -> u64 {
+        self.manifest
+            .lifecycle
+            .response_timeout_ms
+            .unwrap_or(DEFAULT_RESPONSE_TIMEOUT_MS)
+    }
+
     /// Send a request and read the response line.
     async fn call_raw(&self, request: &Request) -> Result<String, AdapterError> {
         let mut proc = self.process.lock().await;
@@ -194,9 +207,10 @@ impl ProcessDriver {
             .map_err(|e| AdapterError::ProcessCrashed(format!("Flush failed: {e}")))?;
 
         // Read response with timeout
+        let timeout_ms = self.response_timeout_ms();
         let mut response = String::new();
         let read_result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(RESPONSE_TIMEOUT_MS),
+            tokio::time::Duration::from_millis(timeout_ms),
             handle.reader.read_line(&mut response),
         )
         .await;
@@ -205,7 +219,18 @@ impl ProcessDriver {
             Ok(Ok(0)) => Err(AdapterError::ProcessCrashed("EOF — adapter exited".into())),
             Ok(Ok(_)) => Ok(response),
             Ok(Err(e)) => Err(AdapterError::ProcessCrashed(format!("Read error: {e}"))),
-            Err(_) => Err(AdapterError::Timeout(RESPONSE_TIMEOUT_MS)),
+            Err(_) => {
+                // The adapter may still write its (now-stale) response after
+                // we give up reading — leaving it in the pipe would desync
+                // every subsequent call_raw. Kill the child so the next
+                // request triggers a fresh `try_restart`, which spawns a new
+                // process with a clean pipe. Without this, one slow call
+                // poisons the whole session.
+                if let Some(mut handle) = proc.take() {
+                    let _ = handle.child.start_kill();
+                }
+                Err(AdapterError::Timeout(timeout_ms))
+            }
         }
     }
 
@@ -346,7 +371,22 @@ impl AdapterDriver for ProcessDriver {
     }
 
     async fn probe(&self) -> bool {
-        self.process.lock().await.is_some()
+        // If the process is up, we're available. Otherwise fall through
+        // to the lifecycle declaration: adapters that opt into
+        // `background_refresh` (e.g. AppleScript-backed mail/calendar
+        // adapters that work regardless of which app is frontmost) want
+        // to be spawned proactively even before the matched app comes
+        // foreground — without this branch, the cortex's tick loop
+        // computes `should_be_active = frontmost_match || probe() = false`
+        // and leaves them Inactive forever, defeating the whole point of
+        // `background_refresh`. Frontmost-gated adapters (default
+        // lifecycle) preserve their old semantics: probe stays false
+        // until activate() spawns the process, and activate() is gated
+        // on the matching app being frontmost.
+        if self.process.lock().await.is_some() {
+            return true;
+        }
+        self.manifest.lifecycle.background_refresh
     }
 
     async fn bootstrap(&mut self) -> Result<(), AdapterError> {
@@ -360,8 +400,8 @@ impl AdapterDriver for ProcessDriver {
             .await
         {
             Ok(resp) => resp,
-            Err(AdapterError::Timeout(_)) => {
-                return Err(AdapterError::Timeout(RESPONSE_TIMEOUT_MS));
+            Err(AdapterError::Timeout(ms)) => {
+                return Err(AdapterError::Timeout(ms));
             }
             Err(AdapterError::ProcessCrashed(_)) => {
                 self.try_restart().await?;

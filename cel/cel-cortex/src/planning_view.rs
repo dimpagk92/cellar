@@ -161,12 +161,17 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
     // be lost to compression").
     let (anomalies, blockers) =
         select_anomalies_and_blockers(inputs.cortex_anomalies, inputs.cortex_freshness);
+    let adapter_fact_selection = select_adapter_facts(
+        inputs.adapter_facts.unwrap_or(&[]),
+        inputs.budget.max_adapter_facts,
+    );
 
     let selection_rationale = build_rationale(
         elements.len(),
         &memory_selection,
         &knowledge_selection,
         &recent_events_selection,
+        &adapter_fact_selection,
         anomalies.len(),
         blockers.len(),
         omitted_elements,
@@ -181,7 +186,7 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
         &memory_selection.kept,
         &knowledge_selection.kept,
         &recent_events_selection.kept,
-        inputs.adapter_facts.unwrap_or(&[]),
+        &adapter_fact_selection.kept,
     );
 
     PlanningView {
@@ -198,7 +203,8 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
         // runner via the new `adapter_facts` field on PlanningViewInputs.
         // Pre-existing callers that don't set the field still get the
         // empty Vec — backward compat preserved.
-        adapter_facts: inputs.adapter_facts.map(|s| s.to_vec()).unwrap_or_default(),
+        adapter_facts: adapter_fact_selection.kept,
+        adapter_actions: vec![],
         capabilities: caps_to_capabilities(inputs.caps),
         memories: memory_selection.kept,
         knowledge: knowledge_selection.kept,
@@ -212,12 +218,18 @@ pub fn build_planning_view(inputs: &PlanningViewInputs<'_>) -> PlanningView {
             memories: memory_selection.omitted,
             knowledge: knowledge_selection.omitted,
             recent_events: recent_events_selection.omitted,
-            ..Default::default()
+            adapter_facts: adapter_fact_selection.omitted,
         },
         run_progress: RunProgress {
             steps_used: inputs.caps.steps_used,
             max_steps: inputs.caps.max_steps,
         },
+        // Canonical runner stamps adapter actions post-build from
+        // `StepExecutor::{adapter_actions, adapter_actions_prompt}` —
+        // keeping them out of `PlanningViewInputs` avoids forcing every
+        // existing call site (13+ tests, plus production paths) to add
+        // fields for values only runner-backed views can snapshot.
+        adapter_actions_prompt: None,
     }
 }
 
@@ -252,6 +264,37 @@ struct KnowledgeSelection {
 struct RecentEventsSelection {
     kept: Vec<EventRef>,
     omitted: u32,
+}
+
+// ─── Adapter fact selection (closing-gap fill) ────────────────────────────
+
+/// Result of adapter-fact hydration — kept facts plus omitted count for
+/// `omitted_counts.adapter_facts`.
+#[derive(Debug, Default)]
+struct AdapterFactSelection {
+    kept: Vec<cel_contracts::AdapterFactRef>,
+    omitted: u32,
+}
+
+/// Cap adapter facts to the caller-provided budget. Adapters already decide
+/// relevance for the current goal + perception, so CEL preserves adapter
+/// order and truncates only to protect the shared PlanningView budget.
+fn select_adapter_facts(
+    adapter_facts: &[cel_contracts::AdapterFactRef],
+    max_adapter_facts: u32,
+) -> AdapterFactSelection {
+    let max = max_adapter_facts as usize;
+    let total = adapter_facts.len() as u32;
+    if max == 0 {
+        return AdapterFactSelection {
+            kept: Vec::new(),
+            omitted: total,
+        };
+    }
+    let kept: Vec<cel_contracts::AdapterFactRef> =
+        adapter_facts.iter().take(max).cloned().collect();
+    let omitted = total.saturating_sub(kept.len() as u32);
+    AdapterFactSelection { kept, omitted }
 }
 
 /// Tier A2: hydrate `PlanningView.recent_events` from cortex
@@ -404,11 +447,10 @@ fn observation_to_event_ref(obs: cel_store::Observation) -> EventRef {
         cel_store::ObservationPriority::Medium => "medium",
         cel_store::ObservationPriority::Low => "low",
     };
-    let at = if obs.observed_at.is_empty() {
-        Some(obs.created_at.clone())
-    } else {
-        Some(obs.observed_at.clone())
-    };
+    let at = obs
+        .observed_at
+        .clone()
+        .or_else(|| Some(obs.created_at.clone()));
     EventRef {
         id: format!("obs:{}", obs.id),
         kind: format!("observation:{priority_str}"),
@@ -759,11 +801,16 @@ fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+// 8 args is one above clippy's default threshold (7) but each is a
+// meaningful, distinct piece of rationale state. A wrapper struct would
+// just trade visible wiring for indirection without aiding readability.
+#[allow(clippy::too_many_arguments)]
 fn build_rationale(
     kept_elements: usize,
     memory_selection: &MemorySelection,
     knowledge_selection: &KnowledgeSelection,
     recent_events_selection: &RecentEventsSelection,
+    adapter_fact_selection: &AdapterFactSelection,
     anomaly_count: usize,
     blocker_count: usize,
     omitted_elements: u32,
@@ -774,12 +821,19 @@ fn build_rationale(
     let knowledge_silent = knowledge_selection.kept.is_empty() && knowledge_selection.omitted == 0;
     let recent_events_silent =
         recent_events_selection.kept.is_empty() && recent_events_selection.omitted == 0;
+    let adapter_facts_silent =
+        adapter_fact_selection.kept.is_empty() && adapter_fact_selection.omitted == 0;
     let a3_silent = anomaly_count == 0 && blocker_count == 0;
-    if memory_silent && knowledge_silent && recent_events_silent && a3_silent {
+    if memory_silent
+        && knowledge_silent
+        && recent_events_silent
+        && adapter_facts_silent
+        && a3_silent
+    {
         // Pure perception-only build (PR1 behaviour). Don't synthesise a
         // misleading rationale — leave the field absent so callers don't
-        // think memory / knowledge / events / anomaly selection happened
-        // when it didn't.
+        // think memory / knowledge / events / adapter fact / anomaly
+        // selection happened when it didn't.
         return None;
     }
     let mut parts = Vec::with_capacity(5);
@@ -830,6 +884,19 @@ fn build_rationale(
                 "s"
             },
             recent_events_selection.omitted,
+        ));
+    }
+    // Closing-gap adapter-fact line.
+    if !adapter_facts_silent {
+        parts.push(format!(
+            "Hydrated {} adapter fact{} (dropped {} above budget).",
+            adapter_fact_selection.kept.len(),
+            if adapter_fact_selection.kept.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            adapter_fact_selection.omitted,
         ));
     }
     // Tier A3 anomaly + blocker lines. Surfaced separately so the
@@ -896,11 +963,32 @@ fn synthesize_evidence(
     for f in adapter_facts {
         out.push(cel_contracts::EvidenceRef {
             source: "adapter_fact".into(),
-            id: format!("{}:{}", f.adapter, f.kind),
+            id: adapter_fact_evidence_id(f),
             summary: short_preview(&serde_json::to_string(&f.payload).unwrap_or_default(), 80),
         });
     }
     out
+}
+
+fn adapter_fact_evidence_id(fact: &cel_contracts::AdapterFactRef) -> String {
+    if let Some(id) = fact.id.as_deref().filter(|id| !id.trim().is_empty()) {
+        return id.to_string();
+    }
+    let payload = serde_json::to_string(&fact.payload).unwrap_or_default();
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in fact
+        .adapter
+        .as_bytes()
+        .iter()
+        .chain([b':'].iter())
+        .chain(fact.kind.as_bytes())
+        .chain([b':'].iter())
+        .chain(payload.as_bytes())
+    {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{}:{}:{hash:016x}", fact.adapter, fact.kind)
 }
 
 fn short_preview(s: &str, max: usize) -> String {
@@ -2329,6 +2417,7 @@ mod tests {
             cel_store::ObservationPriority::High,
         );
         let adapter_facts = vec![cel_contracts::AdapterFactRef {
+            id: None,
             adapter: "numbers".into(),
             kind: "selected_range".into(),
             payload: serde_json::json!({"sheet": "Sheet1", "range": "B2:B7"}),
@@ -2389,15 +2478,17 @@ mod tests {
     #[test]
     fn closing_adapter_facts_passthrough_into_view() {
         // Adapter facts provided to PlanningViewInputs land verbatim
-        // in view.adapter_facts (no reranking, no filtering — runner
-        // is the orchestrator, builder just hydrates).
+        // in view.adapter_facts when they fit the budget (no reranking
+        // — runner is the orchestrator, builder just hydrates).
         let facts = vec![
             cel_contracts::AdapterFactRef {
+                id: None,
                 adapter: "numbers".into(),
                 kind: "selected_range".into(),
                 payload: serde_json::json!({"range": "A1"}),
             },
             cel_contracts::AdapterFactRef {
+                id: None,
                 adapter: "browser".into(),
                 kind: "url".into(),
                 payload: serde_json::json!({"url": "https://example.com"}),
@@ -2431,6 +2522,95 @@ mod tests {
             .filter(|e| e.source == "adapter_fact")
             .collect();
         assert_eq!(adapter_evidence.len(), 2);
+    }
+
+    #[test]
+    fn closing_adapter_facts_respect_budget_and_omitted_count() {
+        let facts: Vec<cel_contracts::AdapterFactRef> = (0..4)
+            .map(|i| cel_contracts::AdapterFactRef {
+                id: None,
+                adapter: "numbers".into(),
+                kind: "cell".into(),
+                payload: serde_json::json!({"cell": format!("A{}", i + 1)}),
+            })
+            .collect();
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget {
+            max_adapter_facts: 2,
+            ..PlanningBudget::default()
+        };
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_store: None,
+            knowledge_store: None,
+            workflow_id: None,
+            goal_embedding: None,
+            recent_events_store: None,
+            cortex_anomalies: None,
+            cortex_freshness: None,
+            adapter_facts: Some(&facts),
+        });
+
+        assert_eq!(view.adapter_facts.len(), 2);
+        assert_eq!(view.evidence.len(), 2);
+        assert_eq!(view.omitted_counts.adapter_facts, 2);
+        assert!(view
+            .selection_rationale
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Hydrated 2 adapter facts"));
+    }
+
+    #[test]
+    fn closing_adapter_fact_evidence_uses_supplied_id_or_payload_hash() {
+        let facts = vec![
+            cel_contracts::AdapterFactRef {
+                id: Some("numbers:selected:A1".into()),
+                adapter: "numbers".into(),
+                kind: "selected_cell".into(),
+                payload: serde_json::json!({"cell": "A1"}),
+            },
+            cel_contracts::AdapterFactRef {
+                id: None,
+                adapter: "numbers".into(),
+                kind: "selected_cell".into(),
+                payload: serde_json::json!({"cell": "B2"}),
+            },
+            cel_contracts::AdapterFactRef {
+                id: None,
+                adapter: "numbers".into(),
+                kind: "selected_cell".into(),
+                payload: serde_json::json!({"cell": "C3"}),
+            },
+        ];
+
+        let perception = make_context(vec![]);
+        let caps = RuntimeCaps::default();
+        let budget = PlanningBudget::default();
+        let view = build_planning_view(&PlanningViewInputs {
+            goal: "any",
+            budget: &budget,
+            perception: &perception,
+            caps: &caps,
+            memory_store: None,
+            knowledge_store: None,
+            workflow_id: None,
+            goal_embedding: None,
+            recent_events_store: None,
+            cortex_anomalies: None,
+            cortex_freshness: None,
+            adapter_facts: Some(&facts),
+        });
+
+        let ids: Vec<&str> = view.evidence.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"numbers:selected:A1"));
+        assert_ne!(ids[1], "numbers:selected_cell");
+        assert_ne!(ids[1], ids[2]);
     }
 
     // ─── Tier A3: anomalies + blockers ──────────────────────────────────────

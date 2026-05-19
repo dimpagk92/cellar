@@ -15,6 +15,14 @@ pub enum ContextSource {
     NativeApi,
     /// From vision model analysis.
     Vision,
+    /// From the Chrome DevTools Protocol DOM walk (the Rust browser
+    /// adapter or any future browser-DOM-backed source). Distinguished
+    /// from `NativeApi` so downstream consumers (SourceSummary
+    /// telemetry, eval scoring, planner prompt) can tell when the
+    /// element is browser-DOM-backed and routes through the
+    /// `dom:*`-id JS-click dispatch path rather than native macOS
+    /// input.
+    Cdp,
     /// Merged from multiple sources.
     Merged,
 }

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel } from "@cellar/agent";
+import { Cel } from "@cellar/agent/runtime";
 
 export const memoryCommand = new Command("memory")
   .description("Inspect and manage the agent memory layer");

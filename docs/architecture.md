@@ -9,7 +9,7 @@
 Cellar should be understood as a three-layer system:
 
 1. `Adapters` — app-specific truth and execution
-2. `CEL / crates` — device understanding, context fusion, and execution substrate
+2. `CEL / crates` — device understanding, context fusion, execution, verification, and receipts
 3. `Agents` — pluggable planners and orchestrators
 
 The repository's main value is not "a built-in planner."
@@ -19,6 +19,7 @@ The main value is:
 - normalizing many signals into one usable context
 - exposing stable actions and execution results
 - routing work into the correct app substrate or adapter
+- proving effects with verification evidence and action receipts
 
 ## Layer 1: Adapters
 
@@ -52,6 +53,7 @@ It owns:
 
 - context fusion across AX, CDP, vision, signals, network, audio, and adapters
 - canonical data types for context, actions, and results
+- receipt and evidence contracts for trusted execution
 - stream freshness and anomaly tracking
 - adapter lifecycle and dispatch
 - execution routing
@@ -113,6 +115,7 @@ In plain terms:
 - agents ask CEL what the machine looks like
 - agents ask CEL to execute actions
 - CEL decides how to fulfill that action
+- CEL returns a receipt and the agent verifies the effect
 - adapters provide app-specific truth where needed
 
 ## Numbers Example
@@ -144,6 +147,17 @@ The right approach is:
 
 - `adapters/` — app/domain-specific integrations
 - app-specific execution helpers in core crates are acceptable when they are clearly adapter-like, but they should evolve toward explicit adapter surfaces
+- two languages share one `AdapterDriver` contract: native Rust adapters
+  (`adapters/numbers`, `adapters/excel`, `adapters/sap-gui`,
+  `adapters/bloomberg`, `adapters/metatrader`, `adapters/browser-rs`) run
+  in-process via the cortex tick loop; TypeScript adapters
+  (`adapters/browser`) run out-of-process via `ProcessDriver` and are used
+  by the LangGraph runtime
+- browser perception specifically is provided by **two** parallel adapters
+  (`adapters/browser` TS, `adapters/browser-rs` Rust) because the LangGraph
+  and canonical runtimes have different IPC budgets — see
+  `docs/adapters-cel-agents.md` § "Browser perception" for the
+  unification roadmap
 
 ### Agent integrations
 
@@ -159,8 +173,9 @@ Evals should primarily test CEL and adapters.
 That means:
 
 - prefer agent-agnostic scenarios when possible
-- focus on context quality, grounding, handoff reliability, and execution truth
+- focus on context quality, grounding, handoff reliability, execution truth, receipts, and verification
 - isolate runtime-specific acceptance tests under clearly named folders
+- mark environment-invalid runs separately from product failures
 
 The main eval question should be:
 
@@ -173,7 +188,7 @@ not:
 ## Design Rules
 
 1. Keep contracts stable.
-   Context, actions, results, and adapter interfaces matter more than planner internals.
+   Context, actions, results, receipts, and adapter interfaces matter more than planner internals.
 
 2. Keep planning pluggable.
    Adding one more planner integration is acceptable. Baking the whole architecture around one is not.

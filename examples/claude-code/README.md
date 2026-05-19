@@ -1,6 +1,6 @@
 # Claude Code × CEL
 
-Drive CEL from [Claude Code](https://claude.com/claude-code) via MCP. Claude owns planning, retries, and the agent loop; CEL provides perception, execution, and adapter-backed truth.
+Drive CEL from [Claude Code](https://claude.com/claude-code) via MCP. Claude owns planning, retries, and the agent loop; CEL provides perception, execution, verification surfaces, receipts, and adapter-backed truth.
 
 This example is the P0 acceptance artifact for the [agent integration roadmap](../../docs/agent-integration-roadmap.md). The full cookbook is at [docs/agents/claude-code.md](../../docs/agents/claude-code.md).
 
@@ -39,15 +39,16 @@ This example is the P0 acceptance artifact for the [agent integration roadmap](.
 
 ## Run the demo
 
-Open Claude Code in this directory and paste the contents of [`goal.md`](./goal.md) into the prompt. Claude will use `cel_see` to inspect Numbers and `cel_act` `write_cells` to populate cells deterministically.
+Open Claude Code in this directory and paste the contents of [`goal.md`](./goal.md) into the prompt. Claude will run a read-only healthcheck, use `cel_see` to inspect Numbers, and use `cel_act` `write_cells` to populate cells deterministically.
 
 Expected outcome: cells `A1`, `B1`, `C1` of the active Numbers sheet contain `BTC`, `ETH`, `SOL`.
 
 ## What this proves
 
 - CEL works with an off-the-shelf MCP client without bespoke glue.
-- The `see → act` loop is driven entirely by Claude — CEL has no opinion about planning.
-- The `write_cells` action returns deterministic confirmation (no AX guessing).
+- The `healthcheck -> see -> act -> verify` loop is driven entirely by Claude; CEL has no opinion about planning.
+- The `write_cells` action returns an execution receipt, and `read_cells` provides independent adapter readback.
+- The final answer distinguishes dispatch proof from verified spreadsheet state.
 
 ## Troubleshooting
 
@@ -58,5 +59,6 @@ Expected outcome: cells `A1`, `B1`, `C1` of the active Numbers sheet contain `BT
 ## See also
 
 - [docs/agents/claude-code.md](../../docs/agents/claude-code.md) — full cookbook
+- [docs/trust-execution-layer.md](../../docs/trust-execution-layer.md) — trust loop and receipt contract
 - [docs/mcp-server.md](../../docs/mcp-server.md) — tool surface reference
 - [docs/adapters-cel-agents.md](../../docs/adapters-cel-agents.md) — three-layer north star

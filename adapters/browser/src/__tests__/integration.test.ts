@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserAdapter } from "../index.js";
-import { Cel } from "@cellar/agent";
+import { Cel } from "@cellar/agent/runtime";
 import { extractDOM, extractDOMAllFrames } from "../dom-extractor.js";
 import { mapElements } from "../element-mapper.js";
 import { sanitizeElements } from "../sanitizer.js";

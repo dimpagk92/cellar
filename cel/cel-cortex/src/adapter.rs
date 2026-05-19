@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use cel_context::ContextElement;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 // ── Errors ─────────────────────────────────────────────────────────────────
@@ -58,6 +58,30 @@ pub struct AdapterManifest {
     /// Entrypoint for process/wasm runtimes (e.g., "adapter.py").
     #[serde(default)]
     pub entrypoint: Option<String>,
+    /// Directory name of the peer manifest for the same conceptual adapter
+    /// in a different runtime/language. Two manifests that declare each
+    /// other as their alias (bidirectional) form a logical pair —
+    /// [`group_paired_manifests`] surfaces them as one adapter with two
+    /// implementations. Browser perception uses this today: the TS adapter
+    /// at `adapters/browser/` and the Rust adapter at `adapters/browser-rs/`
+    /// alias each other. See `docs/adapters-cel-agents.md` § "Browser
+    /// perception" for the unification roadmap.
+    #[serde(default)]
+    pub manifest_alias: Option<String>,
+    /// Relative path to a partial parent manifest whose fields are layered
+    /// underneath this one. `load_manifest` resolves it (relative to this
+    /// manifest's directory), JSON-merges parent + child, then deserializes
+    /// the result. Used to give two adapter implementations one canonical
+    /// source of truth for fields that must agree across runtimes
+    /// (e.g. `truth_surface`, `confidence`) while each implementation keeps
+    /// its own `adapter.json` for runtime-specific overrides (entrypoint,
+    /// refresh_ms, runtime).
+    ///
+    /// Merge semantics: objects merge recursively; arrays and scalars in
+    /// the child wholly replace the parent. Unknown to the parent means
+    /// the field comes through unchanged from the child.
+    #[serde(default)]
+    pub manifest_extends: Option<String>,
     /// Context capabilities.
     pub context: ContextDeclaration,
     /// Lifecycle semantics for activation/bootstrap.
@@ -115,6 +139,14 @@ pub struct LifecycleDeclaration {
     /// Whether the adapter can keep contributing context while not frontmost.
     #[serde(default)]
     pub background_refresh: bool,
+    /// Per-adapter override for the ProcessDriver response timeout, in
+    /// milliseconds. `None` falls back to `DEFAULT_RESPONSE_TIMEOUT_MS` in
+    /// `cel/cel-cortex/src/process_driver.rs`. Raise for adapters whose
+    /// native APIs are intrinsically slow (e.g., AppleScript-driven
+    /// Reminders.app where a single bulk-property list call can take
+    /// 5–10s on iCloud-synced accounts).
+    #[serde(default)]
+    pub response_timeout_ms: Option<u64>,
 }
 
 fn default_requires_frontmost() -> bool {
@@ -127,6 +159,7 @@ impl Default for LifecycleDeclaration {
             requires_frontmost: default_requires_frontmost(),
             bootstrap_on_activate: false,
             background_refresh: false,
+            response_timeout_ms: None,
         }
     }
 }
@@ -341,15 +374,194 @@ impl RegisteredAdapter {
     }
 }
 
+// ── Adapter Action Projection ───────────────────────────────────────────────
+
+/// Project a list of active adapter manifests into the structured,
+/// agent-facing action catalogue used by `PlanningView.adapter_actions`.
+///
+/// The output is stable: adapters sort by name, actions sort by name, and
+/// params use `BTreeMap`. That keeps prompts and serialized views from
+/// churning just because manifest `HashMap` iteration order changed.
+pub fn adapter_actions_from_manifests(
+    manifests: &[AdapterManifest],
+) -> Vec<cel_contracts::AdapterActionRef> {
+    let mut manifests = manifests
+        .iter()
+        .filter(|manifest| !manifest.actions.is_empty())
+        .collect::<Vec<_>>();
+    manifests.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut out = Vec::new();
+    for manifest in manifests {
+        let mut action_names: Vec<&String> = manifest.actions.keys().collect();
+        action_names.sort();
+        for action_name in action_names {
+            let decl = &manifest.actions[action_name];
+            let params_schema: BTreeMap<String, String> = decl
+                .params
+                .iter()
+                .map(|(name, type_hint)| (name.clone(), type_hint.clone()))
+                .collect();
+            out.push(cel_contracts::AdapterActionRef {
+                adapter: manifest.name.clone(),
+                action: action_name.clone(),
+                params_schema,
+                description: decl.description.clone(),
+                mutates_state: decl.mutates_state,
+                requires_verification: decl.requires_verification,
+                returns_data: decl.returns_data,
+            });
+        }
+    }
+    out
+}
+
+fn prompt_description(description: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    let compact = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
+/// Transitional renderer for prompt-only clients. New callers should prefer
+/// the structured `adapter_actions_from_manifests` / `PlanningView.adapter_actions`
+/// contract and render at the planner boundary.
+///
+/// Returned string is empty when there are no manifests or no manifest carries
+/// actions; LLM-backed planners append the fragment to their system prompt
+/// under an "## App-Specific Actions" heading when non-empty.
+///
+/// The rendering deliberately mirrors the existing action-list format in
+/// `cel-planner::llm_plan_producer::NEXT_MOVE_SYSTEM_PROMPT` (one JSON
+/// example per line, trailing description). Keeps prompt style consistent
+/// so the LLM doesn't have to context-switch between top-level vs.
+/// adapter actions.
+///
+/// Example output for the mail adapter:
+/// ```text
+///   { "type": "custom", "adapter": "mail", "action": "compose",
+///     "params": { "to": "string|string[]", "subject": "string",
+///                 "body": "string", ... } }
+///     — Create an outgoing message. DOES NOT SEND. Returns draft_id …
+/// ```
+pub fn format_adapter_actions_prompt(manifests: &[AdapterManifest]) -> String {
+    format_adapter_action_refs_prompt(&adapter_actions_from_manifests(manifests))
+}
+
+fn format_adapter_action_refs_prompt(actions: &[cel_contracts::AdapterActionRef]) -> String {
+    let mut out = String::new();
+    for action in actions {
+        let example = serde_json::json!({
+            "type": "custom",
+            "adapter": &action.adapter,
+            "action": &action.action,
+            "params": &action.params_schema,
+        });
+        out.push_str("  ");
+        out.push_str(&serde_json::to_string(&example).unwrap_or_else(|_| "{}".into()));
+        out.push('\n');
+        if !action.description.is_empty() {
+            out.push_str("    — ");
+            out.push_str(&prompt_description(&action.description));
+            out.push('\n');
+        }
+    }
+    out
+}
+
 // ── Manifest Loading ───────────────────────────────────────────────────────
 
+/// Recursively merge two manifest JSON values. Keys present in `overlay`
+/// replace or augment those in `base`: objects merge key-by-key; arrays
+/// and scalars from `overlay` replace the corresponding slot in `base`
+/// wholesale. Missing keys come through unchanged from the side that has
+/// them.
+///
+/// Used by [`load_manifest`] to layer a child adapter manifest over the
+/// shared parent it declares via `manifest_extends`. Exposed publicly so
+/// adapters that embed their manifests (e.g. the Rust browser adapter
+/// embedding both files via `include_str!`) can do the same merge at
+/// construction time without re-implementing it.
+pub fn merge_manifest_layers(
+    base: serde_json::Value,
+    overlay: serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::Value;
+    match (base, overlay) {
+        (Value::Object(mut b), Value::Object(o)) => {
+            for (k, v) in o {
+                let merged = match b.remove(&k) {
+                    Some(existing) => merge_manifest_layers(existing, v),
+                    None => v,
+                };
+                b.insert(k, merged);
+            }
+            Value::Object(b)
+        }
+        // Arrays and scalars: overlay wholly replaces base. Additive array
+        // merge would make app_patterns / actions semantics surprising —
+        // the child adapter would silently inherit patterns it doesn't
+        // actually support, and removing a pattern from shared would still
+        // leave it active in children that "shouldn't" need to think about
+        // it.
+        (_, overlay) => overlay,
+    }
+}
+
 /// Load an adapter manifest from a JSON file.
+///
+/// If the file declares `manifest_extends`, that field is resolved as a
+/// path relative to the manifest's directory, the parent file is read and
+/// JSON-merged underneath (via [`merge_manifest_layers`]), and the merged
+/// value is then deserialized. The parent file is loaded as raw JSON, not
+/// as `AdapterManifest`, so it may legitimately omit fields the struct
+/// requires (`name`, `display_name`, …) — it's a fragment, not a full
+/// manifest.
 pub fn load_manifest(path: &std::path::Path) -> Result<AdapterManifest, AdapterError> {
     let content = std::fs::read_to_string(path).map_err(|e| {
         AdapterError::Unavailable(format!("Failed to read {}: {e}", path.display()))
     })?;
-    serde_json::from_str(&content).map_err(|e| {
+    let mut value: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         AdapterError::ProtocolError(format!("Invalid manifest {}: {e}", path.display()))
+    })?;
+
+    if let Some(parent_rel) = value
+        .get("manifest_extends")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    {
+        let parent_dir = path.parent().ok_or_else(|| {
+            AdapterError::ProtocolError(format!(
+                "manifest path {} has no parent directory",
+                path.display()
+            ))
+        })?;
+        let parent_path = parent_dir.join(&parent_rel);
+        let parent_content = std::fs::read_to_string(&parent_path).map_err(|e| {
+            AdapterError::Unavailable(format!(
+                "Failed to read parent manifest {}: {e}",
+                parent_path.display()
+            ))
+        })?;
+        let parent_value: serde_json::Value =
+            serde_json::from_str(&parent_content).map_err(|e| {
+                AdapterError::ProtocolError(format!(
+                    "Invalid parent manifest {}: {e}",
+                    parent_path.display()
+                ))
+            })?;
+        value = merge_manifest_layers(parent_value, value);
+    }
+
+    serde_json::from_value(value).map_err(|e| {
+        AdapterError::ProtocolError(format!(
+            "Failed to deserialize manifest {}: {e}",
+            path.display()
+        ))
     })
 }
 
@@ -370,6 +582,60 @@ pub fn discover_adapters(base_dir: &std::path::Path) -> Vec<(std::path::PathBuf,
         }
     }
     found
+}
+
+/// Group discovered manifests by their [`AdapterManifest::manifest_alias`]
+/// pairing. Two manifests that name each other's directory (bidirectional)
+/// land in the same group; everyone else gets a singleton group.
+///
+/// Used by diagnostics, dashboards, and adapter-catalogue surfaces to render
+/// e.g. "Browser (TS + Rust)" as one logical adapter with two implementations
+/// instead of two unrelated rows. A one-way alias (only one side declares the
+/// pairing) does **not** form a group — that case is almost always a typo or
+/// a stale rename, and treating it as a pair would silently mask the bug.
+///
+/// Group order matches the input order of each group's first member, so the
+/// output is stable for callers that snapshot or diff it.
+pub fn group_paired_manifests(
+    found: &[(std::path::PathBuf, AdapterManifest)],
+) -> Vec<Vec<&(std::path::PathBuf, AdapterManifest)>> {
+    let mut consumed = vec![false; found.len()];
+    let mut groups: Vec<Vec<&(std::path::PathBuf, AdapterManifest)>> = Vec::new();
+
+    for (i, entry) in found.iter().enumerate() {
+        if consumed[i] {
+            continue;
+        }
+        consumed[i] = true;
+        let mut group = vec![entry];
+
+        let Some(alias) = entry.1.manifest_alias.as_deref() else {
+            groups.push(group);
+            continue;
+        };
+
+        // Find a peer whose directory name matches our alias AND whose own
+        // alias points back at our directory name. Bidirectional only —
+        // a one-way reference is treated as unpaired so a typo on one side
+        // is loud at discovery time instead of hidden behind a pair badge.
+        let our_dir = entry.0.file_name().and_then(|n| n.to_str());
+        for (j, other) in found.iter().enumerate().skip(i + 1) {
+            if consumed[j] {
+                continue;
+            }
+            let other_dir = other.0.file_name().and_then(|n| n.to_str());
+            let other_alias = other.1.manifest_alias.as_deref();
+            if other_dir == Some(alias) && other_alias == our_dir {
+                consumed[j] = true;
+                group.push(other);
+                break;
+            }
+        }
+
+        groups.push(group);
+    }
+
+    groups
 }
 
 #[cfg(test)]
@@ -404,6 +670,141 @@ mod tests {
         assert!(!manifest.lifecycle.bootstrap_on_activate);
         assert_eq!(manifest.verification.truth_surface, "ui");
         assert_eq!(manifest.runtime, "process"); // default
+    }
+
+    #[test]
+    fn adapter_actions_from_manifests_are_structured_and_stable() {
+        let mut beta_actions = HashMap::new();
+        beta_actions.insert(
+            "send".into(),
+            ActionDeclaration {
+                params: HashMap::from([
+                    ("to".into(), "string|string[]".into()),
+                    ("body".into(), "string".into()),
+                ]),
+                description: "Send a message".into(),
+                mutates_state: true,
+                requires_verification: true,
+                returns_data: false,
+            },
+        );
+        beta_actions.insert(
+            "draft".into(),
+            ActionDeclaration {
+                params: HashMap::from([("subject".into(), "string?".into())]),
+                description: "Create a draft".into(),
+                mutates_state: true,
+                requires_verification: false,
+                returns_data: true,
+            },
+        );
+
+        let mut alpha_actions = HashMap::new();
+        alpha_actions.insert(
+            "read".into(),
+            ActionDeclaration {
+                params: HashMap::new(),
+                description: "Read state".into(),
+                mutates_state: false,
+                requires_verification: false,
+                returns_data: true,
+            },
+        );
+
+        let manifests = vec![
+            AdapterManifest {
+                name: "beta".into(),
+                display_name: "Beta".into(),
+                app_patterns: vec![],
+                platform: vec!["macos".into()],
+                runtime: "process".into(),
+                entrypoint: None,
+                manifest_alias: None,
+                manifest_extends: None,
+                context: ContextDeclaration {
+                    element_types: vec![],
+                    refresh_ms: 200,
+                    confidence: 0.95,
+                    truth_surface: "native_api".into(),
+                },
+                lifecycle: LifecycleDeclaration::default(),
+                verification: VerificationDeclaration::default(),
+                actions: beta_actions,
+            },
+            AdapterManifest {
+                name: "alpha".into(),
+                display_name: "Alpha".into(),
+                app_patterns: vec![],
+                platform: vec!["macos".into()],
+                runtime: "process".into(),
+                entrypoint: None,
+                manifest_alias: None,
+                manifest_extends: None,
+                context: ContextDeclaration {
+                    element_types: vec![],
+                    refresh_ms: 200,
+                    confidence: 0.95,
+                    truth_surface: "native_api".into(),
+                },
+                lifecycle: LifecycleDeclaration::default(),
+                verification: VerificationDeclaration::default(),
+                actions: alpha_actions,
+            },
+        ];
+
+        let actions = adapter_actions_from_manifests(&manifests);
+        let ids = actions
+            .iter()
+            .map(|a| format!("{}:{}", a.adapter, a.action))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["alpha:read", "beta:draft", "beta:send"]);
+        let param_keys = actions[2]
+            .params_schema
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(param_keys, vec!["body", "to"]);
+        assert!(actions[2].mutates_state);
+        assert!(actions[2].requires_verification);
+        assert!(!actions[2].returns_data);
+    }
+
+    #[test]
+    fn adapter_actions_prompt_uses_json_examples_and_caps_descriptions() {
+        let long_description = format!("{}\n{}", "word ".repeat(80), "tail");
+        let manifest = AdapterManifest {
+            name: "quote\"adapter".into(),
+            display_name: "Quoted".into(),
+            app_patterns: vec![],
+            platform: vec!["macos".into()],
+            runtime: "process".into(),
+            entrypoint: None,
+            manifest_alias: None,
+            manifest_extends: None,
+            context: ContextDeclaration {
+                element_types: vec![],
+                refresh_ms: 200,
+                confidence: 0.95,
+                truth_surface: "native_api".into(),
+            },
+            lifecycle: LifecycleDeclaration::default(),
+            verification: VerificationDeclaration::default(),
+            actions: HashMap::from([(
+                "act".into(),
+                ActionDeclaration {
+                    params: HashMap::from([("weird\"param".into(), "string".into())]),
+                    description: long_description,
+                    mutates_state: false,
+                    requires_verification: false,
+                    returns_data: false,
+                },
+            )]),
+        };
+
+        let prompt = format_adapter_actions_prompt(&[manifest]);
+        assert!(prompt.contains(r#""adapter":"quote\"adapter""#));
+        assert!(prompt.contains(r#""weird\"param":"string""#));
+        assert!(prompt.contains('…'), "long descriptions should be capped");
     }
 
     #[test]
@@ -466,5 +867,248 @@ mod tests {
         assert!(registered.matches_app("MICROSOFT EXCEL"));
         assert!(registered.matches_app("LibreOffice Calc"));
         assert!(!registered.matches_app("Google Chrome"));
+    }
+
+    fn make_entry(
+        dir: &str,
+        name: &str,
+        alias: Option<&str>,
+    ) -> (std::path::PathBuf, AdapterManifest) {
+        let manifest = AdapterManifest {
+            name: name.into(),
+            display_name: name.into(),
+            app_patterns: vec![],
+            platform: vec!["macos".into()],
+            runtime: "native".into(),
+            entrypoint: None,
+            manifest_alias: alias.map(str::to_string),
+            manifest_extends: None,
+            context: ContextDeclaration {
+                element_types: vec![],
+                refresh_ms: 200,
+                confidence: 0.9,
+                truth_surface: "ui".into(),
+            },
+            lifecycle: LifecycleDeclaration::default(),
+            verification: VerificationDeclaration::default(),
+            actions: HashMap::new(),
+        };
+        (std::path::PathBuf::from(format!("/x/{dir}")), manifest)
+    }
+
+    #[test]
+    fn manifest_alias_round_trips_through_json() {
+        // The browser TS/Rust adapters use this field today. If a future
+        // refactor drops it from serde, the two adapter.json files would
+        // still parse silently but lose the pairing — discovery would
+        // render them as two unrelated rows. Pin the round-trip so the
+        // breakage shows up here instead of at a dashboard.
+        let json = r#"{
+            "name": "browser",
+            "display_name": "Browser (TS)",
+            "app_patterns": ["(?i)chrome"],
+            "platform": ["macos"],
+            "manifest_alias": "browser-rs",
+            "context": { "element_types": ["button"] }
+        }"#;
+        let m: AdapterManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(m.manifest_alias.as_deref(), Some("browser-rs"));
+        let re: AdapterManifest =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(re.manifest_alias.as_deref(), Some("browser-rs"));
+    }
+
+    #[test]
+    fn manifest_alias_defaults_to_none_for_unaliased_adapters() {
+        // Existing adapters (excel, numbers, sap-gui, …) don't declare
+        // an alias — make sure adding the field is backward-compatible
+        // and their JSON keeps parsing without modification.
+        let json = r#"{
+            "name": "excel",
+            "display_name": "Excel",
+            "app_patterns": ["(?i)excel"],
+            "platform": ["macos"],
+            "context": { "element_types": ["cell"] }
+        }"#;
+        let m: AdapterManifest = serde_json::from_str(json).unwrap();
+        assert!(m.manifest_alias.is_none());
+        assert!(m.manifest_extends.is_none());
+    }
+
+    #[test]
+    fn group_paired_manifests_pairs_bidirectional_aliases() {
+        // The canonical case: browser/ ↔ browser-rs/ point at each other.
+        // The grouper should land them in one group of two so dashboards
+        // can render "Browser (TS + Rust)" as one row.
+        let found = vec![
+            make_entry("browser", "browser", Some("browser-rs")),
+            make_entry("excel", "excel", None),
+            make_entry("browser-rs", "browser", Some("browser")),
+        ];
+        let groups = group_paired_manifests(&found);
+        assert_eq!(groups.len(), 2, "expected browser-pair + excel singleton");
+
+        let browser_group = &groups[0];
+        assert_eq!(browser_group.len(), 2);
+        assert_eq!(browser_group[0].0.file_name().unwrap(), "browser");
+        assert_eq!(browser_group[1].0.file_name().unwrap(), "browser-rs");
+
+        let excel_group = &groups[1];
+        assert_eq!(excel_group.len(), 1);
+        assert_eq!(excel_group[0].0.file_name().unwrap(), "excel");
+    }
+
+    #[test]
+    fn group_paired_manifests_does_not_pair_one_way_alias() {
+        // A one-way alias is almost always a typo or a half-finished
+        // rename. Pairing it would silently mask the bug behind a "two
+        // implementations" badge. The grouper deliberately falls back to
+        // singletons so the missing reverse-alias is loud at discovery
+        // time (the diagnostic surface shows two unpaired rows where one
+        // pair was expected).
+        let found = vec![
+            make_entry("browser", "browser", Some("browser-rs")),
+            make_entry("browser-rs", "browser", None),
+        ];
+        let groups = group_paired_manifests(&found);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|g| g.len() == 1));
+    }
+
+    #[test]
+    fn group_paired_manifests_handles_empty_and_singleton_inputs() {
+        // Edge cases the grouping logic must not panic on — discovery
+        // can legitimately return zero (no adapters directory) or one
+        // (only excel installed) entries during MCP-server boot before
+        // any browser is around.
+        assert!(group_paired_manifests(&[]).is_empty());
+        let single = vec![make_entry("excel", "excel", None)];
+        let groups = group_paired_manifests(&single);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 1);
+    }
+
+    #[test]
+    fn merge_layers_overlay_replaces_scalars_and_arrays_but_recurses_into_objects() {
+        // The semantic that drives Cut B: shared fields in the parent
+        // manifest persist when the child doesn't override; per-runtime
+        // fields in the child wholly win. Pin both directions in one
+        // case so a future refactor of merge_manifest_layers can't
+        // silently swap "merge arrays" or "parent wins" semantics.
+        let base = serde_json::json!({
+            "name": "browser",
+            "platform": ["macos", "linux"],
+            "context": {
+                "confidence": 0.88,
+                "truth_surface": "browser_dom"
+            },
+            "actions": { "click": { "description": "shared click" } }
+        });
+        let overlay = serde_json::json!({
+            "display_name": "Browser (TS)",
+            "platform": ["macos", "linux", "windows"],
+            "context": {
+                "refresh_ms": 200,
+                "element_types": ["button", "input"]
+            },
+            "actions": { "type": { "description": "typing" } }
+        });
+        let merged = merge_manifest_layers(base, overlay);
+
+        // Scalars from parent persist when not overridden.
+        assert_eq!(merged["name"], "browser");
+        assert_eq!(merged["context"]["confidence"], 0.88);
+        assert_eq!(merged["context"]["truth_surface"], "browser_dom");
+        // Scalars from overlay added where parent had nothing.
+        assert_eq!(merged["display_name"], "Browser (TS)");
+        assert_eq!(merged["context"]["refresh_ms"], 200);
+        // Arrays from overlay wholly replace parent's array (not concat).
+        assert_eq!(merged["platform"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            merged["context"]["element_types"].as_array().unwrap().len(),
+            2
+        );
+        // Object key from parent persists alongside new key from overlay.
+        assert!(merged["actions"]["click"].is_object());
+        assert!(merged["actions"]["type"].is_object());
+    }
+
+    #[test]
+    fn load_manifest_resolves_extends_relative_to_child_directory() {
+        // Cut B's load semantics: declaring manifest_extends pulls the
+        // parent file (relative to *this* manifest's dir) underneath. If
+        // a future refactor breaks the relative-path resolution, the
+        // browser-rs adapter would silently fail to inherit the shared
+        // truth_surface / confidence from adapters/browser/manifest.json,
+        // and downstream attribution would regress to default
+        // ("native_api"). Pin the resolution with a tempdir.
+        let dir = tempfile::tempdir().unwrap();
+        let parent_path = dir.path().join("shared.json");
+        let child_path = dir.path().join("adapter.json");
+        std::fs::write(
+            &parent_path,
+            r#"{
+                "name": "browser",
+                "platform": ["macos"],
+                "app_patterns": ["(?i)chrome"],
+                "context": {
+                    "element_types": [],
+                    "confidence": 0.88,
+                    "truth_surface": "browser_dom"
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &child_path,
+            r#"{
+                "manifest_extends": "shared.json",
+                "display_name": "Browser (Test)",
+                "runtime": "native",
+                "context": {
+                    "element_types": ["button"],
+                    "refresh_ms": 300
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let m = load_manifest(&child_path).expect("layered load should succeed");
+        // Inherited from parent:
+        assert_eq!(m.name, "browser");
+        assert_eq!(m.app_patterns, vec!["(?i)chrome"]);
+        assert_eq!(m.context.confidence, 0.88);
+        assert_eq!(m.context.truth_surface, "browser_dom");
+        // From child:
+        assert_eq!(m.display_name, "Browser (Test)");
+        assert_eq!(m.runtime, "native");
+        assert_eq!(m.context.element_types, vec!["button".to_string()]);
+        assert_eq!(m.context.refresh_ms, 300);
+        // Loader preserves the extends pointer for traceability.
+        assert_eq!(m.manifest_extends.as_deref(), Some("shared.json"));
+    }
+
+    #[test]
+    fn load_manifest_works_without_extends_for_unlayered_adapters() {
+        // Backward-compat: every adapter except the browser pair has a
+        // self-contained adapter.json today. Adding the extends/merge
+        // machinery must not regress that path — pin it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "name": "excel",
+                "display_name": "Excel",
+                "app_patterns": ["(?i)excel"],
+                "platform": ["macos"],
+                "context": { "element_types": ["cell"], "confidence": 0.95 }
+            }"#,
+        )
+        .unwrap();
+        let m = load_manifest(&path).unwrap();
+        assert_eq!(m.name, "excel");
+        assert_eq!(m.context.confidence, 0.95);
+        assert!(m.manifest_extends.is_none());
     }
 }

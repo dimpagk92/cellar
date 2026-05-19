@@ -1,24 +1,135 @@
 {
-  "name": "browser",
+  "manifest_extends": "manifest.json",
+  "manifest_alias": "browser-rs",
   "display_name": "Browser (CDP + Playwright)",
-  "app_patterns": ["(?i)google chrome", "(?i)chromium", "(?i)brave", "(?i)arc", "(?i)edge", "(?i)firefox", "(?i)safari"],
-  "platform": ["macos", "windows", "linux"],
   "runtime": "process",
   "entrypoint": "dist/process-driver.js",
   "context": {
     "element_types": ["button", "input", "link", "a", "select", "textarea", "checkbox", "radio_button", "combobox", "text", "heading", "image"],
-    "refresh_ms": 200,
-    "confidence": 0.9
+    "refresh_ms": 200
   },
   "actions": {
-    "click": { "params": { "target_id": "string" }, "description": "Click an element" },
-    "type": { "params": { "target_id": "string", "text": "string" }, "description": "Type text into an element" },
-    "set_value": { "params": { "target_id": "string", "value": "string" }, "description": "Set value directly" },
-    "navigate": { "params": { "url": "string" }, "description": "Navigate to a URL" },
-    "evaluate": { "params": { "expression": "string" }, "description": "Execute JavaScript in the page" },
-    "screenshot": { "params": {}, "description": "Capture a screenshot" },
-    "select_option": { "params": { "target_id": "string", "value": "string" }, "description": "Select a dropdown option" },
-    "dismiss_cookie_consent": { "params": {}, "description": "Dismiss cookie consent banners" },
-    "wait_for_stable": { "params": { "timeout": "number" }, "description": "Wait for DOM to stabilize" }
+    "click": {
+      "params": { "target_id": "string" },
+      "description": "Click an element by its dom:* id. Smart cascade: href → CDP locator → JS focus (for inputs) → coordinate fallback.",
+      "mutates_state": true
+    },
+    "double_click": {
+      "params": { "target_id": "string", "x": "number", "y": "number" },
+      "description": "Double-click an element by selector or coordinates.",
+      "mutates_state": true
+    },
+    "type": {
+      "params": { "target_id": "string", "text": "string" },
+      "description": "Type text into an element, clearing any existing value first.",
+      "mutates_state": true
+    },
+    "set_value": {
+      "params": { "target_id": "string", "value": "string" },
+      "description": "Set an input/combobox/select value directly. Routes to type, select_option, or setValueDirect depending on element type.",
+      "mutates_state": true
+    },
+    "fill": {
+      "params": { "selector": "string", "value": "string" },
+      "description": "Playwright fill on a form field by CSS selector — replaces any existing value atomically.",
+      "mutates_state": true
+    },
+    "check": {
+      "params": { "selector": "string", "checked": "boolean" },
+      "description": "Set the checked state of a checkbox or radio by CSS selector.",
+      "mutates_state": true
+    },
+    "select_option": {
+      "params": { "selector": "string", "value": "string", "label": "string" },
+      "description": "Select a <select> option by value or visible label.",
+      "mutates_state": true
+    },
+    "focus": {
+      "params": { "selector": "string" },
+      "description": "Move keyboard focus to an element by CSS selector."
+    },
+    "hover": {
+      "params": { "selector": "string", "x": "number", "y": "number" },
+      "description": "Hover over an element (by selector or coordinates) — triggers mouseover/mousemove events."
+    },
+    "drag": {
+      "params": { "fromX": "number", "fromY": "number", "toX": "number", "toY": "number" },
+      "description": "Mouse drag from one coordinate to another.",
+      "mutates_state": true
+    },
+    "text_select": {
+      "params": { "fromX": "number", "fromY": "number", "toX": "number", "toY": "number" },
+      "description": "Select text by dragging between two coordinates."
+    },
+    "scroll": {
+      "params": { "dx": "number", "dy": "number" },
+      "description": "Scroll the page by relative pixels (canonical type — routes through scroll_by)."
+    },
+    "scroll_by": {
+      "params": { "dx": "number", "dy": "number" },
+      "description": "Scroll the page by relative pixels."
+    },
+    "scroll_to": {
+      "params": { "selector": "string" },
+      "description": "Scroll an element into view by CSS selector."
+    },
+    "key": {
+      "params": { "key": "string" },
+      "description": "Press a single key (canonical type — routes through press_key)."
+    },
+    "press_key": {
+      "params": { "key": "string" },
+      "description": "Press a single key. Accepts Playwright key names (e.g. 'Enter', 'ArrowDown', 'Control+a')."
+    },
+    "key_combo": {
+      "params": { "keys": "array" },
+      "description": "Press a key combination — array of keys held simultaneously (e.g. ['Control', 'Shift', 'k'])."
+    },
+    "navigate": {
+      "params": { "url": "string" },
+      "description": "Navigate to a URL. Waits for DOM stability and dismisses any cookie-consent banner that surfaces.",
+      "mutates_state": true
+    },
+    "go_back": {
+      "params": {},
+      "description": "Browser history back.",
+      "mutates_state": true
+    },
+    "go_forward": {
+      "params": {},
+      "description": "Browser history forward.",
+      "mutates_state": true
+    },
+    "reload": {
+      "params": {},
+      "description": "Reload the current page.",
+      "mutates_state": true
+    },
+    "wait_for": {
+      "params": { "selector": "string", "timeout": "number" },
+      "description": "Wait until a selector appears in the DOM (Playwright locator wait)."
+    },
+    "wait_for_stable": {
+      "params": { "timeout": "number" },
+      "description": "Wait until DOM mutations quiesce (Playwright load-state + idle threshold)."
+    },
+    "screenshot": {
+      "params": {},
+      "description": "Capture a full-page screenshot. Returns base64 PNG data.",
+      "returns_data": true
+    },
+    "evaluate": {
+      "params": { "expression": "string" },
+      "description": "Run JavaScript in the page context. Use cautiously — sandbox same as the page.",
+      "returns_data": true
+    },
+    "dismiss_cookies": {
+      "params": {},
+      "description": "Attempt to find and click a cookie-consent dismiss button via overlay-detector heuristics."
+    },
+    "dismiss_cookie_consent": {
+      "params": {},
+      "description": "Legacy name for dismiss_cookies — kept for backward compatibility with existing planner prompts and tests."
+    }
   }
 }

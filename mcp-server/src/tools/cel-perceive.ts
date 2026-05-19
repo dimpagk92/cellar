@@ -1,7 +1,8 @@
 import { z } from "zod";
-import type { Cel } from "@cellar/agent";
-import { normalizeCortexAnomalies, normalizeCortexModel } from "@cellar/agent";
+import type { Cel } from "@cellar/agent/runtime";
+import { normalizeCortexAnomalies, normalizeCortexModel } from "@cellar/agent/runtime";
 import { textResult, errorResult, sleep, axPermissionGuard } from "./shared.js";
+import { getFrontmost } from "../helpers/focus.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
 
@@ -400,6 +401,20 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           return errorResult("No active perception session. Call start first.");
         }
 
+        // Snapshot the cortex's tracked app + the system frontmost BEFORE
+        // notifying the cortex. If the action didn't visibly change anything
+        // and these two disagree, it's strong evidence the event landed in a
+        // different window than the cortex was tracking — almost always a
+        // focus-race symptom worth surfacing structurally.
+        const preModel = normalizeCortexModel(cel.readCortexModel());
+        const expectedApp = preModel?.currentContext?.app ?? null;
+        let actualApp: string | null = null;
+        try {
+          actualApp = await getFrontmost();
+        } catch {
+          // osascript can fail in headless test envs — degrade silently.
+        }
+
         // Notify the Rust Cortex
         cel.notifyCortexAction(args.action);
 
@@ -414,6 +429,16 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           ? (latestDiff.addedCount > 0 || latestDiff.changedCount > 0 || latestDiff.removedCount > 0)
           : false;
 
+        // Build the wrong-app diagnostic. Only surface when the action
+        // didn't visibly land AND the two app names disagree — agents
+        // looking at `actionLanded: false` need a hint about why, but a
+        // matching-app no-op (e.g. typed into a focused field that didn't
+        // re-render) shouldn't pollute the response.
+        const landedInWrongApp =
+          !actionLanded && expectedApp && actualApp && expectedApp !== actualApp
+            ? { expected: expectedApp, actual: actualApp }
+            : undefined;
+
         // Log action
         session.actionLog.push({
           action: args.action,
@@ -426,7 +451,9 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
         // Record observation
         const obs = actionLanded && latestDiff
           ? `Action "${args.action}" landed: +${latestDiff.addedCount} -${latestDiff.removedCount} ~${latestDiff.changedCount}`
-          : `Action "${args.action}" did NOT produce visible changes`;
+          : landedInWrongApp
+            ? `Action "${args.action}" produced no diff in "${expectedApp}" — frontmost was "${actualApp}"`
+            : `Action "${args.action}" did NOT produce visible changes`;
         session.observations.push(obs);
 
         // Check constraint satisfaction
@@ -442,6 +469,7 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
 
         return textResult({
           actionLanded,
+          landedInWrongApp,
           diff: latestDiff,
           nextFocusedElement: postModel?.focusedElement,
           anomalies,

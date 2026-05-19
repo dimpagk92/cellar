@@ -82,6 +82,9 @@ mod tests {
                     kind: StepKind::Deterministic,
                     action: PlannedAction::Navigate {
                         url: "https://finance.yahoo.com/quote/BTC-USD/".into(),
+                        wait_until: None,
+                        timeout_ms: None,
+                        dismiss_overlays: None,
                     },
                 }],
             }],

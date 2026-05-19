@@ -269,11 +269,11 @@ The Cortex means `cel_see` `context` and `cel_perceive` `read` are instant — t
 | Tool | Purpose | Common modes/actions |
 |------|---------|---------------------|
 | **cel_see** | Read screen | `context`, `screenshot`, `cdp_page`, `wait_for_idle` |
-| **cel_act** | Interact | `ax_action`, `set_value`, `click`, `type`, `cdp_eval`, `write_cells`, `read_cells` |
+| **cel_act** | Interact and return receipts | `ax_action`, `set_value`, `click`, `type`, `navigate`, `cdp_eval`, `write_cells`, `read_cells` |
 | **cel_think** | Optional built-in planning / memory | `run_goal`, `plan`, `store_knowledge`, `search_knowledge` |
 | **cel_perceive** | Continuous awareness | `start`, `read`, `feed`, `checkpoint`, `stop` |
 
-See [mcp-server.md](mcp-server.md) for the full tool reference with all modes, parameters, and examples.
+See [mcp-server.md](mcp-server.md) for the full tool reference with all modes, parameters, receipts, and examples.
 
 ## Troubleshooting
 

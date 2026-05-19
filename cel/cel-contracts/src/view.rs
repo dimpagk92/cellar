@@ -10,10 +10,12 @@
 //!
 //! Memory / knowledge / event refs are typed here but populated only by
 //! later PRs (memory store + memory-aware selection). PR1a only fills
-//! `screen`, `elements`, `adapter_facts`, `capabilities`, `blockers`,
-//! `anomalies`, `evidence`, `omitted_counts`, `selection_rationale`.
+//! `screen`, `elements`, `adapter_facts`, `adapter_actions`,
+//! `capabilities`, `blockers`, `anomalies`, `evidence`,
+//! `omitted_counts`, `selection_rationale`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // ─── Top-level view ──────────────────────────────────────────────────────────
 
@@ -38,6 +40,11 @@ pub struct PlanningView {
     /// this empty if no adapter contributed.
     #[serde(default)]
     pub adapter_facts: Vec<AdapterFactRef>,
+    /// Active adapter-backed actions available for this turn. This is the
+    /// structured, agent-agnostic contract; LLM planners may render it into
+    /// prompt text, while non-LLM agents can inspect it directly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adapter_actions: Vec<AdapterActionRef>,
     /// Capabilities currently wired up (CDP bound, native input enabled, …).
     /// Folds in the boolean flags from the legacy `RuntimeCaps`.
     #[serde(default)]
@@ -79,6 +86,16 @@ pub struct PlanningView {
     /// What the builder dropped to fit the budget. Lets the planner know
     /// the view is compressed and how aggressively.
     pub omitted_counts: OmittedCounts,
+    /// Transitional pre-rendered "App-Specific Actions" prompt fragment listing the
+    /// `{"type": "custom", "adapter": "...", "action": "...", "params": {...}}`
+    /// shapes for every currently-active adapter. The cortex-side step
+    /// executor builds this once per turn from `Cortex::active_adapter_manifests()`
+    /// and the canonical runner stamps it onto the view post-build.
+    /// `None` means no adapter actions are available to the planner this
+    /// turn — empty equivalent. Prefer `adapter_actions` for new callers;
+    /// this field is retained while prompt-only clients migrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_actions_prompt: Option<String>,
 }
 
 // ─── Budget ──────────────────────────────────────────────────────────────────
@@ -257,9 +274,35 @@ pub struct KnowledgeRef {
 /// only facts about the active adapter for the focused app.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterFactRef {
+    /// Optional stable id supplied by the adapter. When absent, CEL
+    /// synthesizes evidence ids from adapter/kind/payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub adapter: String,
     pub kind: String,
     pub payload: serde_json::Value,
+}
+
+/// Adapter-backed action currently available to a planner.
+///
+/// This is the structured form of "App-Specific Actions". It lets any
+/// planner/runtime discover app-specific operations without scraping prompt
+/// prose, while still leaving each planner free to render or reason over the
+/// action catalogue in its own way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdapterActionRef {
+    pub adapter: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params_schema: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default)]
+    pub mutates_state: bool,
+    #[serde(default)]
+    pub requires_verification: bool,
+    #[serde(default)]
+    pub returns_data: bool,
 }
 
 /// Reference to a capability the runtime currently has wired up.
@@ -374,6 +417,7 @@ mod tests {
             },
             elements: vec![],
             adapter_facts: vec![],
+            adapter_actions: vec![],
             capabilities: vec![],
             memories: vec![],
             knowledge: vec![],
@@ -384,6 +428,7 @@ mod tests {
             selection_rationale: None,
             omitted_counts: OmittedCounts::default(),
             run_progress: RunProgress::default(),
+            adapter_actions_prompt: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         // Empty-list fields use `default` + `skip_serializing_if` where
@@ -429,6 +474,7 @@ mod tests {
                 settable: false,
             }],
             adapter_facts: vec![],
+            adapter_actions: vec![],
             capabilities: vec![CapabilityRef {
                 id: "cdp_bound".into(),
                 detail: Some("Google Chrome — concur.example.com".into()),
@@ -448,6 +494,7 @@ mod tests {
                 steps_used: 7,
                 max_steps: 80,
             },
+            adapter_actions_prompt: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         let back: PlanningView = serde_json::from_str(&json).unwrap();

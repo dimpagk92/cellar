@@ -27,6 +27,12 @@ cel-cdp = { workspace = true }
 cel-cortex = { workspace = true }
 cel-signals = { workspace = true }
 adapter-common = { workspace = true }
+adapter-browser = { workspace = true }
+# Mail / Calendar / Reminders / Messages run as ProcessDriver adapters (see
+# adapters/<name>/adapter.json + cel-cortex::discover_adapters in
+# src/cortex.rs). They are NOT linked here — the cortex spawns them as
+# subprocesses at runtime.
+adapter-notes = { workspace = true }
 adapter-numbers = { workspace = true }
 cel-goal-runner = { workspace = true }
 cellar-worker = { path = "../../cellar-worker" }

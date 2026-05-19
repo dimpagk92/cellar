@@ -353,12 +353,12 @@ mod tests {
     #[test]
     fn test_planned_action_click_roundtrip() {
         let action = PlannedAction::Click {
-            target_id: "dom:submit".into(),
+            target_id: "dom:submit".into(), expect_after: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         let parsed: PlannedAction = serde_json::from_str(&json).unwrap();
         match parsed {
-            PlannedAction::Click { target_id } => assert_eq!(target_id, "dom:submit"),
+            PlannedAction::Click { target_id, .. } => assert_eq!(target_id, "dom:submit"),
             _ => panic!("Wrong variant"),
         }
     }
@@ -468,7 +468,7 @@ mod tests {
     fn test_all_action_variants_serialize() {
         let actions = vec![
             PlannedAction::Click {
-                target_id: "btn".into(),
+                target_id: "btn".into(), expect_after: None,
             },
             PlannedAction::Type {
                 target_id: Some("inp".into()),

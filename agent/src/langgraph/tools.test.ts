@@ -31,6 +31,31 @@ const baseFrame: PerceptionFrame = {
     steps_used: 0,
     max_steps: 8,
   },
+  adapter_facts: [
+    {
+      id: "test:fact:1",
+      adapter: "test",
+      kind: "selection",
+      payload: { selected_id: "ax:submit" },
+    },
+  ],
+  cortex_anomalies: [
+    {
+      type: "dialog",
+      description: "Dialog is active",
+      timestamp: 1_700_000_000_000,
+      element_ids: ["ax:submit"],
+    },
+  ],
+  cortex_freshness: {
+    state: "fresh",
+    causes: [],
+    age_ms: 25,
+    confidence: 1,
+    last_update_ms: 1_700_000_000_000,
+    last_event_ms: null,
+    last_significant_event_ms: null,
+  },
 };
 
 const baseView: PlanningView = {
@@ -65,6 +90,7 @@ const baseView: PlanningView = {
     },
   ],
   adapter_facts: [],
+  adapter_actions: [],
   capabilities: [{ id: "native_input", detail: null }],
   run_progress: { steps_used: 0, max_steps: 8 },
   memories: [
@@ -115,6 +141,9 @@ describe("createCortexTools — WK3 PlanningView migration", () => {
       expect.objectContaining({
         perception: baseFrame.perception,
         caps: baseFrame.caps,
+        adapterFacts: baseFrame.adapter_facts,
+        cortexAnomalies: baseFrame.cortex_anomalies,
+        cortexFreshness: baseFrame.cortex_freshness,
       }),
     );
 

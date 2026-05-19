@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Cel } from "@cellar/agent";
+import { Cel } from "@cellar/agent/runtime";
 
 export const captureCommand = new Command("capture")
   .description("Capture a screenshot")

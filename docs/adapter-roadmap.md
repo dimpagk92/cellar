@@ -9,7 +9,7 @@ The right set of adapters depends on the ICP. When `docs/gtm-icp.md` lands (TODO
 Each candidate is scored on:
 
 1. **Validates the pattern** — does it prove the adapter contract works beyond `browser`?
-2. **Platform pull** — does it make the agent-agnostic infrastructure story stronger?
+2. **Platform pull** — does it make the trust/execution-layer story stronger?
 3. **Customer demand** — is there a concrete workflow being asked for?
 4. **Build cost** — Rust effort, native API complexity, macOS/Windows/Linux scope.
 5. **Graduation path** — does it already exist in some form (e.g., AppleScript helpers) that we can package?
@@ -48,7 +48,7 @@ Each candidate is scored on:
 ### P1 — Slack (new build)
 
 - **Status**: not started.
-- **Why**: Slack is the single highest-leverage workflow automation target for the "agent-agnostic infrastructure" narrative. Reading channels, posting messages, reacting to threads — all things customers will ask their agent to do.
+- **Why**: Slack is the single highest-leverage workflow automation target for the trust/execution-layer narrative. Reading channels, posting messages, reacting to threads — all things customers will ask their agent to do.
 - **Estimated effort**: 3-5 weeks. Needs a design doc first: Slack's scopes, OAuth, web vs desktop, how it fits alongside the browser adapter.
 - **Deliverables**:
   - Design doc at `docs/adapters/slack-design.md` (TODO).

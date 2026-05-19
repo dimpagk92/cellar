@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { Cel } from "@cellar/agent";
+import { Cel } from "@cellar/agent/runtime";
 
 export const historyCommand = new Command("history")
   .description("Show workflow run history from the CEL Store")

@@ -10,6 +10,12 @@ pub enum GoalStatus {
     MaxSteps,
     Timeout,
     Cancelled,
+    /// Agent refused the goal as too ambiguous / destructive and asked
+    /// the user to clarify. Distinct from `Failed` — the run wasn't
+    /// broken, the prompt was. Surfaces from `GoalOutcome::Refused`
+    /// via the eval-side translation; the accompanying `summary`
+    /// carries the clarification question verbatim.
+    Refused,
 }
 
 /// Result of a goal execution.

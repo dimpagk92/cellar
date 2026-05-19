@@ -83,13 +83,16 @@ pub use types::{
 
 /// Create a planner from environment-configured LLM.
 ///
-/// Reads `CEL_LLM_PROVIDER` (or `~/.cellar/config.toml`) plus provider-
-/// specific env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …).
+/// Resolution order (handled by [`cel_llm::create_client_with_role`]):
+/// 1. `CEL_LLM_PLANNER_*` (role-specific overrides)
+/// 2. `CEL_LLM_*` (general fallback)
+/// 3. Provider-specific env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …)
+/// 4. `~/.cellar/config.toml`
 ///
 /// Returns `PlannerError::Llm(LlmError::NotConfigured)` when no provider
 /// is configured — the goal runner treats this as "plan without LLM" and
 /// falls back to deterministic paths where possible.
 pub fn create_planner(config: GoalConfig) -> Result<Planner, PlannerError> {
-    let llm = cel_llm::create_client()?;
+    let llm = cel_llm::create_client_with_role(cel_llm::LlmRole::Planner)?;
     Ok(Planner::new(llm, config))
 }

@@ -1051,6 +1051,37 @@ pub fn build_user_prompt(
                             "settable" if val == "true" => {
                                 attrs.push_str(" settable");
                             }
+                            "dom_id" => {
+                                // Author's HTML `id` attribute. Promotes correct
+                                // dom:role:<id> targeting — without it the planner
+                                // guesses the id_part from the visible label and
+                                // emits hallucinated ids like
+                                // `dom:button:export-notes` for `<button id="btn-export">`.
+                                attrs.push_str(&format!(" id=\"{}\"", truncate(val, 40)));
+                            }
+                            "data_testid" => {
+                                // `data-testid` attribute. Most-stable identifier when
+                                // the author didn't ship an `id` (auto-generated UI
+                                // libraries, lists of similar buttons that only differ
+                                // by row data). The runner also falls back to this in
+                                // dom:role:<id_part>, so the planner sees the same
+                                // string it should emit.
+                                attrs.push_str(&format!(" testid=\"{}\"", truncate(val, 40)));
+                            }
+                            "css_selector" => {
+                                // Ready-to-paste CSS selector for this element,
+                                // precomputed by the browser adapter from `dom_id`
+                                // or `data-testid`. Removes the translation step
+                                // when the planner needs a selector for
+                                // `expect_after.selector` — the 2026-05-13 trial
+                                // caught every click failure as the planner
+                                // emitting `.success-message` (class) when it
+                                // meant `#success-message` (id) because it had
+                                // to construct the selector mentally from
+                                // `id="success-message"`. Now it just copies
+                                // `selector="..."` verbatim.
+                                attrs.push_str(&format!(" selector=\"{}\"", truncate(val, 60)));
+                            }
                             "placeholder" => {
                                 attrs.push_str(&format!(" placeholder=\"{}\"", truncate(val, 30)))
                             }
@@ -1360,7 +1391,7 @@ pub fn resolve_step_indices(step: &mut PlannedStep, index_map: &[String]) {
 
 pub fn resolve_action_indices(action: &mut PlannedAction, index_map: &[String]) {
     match action {
-        PlannedAction::Click { target_id }
+        PlannedAction::Click { target_id, .. }
         | PlannedAction::SetValue { target_id, .. }
         | PlannedAction::AxAction { target_id, .. } => {
             if let Some(real_id) = resolve_index(index_map, target_id) {
@@ -1491,8 +1522,14 @@ fn format_state(state: &cel_context::ElementState) -> String {
 /// Format element properties as compact key=value pairs for the Full table.
 fn format_properties(props: &std::collections::HashMap<String, String>) -> String {
     let mut parts = Vec::new();
-    // Show the most useful properties first, truncated
+    // Show the most useful properties first, truncated.
+    // `dom_id` and `data_testid` are surfaced first so the planner can target
+    // browser elements by their stable HTML identifier (or testid) instead of
+    // hallucinating a slugified version of the visible label.
     for key in &[
+        "dom_id",
+        "data_testid",
+        "css_selector",
         "placeholder",
         "label_for",
         "url",
@@ -1547,14 +1584,16 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
         }
     };
     match action {
-        PlannedAction::Click { target_id } => format!("click {}", lbl(target_id)),
+        PlannedAction::Click { target_id, .. } => format!("click {}", lbl(target_id)),
         PlannedAction::Type { target_id, text } => {
             let target = target_id.as_deref().unwrap_or("?");
             format!("type {} = \"{}\"", lbl(target), truncate(text, 20))
         }
         PlannedAction::Key { key } => format!("key({})", key),
         PlannedAction::KeyCombo { keys } => format!("combo({})", keys.join("+")),
-        PlannedAction::SetValue { target_id, value } => {
+        PlannedAction::SetValue {
+            target_id, value, ..
+        } => {
             format!("set_value {} = {}", lbl(target_id), truncate(value, 20))
         }
         PlannedAction::Drag {
@@ -1605,7 +1644,7 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
             };
             format!("cdp_eval(\"{}…\")", expr)
         }
-        PlannedAction::Navigate { url } => format!("navigate({})", url),
+        PlannedAction::Navigate { url, .. } => format!("navigate({})", url),
         PlannedAction::NotebookWrites { .. } => "(notebook — no-op)".to_string(),
         PlannedAction::WriteCells { app, writes, .. } => {
             format!("write_cells({}, {} cells)", app, writes.len())
@@ -1887,11 +1926,11 @@ mod tests {
     fn test_resolve_action_indices() {
         let map = vec!["dom:btn1".into(), "dom:input1".into()];
         let mut action = PlannedAction::Click {
-            target_id: "1".into(),
+            target_id: "1".into(), expect_after: None,
         };
         resolve_action_indices(&mut action, &map);
         match &action {
-            PlannedAction::Click { target_id } => assert_eq!(target_id, "dom:btn1"),
+            PlannedAction::Click { target_id, .. } => assert_eq!(target_id, "dom:btn1"),
             _ => panic!("Wrong variant"),
         }
 
@@ -1916,7 +1955,7 @@ mod tests {
         history.record(
             0,
             PlannedAction::Click {
-                target_id: "btn1".into(),
+                target_id: "btn1".into(), expect_after: None,
             },
             true,
             None,
@@ -2101,7 +2140,8 @@ mod tests {
         // Without label
         assert_eq!(
             summarize_action(&PlannedAction::Click {
-                target_id: "btn".into()
+                target_id: "btn".into(),
+                expect_after: None,
             }),
             "click btn"
         );
@@ -2122,7 +2162,8 @@ mod tests {
         assert_eq!(
             summarize_action_with_label(
                 &PlannedAction::Click {
-                    target_id: "btn".into()
+                    target_id: "btn".into(),
+                    expect_after: None,
                 },
                 Some("Submit"),
             ),

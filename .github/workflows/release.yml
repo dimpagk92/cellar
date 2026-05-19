@@ -22,7 +22,14 @@ jobs:
             os: macos-latest
             artifact: cel-napi.darwin-arm64.node
           - target: x86_64-apple-darwin
-            os: macos-13
+            # macos-13 hosted runners are being retired by GitHub —
+            # release #55 sat queued for 15+ min because no Intel-Mac
+            # runner ever picked it up. Switching to macos-latest
+            # (Apple Silicon) and cross-compiling via the existing
+            # `target: x86_64-apple-darwin` works because the macOS
+            # SDK ships the x86_64 linker by default; rustup pulls the
+            # matching Rust target a step later.
+            os: macos-latest
             artifact: cel-napi.darwin-x64.node
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest

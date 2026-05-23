@@ -1080,6 +1080,13 @@ fn compress(el: &ContextElement) -> PlanningElement {
             el.element_type.as_str(),
             "input" | "textarea" | "combobox" | "select"
         ),
+        // The browser CDP / DOM adapter encodes select option pairs
+        // into properties["select_options"]. Copy it over to the
+        // planning view so the planner prompt can render the actual
+        // option values — without this the model guesses slugs and
+        // we see `cdp set: no-option:select:subject:Test` failures
+        // (Run-6, 2026-05-19, contact form scenarios 3/3 trials).
+        select_options: el.properties.get("select_options").cloned(),
     }
 }
 
@@ -3244,5 +3251,47 @@ mod tests {
         // 50 (the recency-sourced unrelated rows scored to 0 and
         // were dropped).
         assert_eq!(view.omitted_counts.memories, 0);
+    }
+
+    #[test]
+    fn compress_propagates_select_options_property_to_planning_element() {
+        // The browser CDP adapter encodes select option pairs into
+        // properties["select_options"] (see element-mapper.ts:
+        // "value|Label, value2|Label 2"). The PlanningElement
+        // compression must carry this through verbatim so the planner
+        // prompt can show real option values instead of leaving the
+        // model to guess slugs. Without this, run-6's contact form
+        // scenarios stayed 0/3 with `no-option:select:subject:...`
+        // errors.
+        let mut sel = make_el("dom:select:subject", "select", Some("Subject"));
+        sel.properties.insert(
+            "select_options".into(),
+            "general_inquiry|General Inquiry, bug_report|Bug Report".into(),
+        );
+
+        let compressed = compress(&sel);
+        assert_eq!(
+            compressed.select_options.as_deref(),
+            Some("general_inquiry|General Inquiry, bug_report|Bug Report")
+        );
+        assert!(
+            compressed.settable,
+            "select must remain marked settable so set_value is a valid action"
+        );
+    }
+
+    #[test]
+    fn compress_leaves_select_options_none_when_property_absent() {
+        // AX-sourced or non-select elements have no
+        // properties["select_options"] — the compressor must leave
+        // PlanningElement.select_options as None, not empty string.
+        // (An empty string would render as an empty `options:` line
+        // and confuse the planner.)
+        let button = make_el("dom:button:submit", "button", Some("Submit"));
+        let compressed = compress(&button);
+        assert!(
+            compressed.select_options.is_none(),
+            "no select_options property → None"
+        );
     }
 }

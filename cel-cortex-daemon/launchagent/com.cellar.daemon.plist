@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for the Cellar daemon.
+
+  Installation: copy this file to ~/Library/LaunchAgents/, replace
+  `__DAEMON_PATH__` with the absolute path to the `cel-cortex-daemon`
+  binary, then `launchctl load -w ~/Library/LaunchAgents/com.cellar.daemon.plist`.
+
+  Uninstall: `launchctl unload -w ~/Library/LaunchAgents/com.cellar.daemon.plist`
+  then delete the file.
+
+  The Tauri app (Phase 4 in cellar-app-v1.md) handles install / load /
+  unload / uninstall via these `launchctl` commands; this template is
+  the source of truth for the plist body.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cellar.daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__DAEMON_PATH__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/daemon.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/daemon.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Tracing level override. Default is "info,cel_cortex_daemon=debug"
+         in the daemon binary; the Tauri app may pass "warn" for quieter
+         runs. Override at install time, not here. -->
+    <key>RUST_LOG</key>
+    <string>info,cel_cortex_daemon=info</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <!-- Don't throttle restarts — if the daemon crashes we want it back
+       up promptly. 10 s minimum between restarts; macOS enforces a
+       hard floor. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>

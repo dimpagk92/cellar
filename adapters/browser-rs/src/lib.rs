@@ -116,14 +116,18 @@ impl BrowserAdapter {
         }
     }
 
-    /// Bind a CDP client post-construction. No-ops if a client is
-    /// already set so callers can't accidentally redirect perception
-    /// mid-session.
+    /// Bind a CDP client post-construction.
+    ///
+    /// Always overwrites the current client — explicit binds from
+    /// `bind_browser_cdp_url` must take precedence over whatever
+    /// `probe()` may have discovered via ambient `connect_to_focused_app`
+    /// before the bind was called. Without this, probe()'s lazy discovery
+    /// can latch onto a stale or wrong-page connection first, and the
+    /// `is_none()` guard would then block `bind_browser_cdp_url` from
+    /// installing the correct client.
     pub async fn set_cdp_client(&self, client: Arc<CdpClient>) {
         let mut guard = self.cdp_client.lock().await;
-        if guard.is_none() {
-            *guard = Some(client);
-        }
+        *guard = Some(client);
     }
 }
 
@@ -162,6 +166,25 @@ fn default_browser_manifest() -> AdapterManifest {
 impl AdapterDriver for BrowserAdapter {
     fn manifest(&self) -> &AdapterManifest {
         &self.manifest
+    }
+
+    /// Phase 3 of ADR-unify-browser-ownership: exposes the concrete adapter
+    /// so external code (e.g. tests) can downcast to BrowserAdapter and
+    /// access inherent APIs. The main Phase 3 binding path goes through
+    /// the trait-level `set_cdp_client` below, not via downcast.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    /// Phase 3 binding hook. Lets `Cortex::bind_browser_cdp_url` hand the
+    /// CDP client of the just-launched Chromium (from `cel.ensureBrowser`)
+    /// directly to this adapter, bypassing focus-based discovery that
+    /// doesn't work for headless browsers.
+    ///
+    /// Delegates to the inherent `BrowserAdapter::set_cdp_client` which
+    /// always overwrites (explicit bind always wins over probe() discovery).
+    async fn set_cdp_client(&self, client: std::sync::Arc<cel_cdp::CdpClient>) {
+        BrowserAdapter::set_cdp_client(self, client).await;
     }
 
     async fn activate(&mut self) -> Result<(), AdapterError> {

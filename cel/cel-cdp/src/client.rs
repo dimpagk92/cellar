@@ -609,6 +609,35 @@ impl CdpClient {
         // Reset id counter — the new socket is a fresh CDP session
         // and Chrome's id-tracking starts over.
         self.next_id.store(1, Ordering::SeqCst);
+        // Drop the WS lock before re-enabling domains; `send_command`
+        // re-acquires it, so holding it here would deadlock.
+        drop(guard);
+
+        // Restore protocol-domain enablement on the new socket. The
+        // dropped session had `Page.enable` set by `navigate_resilient`
+        // (cel/cel-cdp/src/client.rs:466); the fresh socket starts
+        // with all domains disabled, so any caller that relies on
+        // page-lifecycle bookkeeping (e.g. `Page.navigate` waiting
+        // for `Page.loadEventFired` semantics on the Chrome side)
+        // would silently misbehave. Re-enabling is cheap and
+        // idempotent.
+        //
+        // Best-effort: failures are logged but not propagated. The
+        // caller's outer retry of its original command is the real
+        // signal of whether the new socket is usable — if Page.enable
+        // is the only thing that fails, the rest of the session
+        // (Runtime.evaluate, DOM.getDocument) still works.
+        if let Err(e) = self
+            .send_command("Page.enable", serde_json::json!({}))
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                "CDP reconnect: Page.enable on fresh socket failed; \
+                 page-lifecycle events may not fire until next navigate"
+            );
+        }
+
         Ok(())
     }
 }

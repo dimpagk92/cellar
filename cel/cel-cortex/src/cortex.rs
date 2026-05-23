@@ -195,7 +195,7 @@ pub struct Cortex {
     /// necessarily the CDP browser cellar is reading from. Routing browser
     /// actions through CDP guarantees they land in the right tab regardless
     /// of focus.
-    cdp_client: Option<Arc<cel_cdp::CdpClient>>,
+    cdp_client: std::sync::Mutex<Option<Arc<cel_cdp::CdpClient>>>,
     /// SAFETY GATE. Default `false` — execute() refuses any action that
     /// would dispatch through native macOS input (mouse / keyboard / app
     /// activation / AX) unless this is explicitly opted into via
@@ -256,7 +256,7 @@ impl Cortex {
             adapters: Arc::new(RwLock::new(Vec::new())),
             audio_capture: None,
             audio_config: None,
-            cdp_client: None,
+            cdp_client: std::sync::Mutex::new(None),
             allow_native_input: false,
             tick_count: Arc::new(AtomicU64::new(0)),
             last_tick_ms: Arc::new(AtomicU64::new(0)),
@@ -270,13 +270,13 @@ impl Cortex {
     /// starts with `dom:`) are dispatched through CDP — never through
     /// native macOS input. See the `cdp_client` field for why this matters.
     pub fn with_cdp_client(mut self, client: Arc<cel_cdp::CdpClient>) -> Self {
-        self.cdp_client = Some(client);
+        self.cdp_client = std::sync::Mutex::new(Some(client));
         self
     }
 
     /// Mutate-style binding for CDP client (used after construction).
     pub fn set_cdp_client(&mut self, client: Arc<cel_cdp::CdpClient>) {
-        self.cdp_client = Some(client);
+        *self.cdp_client.lock().unwrap() = Some(client);
     }
 
     /// Enable native macOS input dispatch (CGEventCreateKeyboardEvent,
@@ -390,6 +390,79 @@ impl Cortex {
         guard.push(crate::adapter::RegisteredAdapter::new(driver));
     }
 
+    /// Connect to a CDP URL and bind the resulting client to the registered
+    /// browser adapter. Used by Phase 3 of ADR-unify-browser-ownership:
+    /// `cel.ensureBrowser` spawns a Chromium with `--remote-debugging-port`
+    /// and then calls this so the cortex's BrowserAdapter has a usable
+    /// client without going through `cel_cdp::connect_to_focused_app`
+    /// discovery (which can fail for headless browsers).
+    ///
+    /// Iterates all registered adapters and calls `set_cdp_client` on each.
+    /// The default trait impl is no-op so only adapters that actually
+    /// consume a CDP client (today: browser-rs) react. Multiple browser
+    /// adapters with different runtimes (in-process vs process) would all
+    /// receive the same client, which matches today's "one shared
+    /// dedicated CDP browser" model.
+    ///
+    /// The caller typically passes the browser-level endpoint Chromium
+    /// announces on startup (`ws://127.0.0.1:PORT/devtools/browser/UUID`).
+    /// That endpoint only supports browser-level CDP commands, not the
+    /// page-level `Runtime.evaluate` that `BrowserAdapter::probe()` uses
+    /// for liveness checks. This function resolves a page-level WebSocket
+    /// URL from the HTTP `/json/list` endpoint on the same port before
+    /// connecting, falling back to the original URL if no page target is
+    /// found yet (e.g. during a very early boot race).
+    pub async fn bind_browser_cdp_url(&self, url: &str) -> Result<(), cel_cdp::CdpError> {
+        // Parse the port from ws://127.0.0.1:PORT/devtools/browser/UUID.
+        let port: Option<u16> = url
+            .trim_start_matches("ws://")
+            .trim_start_matches("wss://")
+            .splitn(2, ':')
+            .nth(1)
+            .and_then(|rest| rest.splitn(2, '/').next())
+            .and_then(|s| s.parse().ok());
+
+        // Resolve a page-level WebSocket URL from the HTTP /json/list endpoint.
+        // list_http_targets uses blocking I/O, so run it on the thread pool.
+        // Retry briefly: Chrome may not have created its initial page target
+        // the instant it announces the DevTools endpoint on stderr.
+        let page_ws_url: Option<String> = if let Some(p) = port {
+            tokio::task::spawn_blocking(move || {
+                for attempt in 0..8u8 {
+                    let targets = cel_cdp::list_http_targets(p);
+                    if let Some(t) = targets.into_iter().next() {
+                        return Some(t.ws_url);
+                    }
+                    if attempt < 7 {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                }
+                None
+            })
+            .await
+            .unwrap_or(None)
+        } else {
+            None
+        };
+
+        let connect_url = page_ws_url.as_deref().unwrap_or(url);
+        tracing::debug!(
+            browser_url = %url,
+            connect_url = %connect_url,
+            "bind_browser_cdp_url: resolved page-level target"
+        );
+
+        let client = std::sync::Arc::new(cel_cdp::CdpClient::connect(connect_url).await?);
+        // Set the Cortex's own CDP client so has_cdp_client() returns true
+        // and all cdp_eval / navigate / screenshot paths use this connection.
+        *self.cdp_client.lock().unwrap() = Some(client.clone());
+        let guard = self.adapters.read().await;
+        for adapter in guard.iter() {
+            adapter.driver.set_cdp_client(client.clone()).await;
+        }
+        Ok(())
+    }
+
     /// List the names of currently registered adapters. Used by the
     /// runner to (a) tell the planner which `Custom { adapter }` values
     /// are valid and (b) reject hallucinated adapter names before
@@ -451,7 +524,7 @@ impl Cortex {
     /// the planner whether `cdp_eval` / `navigate` will actually
     /// dispatch somewhere vs be blind.
     pub fn has_cdp_client(&self) -> bool {
-        self.cdp_client.is_some()
+        self.cdp_client.lock().unwrap().is_some()
     }
 
     /// Is native macOS input unlocked? Used by the planner to steer
@@ -467,7 +540,8 @@ impl Cortex {
     /// when there is no CDP client, the client is unreachable, or
     /// the bound page is not a URL page (about:blank, devtools, …).
     pub async fn cdp_current_url(&self) -> Option<String> {
-        let client = self.cdp_client.as_ref()?;
+        let cdp = self.cdp_client.lock().unwrap().clone();
+        let client = cdp?;
         client.get_url().await.ok()
     }
 
@@ -482,8 +556,20 @@ impl Cortex {
     /// in front (which is usually an editor or terminal during background
     /// runs).
     pub async fn cdp_screenshot(&self) -> Option<Vec<u8>> {
-        let client = self.cdp_client.as_ref()?;
+        let cdp = self.cdp_client.lock().unwrap().clone();
+        let client = cdp?;
         client.capture_screenshot().await.ok()
+    }
+
+    /// Execute JavaScript in the CDP-bound page and return the JSON-encoded
+    /// result. Delegates to `cdp_eval_via_shared_or_focused` so the call
+    /// uses the explicitly-bound client (set by `bind_browser_cdp_url`)
+    /// rather than ambient `connect_to_focused_app()` discovery.
+    ///
+    /// This is the correct path for NAPI callers — it ensures the eval
+    /// lands on the right Chrome tab even when other tabs are open.
+    pub async fn cdp_evaluate(&self, expression: &str) -> Result<String, String> {
+        self.cdp_eval_via_shared_or_focused(expression).await
     }
 
     /// Is the cortex currently running?
@@ -664,10 +750,17 @@ impl Cortex {
                                         adapter.state = crate::adapter::AdapterState::Error;
                                     } else {
                                         adapter.state = crate::adapter::AdapterState::Active;
+                                        // Force immediate context read on the activation tick —
+                                        // without this, should_read() returns false for the first
+                                        // refresh_ms / tick_ms ticks (e.g. 300 ms / 200 ms = 2
+                                        // ticks skipped before DOM elements land in the model).
+                                        adapter.ticks_since_last_read = u64::MAX;
                                         debug!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter activated and bootstrapped");
                                     }
                                 } else {
                                     adapter.state = crate::adapter::AdapterState::Active;
+                                    // Same as above — force immediate read.
+                                    adapter.ticks_since_last_read = u64::MAX;
                                     debug!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter activated");
                                 }
                             }
@@ -676,6 +769,9 @@ impl Cortex {
                             // Deactivate
                             let _ = adapter.driver.deactivate().await;
                             adapter.state = crate::adapter::AdapterState::Inactive;
+                            // Drop the cached snapshot so a stale element set
+                            // can't be replayed if the adapter reactivates later.
+                            adapter.last_elements.clear();
                             debug!(cortex_id = %cortex_id, adapter = %adapter.driver.manifest().name, "Adapter deactivated");
                         }
                         _ => {}
@@ -704,13 +800,22 @@ impl Cortex {
                                 } else {
                                     cel_context::ContextSource::NativeApi
                                 };
+                                let mut tagged = Vec::with_capacity(elements.len());
                                 for mut el in elements {
                                     el.source = source.clone();
                                     el.confidence = confidence;
+                                    tagged.push(el);
+                                }
+                                for el in &tagged {
                                     element_adapter_index
                                         .insert(el.id.clone(), adapter_name.clone());
-                                    new_context.elements.push(el);
+                                    new_context.elements.push(el.clone());
                                 }
+                                // Cache the tagged snapshot so skip ticks (where
+                                // refresh_ms > tick_ms means should_read is false)
+                                // can replay it into new_context.elements instead
+                                // of dropping adapter elements out of the model.
+                                adapter.last_elements = tagged;
                                 active_adapter_names.push(adapter_name);
                                 adapter.ticks_since_last_read = 0;
                             }
@@ -722,7 +827,21 @@ impl Cortex {
                     } else {
                         adapter.ticks_since_last_read += 1;
                         if adapter.state == crate::adapter::AdapterState::Active {
-                            active_adapter_names.push(adapter.driver.manifest().name.clone());
+                            let adapter_name = adapter.driver.manifest().name.clone();
+                            // Replay the cached snapshot on this skip tick.
+                            // merger.get_context() rebuilds new_context from
+                            // scratch every tick and doesn't know about adapters,
+                            // so without this replay adapter elements vanish from
+                            // current_context on every tick that doesn't hit
+                            // should_read. That hits every adapter with
+                            // refresh_ms > tick_ms (browser-rs, Numbers, Excel,
+                            // SAP, Bloomberg all declare 200ms+).
+                            for el in &adapter.last_elements {
+                                element_adapter_index
+                                    .insert(el.id.clone(), adapter_name.clone());
+                                new_context.elements.push(el.clone());
+                            }
+                            active_adapter_names.push(adapter_name);
                         }
                     }
                 }
@@ -1223,7 +1342,7 @@ impl Cortex {
     pub fn ensure_browser_focus(&self, action_kind: &str) -> Result<(), CortexError> {
         // No CDP client = this cortex isn't driving a browser. Native
         // input is the intended primary path; don't gate.
-        if self.cdp_client.is_none() {
+        if self.cdp_client.lock().unwrap().is_none() {
             return Ok(());
         }
 
@@ -1297,7 +1416,8 @@ impl Cortex {
     /// has dropped the underlying WebSocket. Falls back to opening
     /// a per-action client only when no shared client is bound.
     async fn cdp_eval_via_shared_or_focused(&self, expression: &str) -> Result<String, String> {
-        if let Some(client) = self.cdp_client.as_ref() {
+        let cdp = self.cdp_client.lock().unwrap().clone();
+        if let Some(client) = cdp {
             return match client.evaluate_resilient(expression).await {
                 Ok(result) => Ok(serde_json::to_string(&result).unwrap_or_default()),
                 Err(e) => Err(format!("CDP eval failed: {e}")),
@@ -1313,7 +1433,9 @@ impl Cortex {
     }
 
     fn refuse_ax_on_browser_page(&self, target_id: &str, action: &str) -> Option<String> {
-        self.cdp_client.as_ref()?;
+        if self.cdp_client.lock().unwrap().is_none() {
+            return None;
+        }
         if !target_id.starts_with("ax:") {
             return None;
         }
@@ -1403,7 +1525,8 @@ impl Cortex {
         // This guarantees the action lands in the bound CDP browser regardless
         // of what app the user has focused — preventing the eval from typing
         // into the user's chat window or destroying their open form.
-        if let Some(client) = &self.cdp_client {
+        let cdp = self.cdp_client.lock().unwrap().clone();
+        if let Some(client) = cdp {
             if let Some(result) = try_cdp_dispatch(client.as_ref(), action).await? {
                 return Ok(result);
             }
@@ -1464,8 +1587,11 @@ impl Cortex {
                 // mis-targets on macOS when the host window has
                 // focus. CDP's insertText writes directly into the
                 // bound page's activeElement.
-                if let Some(client) = self.cdp_client.as_deref() {
-                    return Ok(dispatch_type_via_cdp(client, target_id.as_deref(), text).await);
+                {
+                    let cdp = self.cdp_client.lock().unwrap().clone();
+                    if let Some(client) = cdp {
+                        return Ok(dispatch_type_via_cdp(client.as_ref(), target_id.as_deref(), text).await);
+                    }
                 }
                 // No target_id means "type into whatever's focused" — the
                 // exact case the focus gate prevents. Target-bound Type
@@ -1508,8 +1634,11 @@ impl Cortex {
                 // Input.dispatchKeyEvent which targets the bound page
                 // directly. See `dispatch_key_via_cdp` for the key-name
                 // → CDP-event mapping.
-                if let Some(client) = self.cdp_client.as_deref() {
-                    return Ok(dispatch_key_via_cdp(client, key).await);
+                {
+                    let cdp = self.cdp_client.lock().unwrap().clone();
+                    if let Some(client) = cdp {
+                        return Ok(dispatch_key_via_cdp(&*client, key).await);
+                    }
                 }
                 if let Err(e) = self.ensure_browser_focus("key") {
                     return Ok(ActionResult::fail(e.to_string()));
@@ -1523,8 +1652,11 @@ impl Cortex {
                 ActionResult::ok()
             }
             PlannedAction::KeyCombo { keys } => {
-                if let Some(client) = self.cdp_client.as_deref() {
-                    return Ok(dispatch_keycombo_via_cdp(client, keys).await);
+                {
+                    let cdp = self.cdp_client.lock().unwrap().clone();
+                    if let Some(client) = cdp {
+                        return Ok(dispatch_keycombo_via_cdp(&*client, keys).await);
+                    }
                 }
                 if let Err(e) = self.ensure_browser_focus("key_combo") {
                     return Ok(ActionResult::fail(e.to_string()));
@@ -1555,15 +1687,18 @@ impl Cortex {
                 // the planner's history shows the actual scroll
                 // distance (useful when the page hit min/max scroll
                 // and didn't move).
-                if let Some(client) = self.cdp_client.as_deref() {
-                    let js = format!(
-                        "(() => {{ window.scrollBy({dx}, {dy}); \
-                          return 'ok:scroll:' + Math.round(window.scrollY); }})()"
-                    );
-                    return Ok(match client.evaluate(&js).await {
-                        Ok(v) => check_cdp_ok(v, "scrolled"),
-                        Err(e) => ActionResult::fail(format!("cdp scroll: {e}")),
-                    });
+                {
+                    let cdp = self.cdp_client.lock().unwrap().clone();
+                    if let Some(client) = cdp {
+                        let js = format!(
+                            "(() => {{ window.scrollBy({dx}, {dy}); \
+                              return 'ok:scroll:' + Math.round(window.scrollY); }})()"
+                        );
+                        return Ok(match client.evaluate(&js).await {
+                            Ok(v) => check_cdp_ok(v, "scrolled"),
+                            Err(e) => ActionResult::fail(format!("cdp scroll: {e}")),
+                        });
+                    }
                 }
                 let mut controller =
                     create_controller().map_err(|e| CortexError::ExecutionFailed(e.to_string()))?;
@@ -1903,7 +2038,8 @@ impl Cortex {
             // extractions per scenario that quickly piles up.
             let eval = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    if let Some(client) = self.cdp_client.as_ref() {
+                    let cdp = self.cdp_client.lock().unwrap().clone();
+                    if let Some(client) = cdp {
                         return client
                             .evaluate_resilient(&expr)
                             .await
@@ -2173,7 +2309,8 @@ impl Cortex {
         }
 
         let started = std::time::Instant::now();
-        let nav_result = if let Some(client) = self.cdp_client.as_ref() {
+        let cdp = self.cdp_client.lock().unwrap().clone();
+        let nav_result = if let Some(client) = cdp {
             client
                 .navigate_resilient(url)
                 .await
@@ -3710,10 +3847,60 @@ const CEL_DISMISS_OVERLAYS_JS: &str = r#"(() => {
 /// where they do should prefer a selector-based expectation if they
 /// can name one. Documented in the `DomChanged` rustdoc on
 /// `EffectExpectation`.
+/// Snapshot fingerprint fields:
+/// - `t`: body innerText length (catches "Form submitted!" appearing,
+///   counter ticking, banner removing its label, etc.)
+/// - `c`: total interactive element count (catches new buttons /
+///   inputs being added / removed from the DOM tree)
+/// - `v`: VISIBLE interactive count (catches modal show/hide where
+///   the elements were already in the DOM but `display:none` /
+///   `offsetParent === null`. Run-6 evidence: cookie-consent and
+///   re-auth overlays toggle visibility without changing total count.)
+/// - `d`: disabled-or-aria-disabled interactive count (catches the
+///   common "Send → Sending… → Sent ✓" pattern where the button
+///   stays in DOM but flips disabled; and the inverse for forms
+///   re-enabling after re-authentication.)
+/// - `s`: state-attribute hash on dialog/aria-hidden/aria-expanded
+///   elements (catches overlay reveal/dismiss where the aria flag
+///   flips but nothing else does, e.g. an outstanding-balance modal
+///   that lives in the DOM and toggles `aria-hidden`.)
+/// - `u`: location URL (catches SPA navigations that don't otherwise
+///   change innerText length, plus full-page nav.)
+///
+/// All fields stringified together into a single JSON blob so the
+/// before/after comparison is a single string-inequality check.
+///
+/// Volatile content (timestamp tickers, animated counters) will
+/// cause false-positive diffs on `t`. The 2s default timeout keeps
+/// the blast radius small; pages where this matters should prefer a
+/// selector-based expectation if they can name one. Documented in
+/// the `DomChanged` rustdoc on `EffectExpectation`.
 const DOM_SNAPSHOT_BODY_JS: &str = r#"
+    const __cel_interactive_sel = 'a, button, input, select, textarea';
+    const __cel_all = document.querySelectorAll(__cel_interactive_sel);
+    let __cel_visible = 0;
+    for (let __i = 0; __i < __cel_all.length; __i++) {
+        if (__cel_all[__i].offsetParent !== null) __cel_visible++;
+    }
+    const __cel_disabled = document.querySelectorAll(
+        'button[disabled], input[disabled], select[disabled], textarea[disabled], [aria-disabled="true"]'
+    ).length;
+    const __cel_state_nodes = document.querySelectorAll(
+        '[aria-hidden], [aria-expanded], [aria-busy], [role="dialog"], [role="alert"], [role="alertdialog"]'
+    );
+    let __cel_state = '';
+    for (let __j = 0; __j < __cel_state_nodes.length; __j++) {
+        const __n = __cel_state_nodes[__j];
+        __cel_state += (__n.getAttribute('aria-hidden') || '') + ',';
+        __cel_state += (__n.getAttribute('aria-expanded') || '') + ',';
+        __cel_state += (__n.getAttribute('aria-busy') || '') + '|';
+    }
     const after = JSON.stringify({
         t: (document.body && document.body.innerText || '').length,
-        c: document.querySelectorAll('a, button, input, select, textarea').length,
+        c: __cel_all.length,
+        v: __cel_visible,
+        d: __cel_disabled,
+        s: __cel_state,
         u: location.href,
     });
 "#;
@@ -3724,9 +3911,31 @@ const DOM_SNAPSHOT_BODY_JS: &str = r#"
 /// `DOM_SNAPSHOT_BODY_JS` and adds the comparison against the
 /// captured baseline.
 const DOM_SNAPSHOT_JS: &str = r#"(() => {
+    const __cel_interactive_sel = 'a, button, input, select, textarea';
+    const __cel_all = document.querySelectorAll(__cel_interactive_sel);
+    let __cel_visible = 0;
+    for (let __i = 0; __i < __cel_all.length; __i++) {
+        if (__cel_all[__i].offsetParent !== null) __cel_visible++;
+    }
+    const __cel_disabled = document.querySelectorAll(
+        'button[disabled], input[disabled], select[disabled], textarea[disabled], [aria-disabled="true"]'
+    ).length;
+    const __cel_state_nodes = document.querySelectorAll(
+        '[aria-hidden], [aria-expanded], [aria-busy], [role="dialog"], [role="alert"], [role="alertdialog"]'
+    );
+    let __cel_state = '';
+    for (let __j = 0; __j < __cel_state_nodes.length; __j++) {
+        const __n = __cel_state_nodes[__j];
+        __cel_state += (__n.getAttribute('aria-hidden') || '') + ',';
+        __cel_state += (__n.getAttribute('aria-expanded') || '') + ',';
+        __cel_state += (__n.getAttribute('aria-busy') || '') + '|';
+    }
     const after = JSON.stringify({
         t: (document.body && document.body.innerText || '').length,
-        c: document.querySelectorAll('a, button, input, select, textarea').length,
+        c: __cel_all.length,
+        v: __cel_visible,
+        d: __cel_disabled,
+        s: __cel_state,
         u: location.href,
     });
     return after;
@@ -4283,11 +4492,11 @@ mod tests {
         // The exact match cases for each OS — these are what most
         // cellar manifests actually emit.
         let current = std::env::consts::OS;
-        assert_eq!(platform_matches(current), true);
+        assert!(platform_matches(current));
         // Whitespace tolerance.
-        assert_eq!(platform_matches(&format!("  {current}  ")), true);
+        assert!(platform_matches(&format!("  {current}  ")));
         // Case tolerance.
-        assert_eq!(platform_matches(&current.to_uppercase()), true);
+        assert!(platform_matches(&current.to_uppercase()));
 
         // Aliases for macOS.
         if current == "macos" {
@@ -4384,6 +4593,66 @@ mod tests {
     fn cdp_value_to_string_rejects_null_and_empty() {
         assert!(cdp_value_to_string(&serde_json::Value::Null).is_none());
         assert!(cdp_value_to_string(&serde_json::Value::String(String::new())).is_none());
+    }
+
+    #[test]
+    fn dom_snapshot_js_includes_all_dimensions() {
+        // The dom_changed fingerprint catches an SPA reaction when
+        // ANY field differs. Run-6 evidence (cookie-consent,
+        // re-authenticate, outstanding-balance, approve-deploy)
+        // showed buttons whose click dispatched OK but didn't change
+        // text length or interactive count — only visibility,
+        // disabled state, or aria-state changed. The snapshot needs
+        // every dimension below to catch those.
+        //
+        // This test pins the field set so any future "simplification"
+        // that drops a dimension has to consciously update the test.
+        for &js in &[DOM_SNAPSHOT_BODY_JS, DOM_SNAPSHOT_JS] {
+            assert!(js.contains("t:"), "text length field");
+            assert!(js.contains("c:"), "total interactive count field");
+            assert!(js.contains("v:"), "visible interactive count field");
+            assert!(js.contains("d:"), "disabled count field");
+            assert!(js.contains("s:"), "aria/dialog state hash field");
+            assert!(js.contains("u:"), "url field");
+            assert!(
+                js.contains("offsetParent"),
+                "must filter visible elements via offsetParent"
+            );
+            assert!(
+                js.contains("aria-hidden"),
+                "must include aria-hidden in state hash"
+            );
+            assert!(
+                js.contains("aria-disabled"),
+                "must include aria-disabled in disabled count"
+            );
+        }
+    }
+
+    #[test]
+    fn dom_snapshot_js_is_well_formed_self_invoking() {
+        // The full snapshot expression must be wrapped in an IIFE so
+        // CDP's Runtime.evaluate returns its value directly. The body
+        // expression (DOM_SNAPSHOT_BODY_JS) is inlined into a larger
+        // closure inside wait_for_effect, so it doesn't need its own
+        // wrapper — but it must NOT include the wrapper either, or
+        // the inlining would produce nested IIFEs.
+        let body = DOM_SNAPSHOT_BODY_JS;
+        let full = DOM_SNAPSHOT_JS;
+        assert!(
+            !body.trim_start().starts_with("(()"),
+            "BODY_JS must be statement-body only (no IIFE), got start: {:?}",
+            &body.trim_start().chars().take(20).collect::<String>()
+        );
+        assert!(
+            full.trim_start().starts_with("(()"),
+            "DOM_SNAPSHOT_JS must be a self-invoking IIFE, got start: {:?}",
+            &full.trim_start().chars().take(20).collect::<String>()
+        );
+        assert!(
+            full.contains("return after;"),
+            "DOM_SNAPSHOT_JS must return the snapshot string"
+        );
     }
 
     #[test]

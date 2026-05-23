@@ -58,7 +58,7 @@ export type CanonicalCdpState = {
 };
 
 export type EnsureDedicatedCdpBrowserOptions = {
-  cel?: Pick<Cel, "discoverCdpTargets" | "cdpNavigate">;
+  cel?: Pick<Cel, "discoverCdpTargets" | "cdpNavigate" | "ensureBrowser" | "closeBrowser" | "bindBrowserCdpUrl" | "cortexRefreshNow">;
   port?: number;
   url?: string;
   timeoutMs?: number;
@@ -471,12 +471,57 @@ export async function ensureDedicatedCdpBrowser(
   const initialStatus = await getDedicatedCdpBrowserStatus(options.cel, requestedPort);
 
   if (initialStatus.ready) {
+    // ① Clean up any blank/popup tabs from prior runs BEFORE binding.
+    //    bind_browser_cdp_url picks the first entry from /json/list, which
+    //    is the most-recently-opened target. If a prior run's window.open
+    //    popup (about:blank) is still alive it would be picked over the
+    //    actual fixture page, causing the cortex to read the wrong DOM.
+    //    Closing blanks here ensures we always bind to the real fixture tab.
+    const shouldCleanup = options.cleanupBlanksAfter ?? true;
+    if (shouldCleanup) {
+      await cleanupBlankCdpTabs(requestedPort);
+    }
+
+    // Re-bind the cortex BrowserAdapter to the existing browser. The Rust
+    // adapter starts with cdp_client = None on every cortex boot, so it must
+    // be re-attached whenever a browser was left running from a previous MCP
+    // session. bindBrowserCdpUrl internally resolves a page-level WebSocket
+    // URL via /json/list, so passing the browser-level URL is fine.
+    // We await here so the adapter is bound before the caller navigates or
+    // starts the goal runner — firing-and-forgetting leaves a window where
+    // the runner tries to use an unbound adapter.
+    if (options.cel?.bindBrowserCdpUrl) {
+      const browserUrl =
+        initialStatus.webSocketDebuggerUrl ??
+        `ws://127.0.0.1:${requestedPort}/devtools/browser/existing`;
+      try {
+        await options.cel.bindBrowserCdpUrl(browserUrl);
+      } catch {
+        // Non-fatal: probe() will attempt ambient discovery as fallback.
+      }
+    }
     if (options.url && options.cel?.cdpNavigate) {
+      // ② Force a full JS-state reset by bouncing through about:blank first.
+      //    A direct navigate to the same URL is a no-op in Chrome (the page
+      //    isn't reloaded, so acknowledged=true / stale result-text persist).
+      //    Navigating to about:blank first destroys the page's JS context,
+      //    then navigating to the fixture URL loads it clean.
+      await options.cel.cdpNavigate("about:blank");
+      await new Promise((resolve) => setTimeout(resolve, 300));
       await options.cel.cdpNavigate(options.url);
-      const shouldCleanup = options.cleanupBlanksAfter ?? true;
-      if (shouldCleanup) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        await cleanupBlankCdpTabs(requestedPort);
+      // Give the page JS a moment to initialise before the cortex reads DOM.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    // Force a cortex tick now so the BrowserAdapter activates (sets
+    // connected=true) and DOM elements land in the mental model before
+    // the first LLM planning call reads context. Without this, the runner's
+    // first context snapshot would be stale (no DOM elements) because the
+    // background tick fires every 200 ms and might not have run yet.
+    if (options.cel?.cortexRefreshNow) {
+      try {
+        await options.cel.cortexRefreshNow(3000);
+      } catch {
+        // Non-fatal — the background tick loop will catch up.
       }
     }
     return {
@@ -498,46 +543,95 @@ export async function ensureDedicatedCdpBrowser(
     };
   }
 
-  const browser = await chooseChromiumBrowser();
-  if (!browser) {
+  // Phase 3 of ADR-unify-browser-ownership: delegate to cel.ensureBrowser
+  // instead of spawning a system-installed Chrome/Brave/Edge/Arc binary.
+  // The CEL-managed browser uses Playwright's bundled Chromium, so no
+  // system browser install is required. cel.ensureBrowser also calls
+  // cel.bindBrowserCdpUrl() internally so the cortex's BrowserAdapter
+  // attaches to the CDP URL directly — no reliance on
+  // connect_to_focused_app discovery (which fails for headless browsers).
+  if (!options.cel?.ensureBrowser) {
     return {
       ok: false,
       launched: false,
       browser: null,
       status: initialStatus,
-      message: "No Chromium-family browser found. Install Chrome, Chromium, Brave, Edge, or Arc.",
+      message:
+        "ensureDedicatedCdpBrowser requires options.cel with ensureBrowser support " +
+        "(see ADR-unify-browser-ownership).",
     };
   }
 
-  const profileDir = path.join(getCelCdpProfileRoot(), browser.profileDirName);
-  mkdirSync(profileDir, { recursive: true });
+  try {
+    // Visible by default — preserves MCP agent-assistant behavior where the
+    // user wants to see what the agent is doing.
+    const handle = await options.cel.ensureBrowser({
+      headless: false,
+      port: requestedPort,
+    });
 
-  const initialUrl = options.url ?? "about:blank";
-  launchDedicatedBrowser(browser, requestedPort, profileDir, initialUrl);
-
-  const timeoutMs = options.timeoutMs ?? 10_000;
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const status = await getDedicatedCdpBrowserStatus(options.cel, requestedPort);
-    if (status.ready) {
-      return {
-        ok: true,
-        launched: true,
-        browser,
-        status,
-        message: `CEL browser (${browser.appName}) ready on port ${requestedPort}.`,
-      };
+    if (options.url && options.cel.cdpNavigate) {
+      await options.cel.cdpNavigate(options.url);
+      const shouldCleanup = options.cleanupBlanksAfter ?? true;
+      if (shouldCleanup) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        await cleanupBlankCdpTabs(handle.port || requestedPort);
+      }
     }
-  }
+    // Force a cortex tick so BrowserAdapter activates and DOM lands in the
+    // mental model before the first LLM planning call.
+    if (options.cel.cortexRefreshNow) {
+      try {
+        await options.cel.cortexRefreshNow(3000);
+      } catch {
+        // Non-fatal.
+      }
+    }
 
-  const finalStatus = await getDedicatedCdpBrowserStatus(options.cel, requestedPort);
+    return {
+      ok: true,
+      launched: true,
+      // `browser` (ChromiumCandidate) is null in Phase 3+ because we no longer
+      // launch a system browser. Callers that need browser metadata should
+      // read status.browserApp / status.webSocketDebuggerUrl instead.
+      browser: null,
+      status: buildStatusFromHandle(handle, requestedPort),
+      message: `CEL-managed browser ready on port ${handle.port || requestedPort}.`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      launched: false,
+      browser: null,
+      status: initialStatus,
+      message: `cel.ensureBrowser failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * Build a DedicatedCdpBrowserStatus from a CEL BrowserHandle for return-shape
+ * compatibility with the pre-Phase-3 ensureDedicatedCdpBrowser API.
+ *
+ * The only known caller (mcp-server's ensureCdpChrome) only consumes
+ * `message` — the status fields are best-effort.
+ */
+function buildStatusFromHandle(
+  handle: { cdpUrl: string; port: number },
+  fallbackPort: number,
+): DedicatedCdpBrowserStatus {
   return {
-    ok: false,
-    launched: true,
-    browser,
-    status: finalStatus,
-    message: `${browser.appName} launched, but CDP was not ready on port ${requestedPort} after ${timeoutMs}ms.`,
+    port: handle.port || fallbackPort,
+    running: true,
+    ready: true,
+    ownedByCel: true,
+    conflict: false,
+    browserApp: "Playwright Chromium",
+    browserVersion: null,
+    userDataDir: null,
+    webSocketDebuggerUrl: handle.cdpUrl,
+    targetCount: 1,
+    profileRoot: getCelCdpProfileRoot(),
+    processPid: null,
   };
 }

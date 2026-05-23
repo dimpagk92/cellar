@@ -22,6 +22,7 @@
     "@dpagk/cellar-napi": "workspace:*",
     "@langchain/core": "^0.3.80",
     "@langchain/langgraph": "0.4.9",
+    "playwright": "^1.59.1",
     "zod": "^3.23.0"
   },
   "devDependencies": {

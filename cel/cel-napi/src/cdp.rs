@@ -120,10 +120,29 @@ pub async fn cdp_navigate(url: String) -> napi::Result<()> {
         .map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
-/// Execute JavaScript in the focused browser tab via CDP Runtime.evaluate.
+/// Execute JavaScript in the CDP-bound browser tab via CDP Runtime.evaluate.
 /// Returns the JSON-serialized result value, or "null" if no value.
+///
+/// Prefers the Cortex's explicitly-bound CDP client (set by `bindBrowserCdpUrl`)
+/// over ambient `connect_to_focused_app()` discovery. This ensures the eval
+/// lands on the correct Chrome tab even when other tabs (e.g. Google Flights)
+/// are open and focused.
 #[napi]
 pub async fn cdp_evaluate(expression: String) -> napi::Result<String> {
+    // Prefer the cortex-bound client — it is wired to the specific page that
+    // `bindBrowserCdpUrl` connected to, not whatever Chrome tab happens to be
+    // frontmost. Fall back to ambient discovery only when no cortex is running
+    // or no client has been bound yet.
+    if let Some(cortex) = crate::cortex::get_cortex_handle() {
+        if cortex.has_cdp_client() {
+            return cortex
+                .cdp_evaluate(&expression)
+                .await
+                .map_err(|e| napi::Error::from_reason(e));
+        }
+    }
+
+    // Fallback: ambient discovery (no cortex / no bound client).
     let client = match cel_cdp::connect_to_focused_app().await {
         Some(c) => c,
         None => {

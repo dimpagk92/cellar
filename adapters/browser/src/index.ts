@@ -375,6 +375,36 @@ export class BrowserAdapter {
 
   /** Connect to the browser and attach all watchdogs. */
   async connect(): Promise<void> {
+    // Phase 2 of ADR-unify-browser-ownership: when a Cel instance is provided
+    // and no explicit wsEndpoint/cdpUrl was passed in config, route the browser
+    // launch through cel.ensureBrowser() so CEL owns the Chromium lifecycle.
+    // Callers that pass wsEndpoint or cdpUrl explicitly keep their existing
+    // behavior (backwards compatible).
+    if (this._cel && !this.config.wsEndpoint && !this.config.cdpUrl) {
+      const handle = await this._cel.ensureBrowser({
+        headless: this.config.headless ?? true,
+        viewport: this.config.viewport,
+        stealth: this.config.stealth ?? true,
+      });
+      // Reconstruct the CdpClient to attach to the CEL-managed browser via CDP
+      // rather than launching its own Chromium. isolatedContext: true forces
+      // a fresh BrowserContext+Page per adapter so state (DOM, cookies, open
+      // tabs) doesn't leak across BrowserAdapter instances sharing the same
+      // CEL-managed browser process — this is the key correctness fix for
+      // hybrid-suite tasks that share a long-lived browser across many runs.
+      this.client = new CdpClient({
+        browser: this.config.browser,
+        wsEndpoint: handle.cdpUrl,
+        viewport: this.config.viewport,
+        args: this.config.args,
+        channel: this.config.channel,
+        userAgent: this.config.userAgent,
+        stealth: this.config.stealth ?? true,
+        isolatedContext: true,
+      });
+      debugBrowser(`[browser-adapter] Using CEL-managed browser at ${handle.cdpUrl}`);
+    }
+
     await this.client.connect();
 
     // Inject closed shadow DOM capture patch before any page loads.

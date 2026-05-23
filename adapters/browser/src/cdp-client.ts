@@ -41,6 +41,21 @@ export interface CdpClientConfig {
   stealth?: boolean;
   /** Callback invoked after a successful session recovery. */
   onRecovery?: (reason: string) => void;
+  /**
+   * When attaching via wsEndpoint to a shared/external browser, force creation
+   * of a fresh BrowserContext + Page instead of reusing existing ones.
+   *
+   * Default false (preserves backwards-compat behavior of reusing whatever
+   * contexts/pages the attached browser already has). Set to true when the
+   * client wants isolation — typically when the browser is shared across many
+   * sequential consumers (e.g. CEL's singleton browser primitive shared by
+   * multiple BrowserAdapter instances over a benchmark run).
+   *
+   * Per ADR-unify-browser-ownership: BrowserAdapter passes this when the
+   * underlying browser came from cel.ensureBrowser() so each adapter gets
+   * isolated state.
+   */
+  isolatedContext?: boolean;
 }
 
 export class CdpClient {
@@ -139,10 +154,23 @@ export class CdpClient {
       this.browser = await browserType.connectOverCDP(
         this.config.wsEndpoint,
       );
-      const contexts = this.browser.contexts();
-      this.context = contexts[0] ?? (await this.browser.newContext());
-      const pages = this.context.pages();
-      this._page = pages[0] ?? (await this.context.newPage());
+      if (this.config.isolatedContext) {
+        // Always create a fresh context+page so this client doesn't pick up
+        // residual state (DOM, cookies, etc.) from previous attachments to
+        // the same shared browser. Required when the browser is owned by
+        // cel.ensureBrowser() and shared across multiple BrowserAdapter
+        // instances over the life of a benchmark / agent run.
+        this.context = await this.browser.newContext({
+          viewport: this.config.viewport ?? { width: 1280, height: 800 },
+          ...(userAgent ? { userAgent } : {}),
+        });
+        this._page = await this.context.newPage();
+      } else {
+        const contexts = this.browser.contexts();
+        this.context = contexts[0] ?? (await this.browser.newContext());
+        const pages = this.context.pages();
+        this._page = pages[0] ?? (await this.context.newPage());
+      }
     } else if (this.config.userDataDir) {
       // Persistent context mode — required for browser extensions.
       this.context = await browserType.launchPersistentContext(
@@ -181,7 +209,18 @@ export class CdpClient {
   async disconnect(): Promise<void> {
     await this._cdp.disconnect();
 
-    if (this.browser) {
+    if (this.config.wsEndpoint && this.config.isolatedContext) {
+      // Shared/external browser owned by someone else (typically cel.ensureBrowser).
+      // We close OUR context to free pages but leave the browser process alive
+      // for other consumers.
+      if (this.context) {
+        await this.context.close().catch(() => {});
+      }
+      // Also drop the Playwright Browser reference without calling close() on it
+      // (close() on a connectOverCDP Browser disconnects the client side which
+      // is fine, but for clarity we just null it out).
+      this.browser = null;
+    } else if (this.browser) {
       await this.browser.close().catch(() => {});
       this.browser = null;
     } else if (this.context) {

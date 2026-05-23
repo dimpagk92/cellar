@@ -1,0 +1,17 @@
+{
+  "id": "blocked_domains_guard",
+  "name": "Pause agent before navigating to blocked domains",
+  "nl_original": "require my confirmation before the agent navigates to a domain on the blocklist",
+  "kind": "guard",
+  "enabled": true,
+  "match": {
+    "all": [
+      { "leaf": { "field": "kind", "op": "eq", "value": "agent_action_attempted" } },
+      { "leaf": { "field": "data.action_type", "op": "eq", "value": "browser.navigate" } },
+      { "leaf": { "field": "data.action_args.url", "op": "regex_match", "value": "https?://([^/]+\\.)?(facebook|x|tiktok)\\.com" } }
+    ]
+  },
+  "action": { "type": "require_confirmation", "timeout_s": 120 },
+  "cooldown_seconds": 0,
+  "created_at": "2026-05-22T00:00:00Z"
+}

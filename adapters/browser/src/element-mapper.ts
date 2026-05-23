@@ -366,6 +366,24 @@ function mapElement(raw: RawDOMElement): ContextElement {
   const selector = buildCssSelector(raw);
   if (selector) properties.css_selector = selector;
 
+  // For <select> elements, surface the option values so the planner
+  // can dispatch set_value with the correct value rather than guessing
+  // a slug. Encoded as "value|Label, value2|Label 2, ..." — the
+  // planner-side rendering splits on this format. Run-6 evidence:
+  // the contact-form select scenarios failed 3/3 trials with
+  // `no-option:select:subject:Test` because the model couldn't see
+  // the actual option values.
+  if (raw.selectOptions && raw.selectOptions.length > 0) {
+    const encoded = raw.selectOptions
+      .map((o) => {
+        // Escape commas / pipes in label so the planner can re-parse.
+        const label = (o.label || "").replace(/[|,]/g, " ");
+        return `${o.value}|${label}`;
+      })
+      .join(", ");
+    properties.select_options = encoded;
+  }
+
   return {
     id: generateId(raw),
     label,

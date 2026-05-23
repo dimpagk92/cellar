@@ -17,7 +17,8 @@ pub use content::{
     TextBlock, ViewportInfo,
 };
 pub use discovery::{
-    discover_cdp_targets, discover_cdp_targets_filtered, reset_preferred_target, CdpTarget,
+    discover_cdp_targets, discover_cdp_targets_filtered, list_http_targets, reset_preferred_target,
+    CdpHttpTarget, CdpTarget,
 };
 pub use setup::{install_cdp_launch_agent, is_cdp_setup_installed, uninstall_cdp_launch_agent};
 

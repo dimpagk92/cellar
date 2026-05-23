@@ -1,0 +1,26 @@
+[package]
+name = "cellar-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cellar"
+path = "src/main.rs"
+
+[dependencies]
+cellar-ipc = { workspace = true }
+cellar-types = { workspace = true }
+cel-accessibility = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+serde_json.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
+chrono = { workspace = true, features = ["serde"] }
+anyhow.workspace = true
+reqwest = { workspace = true }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util", "net"] }

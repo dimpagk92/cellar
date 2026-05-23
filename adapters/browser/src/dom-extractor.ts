@@ -71,6 +71,19 @@ export interface RawDOMElement {
   pagesBelow: number;
   /** Whether this element is fully occluded by higher-paint-order opaque elements. */
   isOccluded: boolean;
+  /**
+   * For `<select>` elements: the list of `<option>` children captured
+   * as { value, label }. Empty / undefined for non-select elements
+   * or for selects with no options at extraction time.
+   *
+   * The planner needs the actual `value` attribute (which is what
+   * `set_value` dispatches) — without this, run-6 evidence showed
+   * the model guessing slugs like `"general-inquiry"` against a
+   * select whose real option values were `"1"`, `"2"`, `"3"`, and
+   * failing with `no-option:select:subject:general-inquiry` 3 trials
+   * in a row.
+   */
+  selectOptions?: Array<{ value: string; label: string }>;
 }
 
 /** Viewport metadata captured alongside DOM elements. */
@@ -403,6 +416,30 @@ const EXTRACTION_SCRIPT = `(() => {
         const bounds = getBounds(el);
         const vp = getViewportRelation(bounds);
 
+        // For <select>, enumerate option children so the planner sees
+        // exact option values up front. Without this, run-6 caught the
+        // planner emitting set_value with a guessed slug ("Test", or
+        // "general-inquiry") against a select whose real option values
+        // were different — fails with no-option:select:subject:Test.
+        // Cap at 50 options to bound prompt size on enormous selects
+        // (country pickers etc.); 50 is enough to fingerprint the
+        // shape so the planner can see "this is a small enum" vs
+        // "this is a long list".
+        let selectOptions: Array<{ value: string; label: string }> | undefined;
+        if (el.tagName === 'SELECT') {
+          const opts: Array<{ value: string; label: string }> = [];
+          const optEls = el.querySelectorAll('option');
+          const cap = Math.min(optEls.length, 50);
+          for (let oi = 0; oi < cap; oi++) {
+            const opt = optEls[oi];
+            opts.push({
+              value: String((opt.value !== undefined ? opt.value : '') || ''),
+              label: String((opt.textContent || '').trim()).slice(0, 80),
+            });
+          }
+          selectOptions = opts;
+        }
+
         results.push({
           backendNodeId: nodeCounter,
           tag: el.tagName.toLowerCase(),
@@ -427,6 +464,7 @@ const EXTRACTION_SCRIPT = `(() => {
           iframeOrigin: iframeOrigin,
           className: (el.className && typeof el.className === 'string') ? el.className : '',
           attributes: getFilteredAttributes(el),
+          selectOptions: selectOptions,
           paintOrder: getPaintOrder(el, nodeCounter),
           isOpaque: checkOpaque(el),
           viewportRelation: vp.relation,
@@ -616,6 +654,23 @@ export async function extractDOMLightweight(evaluator: Evaluator): Promise<RawDO
           }
         }
       }
+      // Mirror the full extractor: capture option values for <select>
+      // so the planner sees usable set_value targets even in the
+      // lightweight fallback path.
+      let selectOptions = undefined;
+      if (tag === 'select') {
+        const opts = [];
+        const optEls = el.querySelectorAll('option');
+        const cap = Math.min(optEls.length, 50);
+        for (let oi = 0; oi < cap; oi++) {
+          const opt = optEls[oi];
+          opts.push({
+            value: String((opt.value !== undefined ? opt.value : '') || ''),
+            label: String((opt.textContent || '').trim()).slice(0, 80),
+          });
+        }
+        selectOptions = opts;
+      }
       results.push({
         tag,
         role,
@@ -631,6 +686,7 @@ export async function extractDOMLightweight(evaluator: Evaluator): Promise<RawDO
         bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
         visible: rect.width > 0 && rect.height > 0 && getComputedStyle(el).display !== 'none',
         disabled: el.disabled || false,
+        selectOptions: selectOptions,
       });
     }
     return { elements: results };
@@ -666,6 +722,7 @@ export async function extractDOMLightweight(evaluator: Evaluator): Promise<RawDO
     viewportRelation: "visible",
     pagesBelow: 0,
     isOccluded: false,
+    selectOptions: el.selectOptions,
   }));
 }
 

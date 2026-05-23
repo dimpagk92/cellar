@@ -1,0 +1,21 @@
+[package]
+name = "cellar-llm-router"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
+futures-util.workspace = true
+tracing.workspace = true
+# Note: token-by-token streaming via SSE (Phase 3 polish) will add `eventsource-stream`.
+# v1 ships with the default `stream()` impl wrapping `complete()` — no SSE parsing needed.
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+serde_json.workspace = true

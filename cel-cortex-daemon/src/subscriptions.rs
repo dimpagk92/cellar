@@ -915,10 +915,10 @@ mod tests {
         // then assert prune drops exactly that one entry.
         let reg = Arc::new(SubscriptionRegistry::new());
         let bus = EventBus::new();
-        let (tx_dead, rx_dead) = tokio::sync::mpsc::channel(8);
-        let (tx_live, _rx_live) = tokio::sync::mpsc::channel(8);
-        let dead_id = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), tx_dead);
-        let live_id = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), tx_live);
+        let (s_dead, rx_dead) = sink(8);
+        let (s_live, _rx_live) = sink(8);
+        let dead_id = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s_dead);
+        let live_id = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s_live);
         assert_eq!(reg.len(), 2);
 
         // Drop the dead receiver and publish — the forwarder's send fails
@@ -946,8 +946,8 @@ mod tests {
         let reg = Arc::new(SubscriptionRegistry::new());
         let bus = EventBus::new();
         // First subscription with a receiver we drop immediately to kill it.
-        let (tx1, rx1) = tokio::sync::mpsc::channel(8);
-        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), tx1);
+        let (s1, rx1) = sink(8);
+        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s1);
         drop(rx1);
         bus.publish(Event::now(EventSource::Fsevents, EventKind::FileCreated));
         for _ in 0..10 {
@@ -955,8 +955,8 @@ mod tests {
         }
         // Now register a new subscription. The dead entry should get
         // pruned implicitly.
-        let (tx2, _rx2) = tokio::sync::mpsc::channel(8);
-        let _id2 = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), tx2);
+        let (s2, _rx2) = sink(8);
+        let _id2 = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s2);
         assert_eq!(
             reg.len(),
             1,
@@ -968,10 +968,10 @@ mod tests {
     async fn abort_all_clears_registry_via_drop() {
         let reg = Arc::new(SubscriptionRegistry::new());
         let bus = EventBus::new();
-        let (tx1, _rx1) = tokio::sync::mpsc::channel(8);
-        let (tx2, _rx2) = tokio::sync::mpsc::channel(8);
-        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), tx1);
-        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), tx2);
+        let (s1, _rx1) = sink(8);
+        let (s2, _rx2) = sink(8);
+        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s1);
+        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s2);
         assert_eq!(reg.len(), 2);
         reg.abort_all();
         assert!(reg.is_empty());

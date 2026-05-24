@@ -110,6 +110,9 @@ pub enum PlistStatus {
     /// Path does not exist.
     Missing,
     /// `plutil -lint` returned non-zero (malformed XML / corrupt plist).
+    /// Only emitted on macOS where `plutil` is available — on Linux CI
+    /// builds the variant is unreachable, hence the `allow(dead_code)`.
+    #[allow(dead_code)]
     Malformed,
     /// Well-formed.
     Ok,

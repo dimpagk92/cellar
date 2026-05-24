@@ -58,17 +58,23 @@ jobs:
         if: hashFiles('cel/cel-memory-sqlite/Cargo.toml') != ''
         run: |
           echo "checking cel-memory-sqlite ..."
+          # TODO(extraction): cellar_llm_router is allowlisted by
+          # scripts/lint-guard-extraction-crates.sh too — the Phase 3
+          # summarizer needs the router. Three resolution paths documented
+          # in the script's allowed_for() comment block. Mirror any allow-
+          # list change there to here.
           violations=$(
             rg "^use (cel_|cellar_)" cel/cel-memory-sqlite/src/ 2>/dev/null \
             | grep -v ":use cel_memory" \
+            | grep -v ":use cellar_llm_router" \
             || true
           )
           if [ -n "$violations" ]; then
-            echo "::error::cel-memory-sqlite may only import from cel_memory"
+            echo "::error::cel-memory-sqlite may only import from cel_memory or cellar_llm_router"
             echo "$violations"
             exit 1
           fi
-          echo "  ✓ clean (only cel-memory allowed)"
+          echo "  ✓ clean (only cel-memory + cellar-llm-router allowed)"
 
       - name: Check cel-brief imports
         if: hashFiles('cel/cel-brief/Cargo.toml') != ''

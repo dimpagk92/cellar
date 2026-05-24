@@ -417,9 +417,9 @@ impl Cortex {
         let port: Option<u16> = url
             .trim_start_matches("ws://")
             .trim_start_matches("wss://")
-            .splitn(2, ':')
-            .nth(1)
-            .and_then(|rest| rest.splitn(2, '/').next())
+            .split_once(':')
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once('/').map(|(s, _)| s).or(Some(rest)))
             .and_then(|s| s.parse().ok());
 
         // Resolve a page-level WebSocket URL from the HTTP /json/list endpoint.
@@ -1641,7 +1641,7 @@ impl Cortex {
                 {
                     let cdp = self.cdp_client.lock().unwrap().clone();
                     if let Some(client) = cdp {
-                        return Ok(dispatch_key_via_cdp(&*client, key).await);
+                        return Ok(dispatch_key_via_cdp(&client, key).await);
                     }
                 }
                 if let Err(e) = self.ensure_browser_focus("key") {
@@ -1659,7 +1659,7 @@ impl Cortex {
                 {
                     let cdp = self.cdp_client.lock().unwrap().clone();
                     if let Some(client) = cdp {
-                        return Ok(dispatch_keycombo_via_cdp(&*client, keys).await);
+                        return Ok(dispatch_keycombo_via_cdp(&client, keys).await);
                     }
                 }
                 if let Err(e) = self.ensure_browser_focus("key_combo") {

@@ -138,7 +138,7 @@ pub async fn cdp_evaluate(expression: String) -> napi::Result<String> {
             return cortex
                 .cdp_evaluate(&expression)
                 .await
-                .map_err(|e| napi::Error::from_reason(e));
+                .map_err(napi::Error::from_reason);
         }
     }
 

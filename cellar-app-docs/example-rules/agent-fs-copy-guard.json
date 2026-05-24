@@ -1,0 +1,17 @@
+{
+  "id": "agent_fs_copy_guard",
+  "name": "Require confirmation before agent moves files outside ~/Workspace",
+  "nl_original": "ask me before the embedded agent moves any file outside ~/Workspace",
+  "kind": "guard",
+  "enabled": true,
+  "match": {
+    "all": [
+      { "leaf": { "field": "kind", "op": "eq", "value": "agent_action_attempted" } },
+      { "leaf": { "field": "data.action_type", "op": "in", "value": ["fs.copy", "fs.move"] } },
+      { "leaf": { "field": "data.action_args.source_path", "op": "not_starts_with", "value": "/Users/you/Workspace/" } }
+    ]
+  },
+  "action": { "type": "require_confirmation", "timeout_s": 300 },
+  "cooldown_seconds": 0,
+  "created_at": "2026-05-22T00:00:00Z"
+}

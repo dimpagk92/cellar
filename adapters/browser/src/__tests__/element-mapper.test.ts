@@ -248,6 +248,68 @@ describe("element-mapper", () => {
     });
   });
 
+  describe("select options", () => {
+    it("encodes option pairs into properties.select_options", () => {
+      // Run-6 (2026-05-19) caught contact-form scenarios failing
+      // 3/3 because the planner guessed slugs against a select
+      // whose actual option values were unknown. The extractor now
+      // captures option pairs; the mapper must encode them into
+      // a planner-readable string in properties so the Rust
+      // PlanningElement compression can carry them through.
+      const elements = mapElements([
+        makeRaw({
+          tag: "select",
+          role: "",
+          id: "subject",
+          selectOptions: [
+            { value: "general_inquiry", label: "General Inquiry" },
+            { value: "bug_report", label: "Bug Report" },
+            { value: "feature", label: "Feature Request" },
+          ],
+        }),
+      ]);
+      expect(elements[0].element_type).toBe("combobox");
+      expect(elements[0].properties?.select_options).toBe(
+        "general_inquiry|General Inquiry, bug_report|Bug Report, feature|Feature Request",
+      );
+    });
+
+    it("omits properties.select_options when the select has no options", () => {
+      // A `<select>` with no options (e.g. JS-populated dropdown
+      // that hasn't loaded yet) must not emit an empty
+      // select_options key. An empty value would render as a
+      // misleading "options: " line in the planner prompt.
+      const elements = mapElements([
+        makeRaw({ tag: "select", role: "", selectOptions: [] }),
+      ]);
+      expect(elements[0].properties?.select_options).toBeUndefined();
+    });
+
+    it("escapes pipes and commas in option labels", () => {
+      // If a label contains the encoding delimiters (`|` or `,`),
+      // the planner-side re-parse would split incorrectly. Replace
+      // delimiters with spaces in the mapper so the round-trip is
+      // safe even on adversarial labels.
+      const elements = mapElements([
+        makeRaw({
+          tag: "select",
+          role: "",
+          selectOptions: [
+            { value: "v1", label: "Option, with comma" },
+            { value: "v2", label: "Option|with|pipe" },
+          ],
+        }),
+      ]);
+      const encoded = elements[0].properties?.select_options || "";
+      expect(encoded).toContain("v1|Option  with comma");
+      expect(encoded).toContain("v2|Option with pipe");
+      // Ensure the comma in the value can still split entries:
+      // "v1|..., v2|..." must parse back to two entries.
+      const entries = encoded.split(", ");
+      expect(entries.length).toBe(2);
+    });
+  });
+
   describe("sorting", () => {
     it("sorts by confidence descending", () => {
       const elements = mapElements([

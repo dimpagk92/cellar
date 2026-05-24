@@ -1,0 +1,17 @@
+{
+  "id": "documents_file_deletion",
+  "name": "Files deleted from ~/Documents",
+  "nl_original": "log any file deletion under ~/Documents",
+  "kind": "watcher",
+  "enabled": true,
+  "match": {
+    "all": [
+      { "leaf": { "field": "kind", "op": "eq", "value": "file_deleted" } },
+      { "leaf": { "field": "data.path", "op": "starts_with", "value": "/Users/" } },
+      { "leaf": { "field": "data.path", "op": "contains", "value": "/Documents/" } }
+    ]
+  },
+  "action": { "type": "log_only" },
+  "cooldown_seconds": 5,
+  "created_at": "2026-05-22T00:00:00Z"
+}

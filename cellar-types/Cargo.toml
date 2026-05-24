@@ -1,0 +1,15 @@
+[package]
+name = "cellar-types"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v7", "serde"] }
+thiserror.workspace = true
+regex = "1.10"
+
+[dev-dependencies]
+serde_json.workspace = true

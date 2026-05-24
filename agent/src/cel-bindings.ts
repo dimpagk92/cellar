@@ -44,6 +44,12 @@ import type {
   PlanningView,
   RuntimeCaps,
 } from "./langgraph/canonical.js";
+import {
+  ensureBrowserInternal,
+  closeBrowserInternal,
+  type EnsureBrowserOptions,
+  type BrowserHandle,
+} from "./browser-primitive.js";
 
 /**
  * Sanitize a ScreenContext before passing to Rust planner.
@@ -241,6 +247,10 @@ export interface CelNative {
   consumeCortexAnomalies(): string;
   isCortexRunning(): boolean;
   stopCortex(): void;
+  /** Phase 3 of ADR-unify-browser-ownership: bind a freshly-spawned CDP URL
+   * to the cortex's BrowserAdapter so it doesn't have to discover via
+   * connect_to_focused_app (which fails for headless browsers). */
+  bindBrowserCdpUrl(url: string): Promise<void>;
   // Cortex liveness (Phase 1)
   cortexTickCount(): number;
   cortexStalledTicks(): number;
@@ -1185,6 +1195,21 @@ export class Cel implements
     this.native?.bootCortex();
   }
 
+  /**
+   * Phase 3 of ADR-unify-browser-ownership: hand a freshly-spawned CDP URL
+   * to the running Cortex so its BrowserAdapter binds without going through
+   * `connect_to_focused_app` discovery (which silently fails for headless
+   * browsers that aren't macOS-frontmost).
+   *
+   * Called by `cel.ensureBrowser` and by `ensureDedicatedCdpBrowser` after
+   * launching the browser. No-op if the native module isn't available or
+   * the cortex isn't running yet.
+   */
+  async bindBrowserCdpUrl(url: string): Promise<void> {
+    if (!this.native) return;
+    await this.native.bindBrowserCdpUrl(url);
+  }
+
   /** Read the current mental model as parsed JSON. Instant — shared memory, no observation. */
   readCortexModel(): unknown {
     if (!this.native) return null;
@@ -1527,5 +1552,60 @@ export class Cel implements
       JSON.stringify(messages),
       maxTokens,
     );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Browser primitive (Phase 1 of ADR-unify-browser-ownership)
+  //
+  // CEL owns the browser. Callers (BrowserAdapter, Cortex's dedicated-Chrome
+  // path, future direct CDP clients) call cel.ensureBrowser() and attach to
+  // the returned CDP URL instead of launching their own Chromium instances.
+  //
+  // Phase 1 only adds the API + implementation. No callers migrated yet.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Ensure a CEL-managed Chromium browser is running and return a handle
+   * that clients can attach to via CDP.
+   *
+   * Idempotent: returns the existing handle if a compatible browser is
+   * already running. Throws if called with options that conflict with the
+   * existing browser (e.g. different headedness) — close the existing
+   * browser first.
+   *
+   * Uses Playwright's bundled Chromium binary, independent of any
+   * system-installed Chrome. Works on machines with no Chrome installed.
+   *
+   * @see ADR-unify-browser-ownership.md
+   */
+  async ensureBrowser(options?: EnsureBrowserOptions): Promise<BrowserHandle> {
+    const handle = await ensureBrowserInternal(options);
+    // Phase 3: bind the new CDP URL to the cortex's BrowserAdapter so it
+    // doesn't have to discover the browser via connect_to_focused_app
+    // (which silently fails for headless browsers). Silently no-ops when
+    // cortex isn't running (e.g. Phase 2 standalone benchmark use).
+    try {
+      await this.bindBrowserCdpUrl(handle.cdpUrl);
+    } catch (err) {
+      // Defensive: native binding failures shouldn't break the spawn caller.
+      // Logged at debug-level — Phase 2 benchmark consumers don't have a
+      // cortex and this is expected to be a no-op for them.
+      // eslint-disable-next-line no-console
+      console.debug(
+        "[cel] bindBrowserCdpUrl failed (cortex may not be running):",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    return handle;
+  }
+
+  /**
+   * Tear down the CEL-managed browser. Idempotent.
+   *
+   * Safe to call from cleanup hooks even if the browser was never launched.
+   * After close, the next ensureBrowser() call will launch a fresh instance.
+   */
+  async closeBrowser(): Promise<void> {
+    return closeBrowserInternal();
   }
 }

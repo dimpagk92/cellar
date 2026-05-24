@@ -14,6 +14,7 @@
 use async_trait::async_trait;
 use cel_context::ContextElement;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
@@ -317,6 +318,33 @@ pub trait AdapterDriver: Send + Sync {
     ) -> Vec<cel_contracts::AdapterFactRef> {
         Vec::new()
     }
+
+    /// Optional downcast hook. Returns `Some(self)` to allow external code
+    /// to access concrete-type APIs (e.g. for post-construction binding of
+    /// resources that the trait surface doesn't expose generically).
+    ///
+    /// Default `None` keeps the trait object-safe and means most adapters
+    /// don't need to think about Any.
+    fn as_any(&self) -> Option<&dyn Any> {
+        None
+    }
+
+    /// Optional post-construction CDP client binding. Default no-op.
+    ///
+    /// Adapters that perceive via Chrome DevTools Protocol (the browser-rs
+    /// adapter) override this to accept a CDP client from external code —
+    /// typically `Cortex::bind_browser_cdp_url` after `cel.ensureBrowser`
+    /// spawn (Phase 3 of ADR-unify-browser-ownership). This avoids relying
+    /// on `cel_cdp::connect_to_focused_app` discovery, which can fail for
+    /// headless browsers that aren't macOS-frontmost.
+    ///
+    /// The trait carries this method (rather than putting it behind `as_any`)
+    /// because it needs to be async — `as_any` + downcast forces callers to
+    /// hold a non-`Send` `&dyn Any` across await points, which doesn't
+    /// compose with the async cortex tick loop.
+    async fn set_cdp_client(&self, _client: std::sync::Arc<cel_cdp::CdpClient>) {
+        // Default no-op. Most adapters don't perceive via CDP.
+    }
 }
 
 // ── Adapter State ──────────────────────────────────────────────────────────
@@ -340,6 +368,11 @@ pub struct RegisteredAdapter {
     pub compiled_patterns: Vec<regex::Regex>,
     /// Tick counter for refresh rate limiting.
     pub ticks_since_last_read: u64,
+    /// Last successful snapshot, already tagged with cortex source/confidence.
+    /// Replayed into `new_context.elements` on skip ticks (ticks where
+    /// `should_read` is false) so adapter elements don't flicker out of the
+    /// model every time `refresh_ms > tick_ms`. Cleared on deactivation.
+    pub last_elements: Vec<ContextElement>,
 }
 
 impl RegisteredAdapter {
@@ -356,6 +389,7 @@ impl RegisteredAdapter {
             state: AdapterState::Inactive,
             compiled_patterns: patterns,
             ticks_since_last_read: 0,
+            last_elements: Vec::new(),
         }
     }
 
@@ -367,9 +401,16 @@ impl RegisteredAdapter {
     }
 
     /// Check if enough ticks have passed to read context again.
+    ///
+    /// `ticks_since_last_read` is set to `u64::MAX` right after activation so
+    /// the adapter always reads context on its first active tick — this avoids
+    /// the `refresh_ms` gap that would otherwise delay the initial DOM snapshot
+    /// by one or two ticks (e.g. 300 ms refresh_ms with 200 ms tick_ms means
+    /// the first read is skipped twice before the threshold is met).
+    /// `saturating_mul` guards against the sentinel value overflowing u64.
     pub fn should_read(&self, tick_ms: u64) -> bool {
         let refresh_ms = self.driver.manifest().context.refresh_ms;
-        let elapsed = self.ticks_since_last_read * tick_ms;
+        let elapsed = self.ticks_since_last_read.saturating_mul(tick_ms);
         elapsed >= refresh_ms
     }
 }

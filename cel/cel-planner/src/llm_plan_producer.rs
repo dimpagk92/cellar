@@ -859,14 +859,18 @@ fn extract_verdict_via_regex(raw: &str) -> Option<crate::canonical_plan_producer
 }
 
 /// Find `"<key>": true` or `"<key>": false` in free-form text.
+///
+/// Tolerant of whitespace and newlines between the key, the colon,
+/// and the value. The grader sometimes emits compact JSON
+/// (`"verified":true`), sometimes pretty-printed (`"verified": true`),
+/// and very occasionally pretty-printed across a newline
+/// (`"verified":\n  true`). Truncated responses also benefit:
+/// `"verified":\n    true` followed by EOF is still recoverable.
 fn extract_bool_field(text: &str, key: &str) -> Option<bool> {
-    let needle_true = format!("\"{key}\": true");
-    let needle_true_compact = format!("\"{key}\":true");
-    let needle_false = format!("\"{key}\": false");
-    let needle_false_compact = format!("\"{key}\":false");
-    if text.contains(&needle_true) || text.contains(&needle_true_compact) {
+    let after_colon = scan_past_key_and_colon(text, key)?;
+    if after_colon.trim_start().starts_with("true") {
         Some(true)
-    } else if text.contains(&needle_false) || text.contains(&needle_false_compact) {
+    } else if after_colon.trim_start().starts_with("false") {
         Some(false)
     } else {
         None
@@ -877,12 +881,12 @@ fn extract_bool_field(text: &str, key: &str) -> Option<bool> {
 /// strings; doesn't try to decode escapes (a backslash in the
 /// fallback value is a corner-case worth accepting since this path
 /// is best-effort recovery from a broken response anyway).
+///
+/// Tolerant of whitespace between the key, the colon, and the
+/// opening quote — same rationale as `extract_bool_field`.
 fn extract_string_field(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\":");
-    let key_pos = text.find(&needle)?;
-    let after_key = &text[key_pos + needle.len()..];
-    let trimmed = after_key.trim_start();
-    let after_quote = trimmed.strip_prefix('"')?;
+    let after_colon = scan_past_key_and_colon(text, key)?;
+    let after_quote = after_colon.trim_start().strip_prefix('"')?;
     // Scan to the closing quote, skipping escaped quotes.
     let bytes = after_quote.as_bytes();
     let mut i = 0;
@@ -902,6 +906,32 @@ fn extract_string_field(text: &str, key: &str) -> Option<String> {
             return Some(after_quote[..i].to_string());
         }
         i += 1;
+    }
+    None
+}
+
+/// Scan past `"<key>"` then optional whitespace then `:` then optional
+/// whitespace. Returns the slice starting at the value (still on the
+/// caller to parse `true` / `false` / `"..."` etc.). Returns None if
+/// the key isn't present, or is present but not in object-key position
+/// (no colon after it).
+///
+/// The key may appear multiple times in the input — once as the
+/// actual JSON object key and once inside a string value
+/// (`"reason": "verified the page"` contains the substring
+/// `"verified"`). Walk through every occurrence and return the first
+/// one that's actually followed by a colon; this rejects the
+/// inside-string false positive without hand-coding string parsing.
+fn scan_past_key_and_colon<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(&needle) {
+        let after = &text[start + rel + needle.len()..];
+        let trimmed = after.trim_start();
+        if let Some(rest) = trimmed.strip_prefix(':') {
+            return Some(rest);
+        }
+        start = start + rel + needle.len();
     }
     None
 }
@@ -1133,6 +1163,36 @@ pub fn build_user_prompt(
     if let Some(summary) = &view.screen.summary {
         out.push_str(&format!("SUMMARY: {}\n", summary));
     }
+    // Compact ID index — the model otherwise has to scan ~40 verbose
+    // element lines to figure out which `dom:*` handles are
+    // available this turn. Run-6 (Gemini Pro, 2026-05-19) showed the
+    // planner constructing IDs like `dom:button:reject-cookies` that
+    // never existed in perception (closest=None at rejection time);
+    // listing the available IDs up front makes the next turn's
+    // history hint redundant rather than corrective.
+    //
+    // Only emit when there's at least one `dom:` handle — the AX /
+    // vision sources use different ID namespaces (`ax:`, `vis:`) and
+    // listing those compactly would be noise without the same
+    // hallucination problem.
+    let dom_ids: Vec<&str> = view
+        .elements
+        .iter()
+        .filter_map(|el| {
+            if el.id.starts_with("dom:") {
+                Some(el.id.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !dom_ids.is_empty() {
+        out.push_str(&format!(
+            "Available dom:* ids this turn ({}): {}\n",
+            dom_ids.len(),
+            dom_ids.join(", ")
+        ));
+    }
     out.push_str("Selected elements:\n");
     let mut shown = 0;
     for el in view.elements.iter() {
@@ -1142,6 +1202,15 @@ pub fn build_user_prompt(
             "  id={} type={} label={:?} value={:?}\n",
             el.id, el.element_type, label, value
         ));
+        // For <select> elements, surface the enumerated option
+        // values immediately under the element. The planner needs
+        // these to dispatch `set_value` with an actual `value=`
+        // attribute string rather than a guessed slug. Capped to a
+        // reasonable line length — the encoded string is already
+        // capped at 50 options from the extractor.
+        if let Some(opts) = &el.select_options {
+            out.push_str(&format!("      options: {}\n", truncate(opts, 600)));
+        }
         shown += 1;
     }
     if shown == 0 {
@@ -1387,6 +1456,51 @@ Hope that helps!"#;
         assert_eq!(
             v.next_action_hint,
             Some(cel_contracts::NextActionHint::RetryLastAction)
+        );
+    }
+
+    #[test]
+    fn regex_fallback_tolerates_whitespace_around_colon() {
+        // Gemini Pro occasionally emits pretty-printed JSON with a
+        // space before the colon: `"verified" : true`. The original
+        // `text.contains("\"verified\": true")` check missed this,
+        // so even a fully-valid (but unusually-spaced) truncated
+        // response would fail the regex fallback and force the
+        // caller into fail-open. Run-6 (2026-05-19) didn't hit this
+        // exact pattern, but multiple verify_done EOF errors came
+        // close enough that loosening the matcher is worth doing.
+        let raw = r#"{"verified" : true, "reason" : "ok"}"#;
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(v.verified);
+        assert_eq!(v.reason, "ok");
+    }
+
+    #[test]
+    fn regex_fallback_tolerates_newline_between_key_and_value() {
+        // Truncation pattern observed in the wild: `"verified":\n`
+        // followed by indented value. Older fallback required the
+        // value on the same line as the key.
+        let raw = "{\n  \"verified\":\n    true,\n  \"reason\":\n    \"recovered\"\n}";
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(v.verified);
+        assert_eq!(v.reason, "recovered");
+    }
+
+    #[test]
+    fn regex_fallback_skips_inside_string_occurrence_of_key() {
+        // Adversarial: the reason field happens to contain the
+        // literal `"verified"` substring (e.g. the grader is
+        // explaining what `"verified"` means). The scanner must
+        // identify the REAL key (the one followed by a colon and a
+        // bool) rather than confusing itself with the in-string
+        // mention. Strict parsing handles this fine; the fallback
+        // must too — otherwise truncating right after the real
+        // key would silently misread the verdict.
+        let raw = "{\n  \"reason\": \"the term \\\"verified\\\" means the action's effect held\",\n  \"verified\": false\n}";
+        let v = parse_verify_done_lenient(raw).expect("parse");
+        assert!(
+            !v.verified,
+            "must read the actual key, not the in-string mention"
         );
     }
 
@@ -1719,6 +1833,155 @@ Hope that helps!"#;
         assert!(
             out.contains("431 more elements omitted"),
             "prompt must surface omitted-count so the planner knows the view is compressed"
+        );
+    }
+
+    #[test]
+    fn prompt_lists_available_dom_ids_compactly() {
+        // Run-6 (2026-05-19, Gemini Pro) showed the planner
+        // constructing IDs like `dom:button:reject-cookies` that
+        // never existed in this turn's perception. The Levenshtein
+        // closest-match hint fires AT REJECTION TIME, after the
+        // model already burned a turn on a bad target. The compact
+        // ID index in `## Live perception` is the pre-rejection
+        // signal: with the available `dom:*` handles listed up
+        // front, the model should pick from them instead of
+        // hallucinating.
+        let mut view = empty_view();
+        view.elements.push(cel_contracts::PlanningElement {
+            id: "dom:button:accept-all".into(),
+            element_type: "button".into(),
+            label: Some("Accept All".into()),
+            value: None,
+            state: cel_contracts::PlanningElementState::default(),
+            clickable: true,
+            settable: false,
+            select_options: None,
+        });
+        view.elements.push(cel_contracts::PlanningElement {
+            id: "dom:input:email".into(),
+            element_type: "input".into(),
+            label: Some("Email".into()),
+            value: None,
+            state: cel_contracts::PlanningElementState::default(),
+            clickable: false,
+            settable: true,
+            select_options: None,
+        });
+        // An AX-sourced element with non-`dom:` id — must not pollute
+        // the dom-id list (different namespace, different hallucination
+        // mode).
+        view.elements.push(cel_contracts::PlanningElement {
+            id: "ax:button:1".into(),
+            element_type: "button".into(),
+            label: Some("Native button".into()),
+            value: None,
+            state: cel_contracts::PlanningElementState::default(),
+            clickable: true,
+            settable: false,
+            select_options: None,
+        });
+
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(
+            out.contains("Available dom:* ids this turn (2): dom:button:accept-all, dom:input:email"),
+            "compact id list must appear with only the dom:* handles, in perception order. Got:\n{}",
+            out
+        );
+        assert!(
+            !out.contains(", ax:button:1"),
+            "ax:* ids must NOT appear in the dom:* index"
+        );
+    }
+
+    #[test]
+    fn prompt_omits_dom_id_list_when_only_non_dom_elements_present() {
+        // AX-only perception (no browser bound) shouldn't show an
+        // empty "Available dom:* ids" header — that'd be confusing
+        // noise. The omission is silent.
+        let mut view = empty_view();
+        view.elements.push(cel_contracts::PlanningElement {
+            id: "ax:button:42".into(),
+            element_type: "button".into(),
+            label: Some("Native".into()),
+            value: None,
+            state: cel_contracts::PlanningElementState::default(),
+            clickable: true,
+            settable: false,
+            select_options: None,
+        });
+
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(
+            !out.contains("Available dom:* ids"),
+            "header must be omitted when there are no dom:* ids"
+        );
+    }
+
+    #[test]
+    fn prompt_surfaces_select_options_under_the_select_element() {
+        // Run-6 (2026-05-19) caught the contact-form scenarios
+        // failing 3/3 trials because the planner guessed slugs like
+        // `Test` or `general-inquiry` for a `<select name="subject">`
+        // whose actual option values were different. The browser
+        // extractor now captures option pairs and the planning view
+        // carries them through; the planner prompt must render them
+        // under the element so the model can copy the right value
+        // string verbatim.
+        let mut view = empty_view();
+        view.elements.push(cel_contracts::PlanningElement {
+            id: "dom:select:subject".into(),
+            element_type: "select".into(),
+            label: Some("Subject".into()),
+            value: None,
+            state: cel_contracts::PlanningElementState::default(),
+            clickable: false,
+            settable: true,
+            select_options: Some(
+                "general_inquiry|General Inquiry, bug_report|Bug Report, feature|Feature Request"
+                    .into(),
+            ),
+        });
+
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(
+            out.contains("id=dom:select:subject"),
+            "select element itself must render"
+        );
+        assert!(
+            out.contains("options: general_inquiry|General Inquiry"),
+            "first option pair must appear under the element. Got:\n{}",
+            out
+        );
+        assert!(
+            out.contains("bug_report|Bug Report"),
+            "subsequent option pairs must appear"
+        );
+    }
+
+    #[test]
+    fn prompt_omits_options_line_when_select_has_none() {
+        // A `<select>` with zero options (e.g. dynamically populated
+        // via JS that hasn't fired yet) must NOT emit an empty
+        // `options:` line — the planner would treat that as
+        // "options exist but are empty", which is misleading.
+        let mut view = empty_view();
+        view.elements.push(cel_contracts::PlanningElement {
+            id: "dom:select:country".into(),
+            element_type: "select".into(),
+            label: Some("Country".into()),
+            value: None,
+            state: cel_contracts::PlanningElementState::default(),
+            clickable: false,
+            settable: true,
+            select_options: None,
+        });
+
+        let out = build_user_prompt("any goal", &[], &serde_json::json!({}), &view);
+        assert!(out.contains("id=dom:select:country"));
+        assert!(
+            !out.contains("options:"),
+            "must not emit options: line when select_options is None"
         );
     }
 

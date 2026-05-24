@@ -1,0 +1,39 @@
+[package]
+name = "cel-cortex-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cel-cortex-daemon"
+path = "src/main.rs"
+
+[dependencies]
+cel-act-gateway = { path = "../cel-act-gateway" }
+cel-memory = { path = "../cel/cel-memory" }
+cel-memory-sqlite = { path = "../cel/cel-memory-sqlite" }
+cel-signals = { path = "../cel/cel-signals" }
+cellar-ipc = { path = "../cellar-ipc" }
+cellar-llm-router = { path = "../cellar-llm-router" }
+cellar-rule-compiler = { path = "../cellar-rule-compiler" }
+cellar-rules-store = { path = "../cellar-rules-store" }
+cellar-types = { path = "../cellar-types" }
+cellar-webhook = { path = "../cellar-webhook" }
+async-trait.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-appender = "0.2"
+uuid = { workspace = true, features = ["v7", "serde"] }
+sysinfo = "0.32"
+notify = "7"
+thiserror.workspace = true
+
+[dev-dependencies]
+chrono = { workspace = true, features = ["serde"] }
+tokio = { workspace = true }
+tempfile = "3"

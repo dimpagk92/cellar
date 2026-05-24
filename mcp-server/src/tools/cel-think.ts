@@ -420,6 +420,29 @@ export async function handleCelThink(cel: Cel, args: Input) {
         // onto Safari or whatever's frontmost when the goal is browser-ish
         // but doesn't name a URL.
         await ensureCdpChrome(cel);
+
+        // If the goal begins with a "Navigate to <URL>" directive, force a
+        // fresh page load before the runner reads initial context. Without
+        // this, stale JS state from a prior run (e.g. "Acknowledged ✓" from
+        // a previous benchmark iteration) corrupts the LLM's first perception
+        // snapshot and causes it to skip steps it incorrectly believes are
+        // already complete. We bounce through about:blank to guarantee a full
+        // JS context reset even when Chrome would treat same-URL Page.navigate
+        // as a no-op.
+        const goalNavigateUrl = extractFirstNavigateUrl(args.goal.trim());
+        if (goalNavigateUrl) {
+          try {
+            await cel.cdpNavigate("about:blank");
+            await new Promise<void>((r) => setTimeout(r, 300));
+            await cel.cdpNavigate(goalNavigateUrl);
+            // Give the page JS time to initialise before cortex reads DOM.
+            await new Promise<void>((r) => setTimeout(r, 500));
+            await cel.cortexRefreshNow(3000);
+          } catch {
+            // Non-fatal — the runner will navigate as part of goal execution.
+          }
+        }
+
         const rustResult = await cel.runGoalRust({
           goal: args.goal.trim(),
           max_steps: args.max_steps,
@@ -431,4 +454,22 @@ export async function handleCelThink(cel: Cel, args: Input) {
   } catch (err) {
     return errorResult(err instanceof Error ? err.message : String(err));
   }
+}
+
+/**
+ * Extract the first "Navigate to <URL>" URL from a goal string.
+ *
+ * Goals that begin with a navigate directive (e.g. "Navigate to
+ * http://localhost:4567/... and then: ...") encode the starting URL as the
+ * first element. We use this to force a fresh page load before the runner
+ * reads initial context, preventing stale JS state from a prior run from
+ * corrupting the LLM's first perception snapshot.
+ *
+ * Returns null if no navigate directive is found (e.g. desktop-only goals).
+ */
+function extractFirstNavigateUrl(goal: string): string | null {
+  const m = /(?:^|\n)\s*Navigate to (https?:\/\/[^\s\n]+)/i.exec(goal);
+  if (!m) return null;
+  // Strip trailing punctuation that might have been appended
+  return m[1].replace(/[.,;!?]+$/, "").trim();
 }

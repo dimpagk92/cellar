@@ -224,6 +224,21 @@ pub struct PlanningElement {
     /// Whether this element supports `set_value` (form fields).
     #[serde(default)]
     pub settable: bool,
+    /// For `<select>` / combobox elements: enumerated option values
+    /// so the planner can `set_value` with a real `value=` attribute
+    /// instead of guessing slugs. Populated from
+    /// `ContextElement.properties["select_options"]` when the source
+    /// adapter provides it (browser CDP / DOM extractor). Empty / None
+    /// for everything else.
+    ///
+    /// Format encoded by the browser adapter as
+    /// `"value|Label, value2|Label 2, ..."` — strings separated by
+    /// `", "`, each entry split on `"|"`. The planner-side rendering
+    /// re-parses this; older clients that don't know the format show
+    /// the raw string, which is still strictly more useful than the
+    /// pre-fix behaviour of showing nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_options: Option<String>,
 }
 
 /// State flags that matter for planning. Strict subset of `ElementState`.
@@ -472,6 +487,7 @@ mod tests {
                 },
                 clickable: true,
                 settable: false,
+                select_options: None,
             }],
             adapter_facts: vec![],
             adapter_actions: vec![],

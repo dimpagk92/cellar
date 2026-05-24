@@ -12,6 +12,10 @@ export {
   type ScoredKnowledgeRecord,
   type EvictionResult,
 } from "./cel-bindings.js";
+export {
+  type EnsureBrowserOptions,
+  type BrowserHandle,
+} from "./browser-primitive.js";
 export type {
   ContextProvider,
   InputController,

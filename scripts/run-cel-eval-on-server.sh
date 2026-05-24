@@ -252,6 +252,7 @@ ssh "${SSH_TARGET}" "
     ./target/release/cel-eval scenarios \
         --dir '${SCENARIOS_DIR}' \
         --trials ${TRIALS} \
+        --exclude-tag desktop \
         --live \
         --allow-foreground-leak \
         --runtime canonical \
@@ -260,6 +261,13 @@ ssh "${SSH_TARGET}" "
         --gate-threshold 0 \
         2>&1 | tee '${REMOTE_LOG}'
 " || die "cel-eval run failed — check ${REMOTE_LOG} on server"
+# Why --exclude-tag desktop: the Hetzner server is Ubuntu and has
+# no AX tree (only the stub) + no AppleScript bridge, so scenarios
+# tagged 'desktop' (Numbers/Mail/Messages/Calendar/Reminders) cannot
+# pass and would polute the pass-rate denominator. The same suite
+# run on macOS would omit --exclude-tag and exercise those scenarios
+# against real AX. See cel/cel-eval/src/bin/cel_eval.rs for the
+# flag's wiring and the loader's tag-exclusion behaviour.
 
 # ── 5. Pull results, tear down ──────────────────────────────────────────────
 

@@ -403,3 +403,28 @@ pub fn stop_cortex() -> napi::Result<()> {
     state.model_handle = None;
     Ok(())
 }
+
+/// Phase 3 of ADR-unify-browser-ownership: tell the running cortex which CDP
+/// URL its BrowserAdapter should attach to.
+///
+/// Used after `cel.ensureBrowser()` spawns a Chromium with
+/// `--remote-debugging-port=PORT` — TS calls this so the Rust cortex doesn't
+/// have to discover the browser via `cel_cdp::connect_to_focused_app`, which
+/// silently fails for headless browsers (no macOS-frontmost match).
+///
+/// Silently no-ops when Cortex isn't running. This lets `cel.ensureBrowser`
+/// call this unconditionally — the Phase 2 path (BrowserAdapter without
+/// cortex) just doesn't have anything to bind to, which is fine.
+///
+/// Errors only if Cortex IS running and the CDP URL is unreachable.
+#[napi]
+pub async fn bind_browser_cdp_url(url: String) -> napi::Result<()> {
+    let cortex = match get_cortex_handle() {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+    cortex
+        .bind_browser_cdp_url(&url)
+        .await
+        .map_err(|e| napi::Error::from_reason(format!("bind_browser_cdp_url failed: {}", e)))
+}

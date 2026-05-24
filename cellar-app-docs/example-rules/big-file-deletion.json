@@ -1,0 +1,16 @@
+{
+  "id": "big_file_deletion",
+  "name": "Big file deletion (>1GB)",
+  "nl_original": "alert me when any file larger than 1 GB gets deleted",
+  "kind": "watcher",
+  "enabled": true,
+  "match": {
+    "all": [
+      { "leaf": { "field": "kind", "op": "eq", "value": "file_deleted" } },
+      { "leaf": { "field": "data.size_bytes", "op": "gte", "value": 1073741824 } }
+    ]
+  },
+  "action": { "type": "log_only" },
+  "cooldown_seconds": 0,
+  "created_at": "2026-05-22T00:00:00Z"
+}

@@ -1,0 +1,16 @@
+{
+  "id": "process_allowlist",
+  "name": "Notify when an unknown process starts",
+  "nl_original": "tell me when an app outside my approved_apps watchlist starts",
+  "kind": "watcher",
+  "enabled": true,
+  "match": {
+    "all": [
+      { "leaf": { "field": "kind", "op": "eq", "value": "process_started" } },
+      { "leaf": { "field": "data.name", "op": "not_in_watchlist", "value": "approved_apps" } }
+    ]
+  },
+  "action": { "type": "log_only" },
+  "cooldown_seconds": 30,
+  "created_at": "2026-05-22T00:00:00Z"
+}

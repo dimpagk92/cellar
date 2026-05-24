@@ -1,0 +1,144 @@
+name: Extraction readiness
+
+# Lint guard for OSS-extraction-candidate crates.
+# See plans/cellar-oss-extraction-prep.md §B.
+#
+# Allowlist (use statements in src/, NOT including dev-deps in tests/):
+#   cel-memory:            (none)
+#   cel-memory-sqlite:     cel_memory
+#   cel-brief:             cel_memory  (only via the `memory` feature)
+#
+# Currently warning-only (continue-on-error: true). Promote to required
+# (block PRs) once workstream D2 cleanup is finalized.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'cel/cel-memory/**'
+      - 'cel/cel-memory-sqlite/**'
+      - 'cel/cel-brief/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/extraction-readiness.yml'
+      - 'scripts/lint-guard-extraction-crates.sh'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint-guard:
+    name: No-reverse-deps lint guard (warning-only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Check cel-memory imports
+        if: hashFiles('cel/cel-memory/Cargo.toml') != ''
+        run: |
+          echo "checking cel-memory ..."
+          violations=$(rg "^use (cel_|cellar_)" cel/cel-memory/src/ 2>/dev/null || true)
+          if [ -n "$violations" ]; then
+            echo "::error::cel-memory must have zero cel-* and cellar-* imports"
+            echo "$violations"
+            exit 1
+          fi
+          echo "  ✓ clean"
+
+      - name: Check cel-memory-sqlite imports
+        if: hashFiles('cel/cel-memory-sqlite/Cargo.toml') != ''
+        run: |
+          echo "checking cel-memory-sqlite ..."
+          # TODO(extraction): cellar_llm_router is allowlisted by
+          # scripts/lint-guard-extraction-crates.sh too — the Phase 3
+          # summarizer needs the router. Three resolution paths documented
+          # in the script's allowed_for() comment block. Mirror any allow-
+          # list change there to here.
+          violations=$(
+            rg "^use (cel_|cellar_)" cel/cel-memory-sqlite/src/ 2>/dev/null \
+            | grep -v ":use cel_memory" \
+            | grep -v ":use cellar_llm_router" \
+            || true
+          )
+          if [ -n "$violations" ]; then
+            echo "::error::cel-memory-sqlite may only import from cel_memory or cellar_llm_router"
+            echo "$violations"
+            exit 1
+          fi
+          echo "  ✓ clean (only cel-memory + cellar-llm-router allowed)"
+
+      - name: Check cel-brief imports
+        if: hashFiles('cel/cel-brief/Cargo.toml') != ''
+        run: |
+          echo "checking cel-brief ..."
+          violations=$(
+            rg "^use (cel_|cellar_)" cel/cel-brief/src/ 2>/dev/null \
+            | grep -v ":use cel_memory" \
+            || true
+          )
+          if [ -n "$violations" ]; then
+            echo "::error::cel-brief may only import from cel_memory (behind memory feature)"
+            echo "$violations"
+            exit 1
+          fi
+          echo "  ✓ clean (only cel-memory allowed)"
+
+  allowlist-guard:
+    name: Cargo dependency allowlist (extraction-candidate crates)
+    runs-on: ubuntu-latest
+    # Promote to required once the lint guard has run green for one PR cycle
+    # — see plans/cellar-oss-extraction-prep.md §B.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Run scripts/lint-guard-extraction-crates.sh
+        if: hashFiles('cel/cel-memory/Cargo.toml') != ''
+        run: ./scripts/lint-guard-extraction-crates.sh
+
+      - name: Skip notice (candidate crates not in this repo)
+        if: hashFiles('cel/cel-memory/Cargo.toml') == ''
+        run: echo "::notice::extraction-candidate crates not synced to this repo; lint guard skipped."
+
+  standalone-build:
+    name: Standalone builds (extraction-candidate crates)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build cel-memory standalone
+        if: hashFiles('cel/cel-memory/Cargo.toml') != ''
+        run: cargo build -p cel-memory
+
+      - name: Build cel-memory-sqlite standalone
+        if: hashFiles('cel/cel-memory-sqlite/Cargo.toml') != ''
+        run: cargo build -p cel-memory-sqlite
+
+      - name: Build cel-brief standalone
+        if: hashFiles('cel/cel-brief/Cargo.toml') != ''
+        run: cargo build -p cel-brief
+
+      - name: Run cel-memory basic example
+        if: hashFiles('cel/cel-memory/examples/basic.rs') != ''
+        run: cargo run -p cel-memory --example basic
+
+      - name: Run cel-memory-sqlite basic example
+        if: hashFiles('cel/cel-memory-sqlite/examples/basic.rs') != ''
+        run: cargo run -p cel-memory-sqlite --example basic

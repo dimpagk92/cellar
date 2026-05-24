@@ -10,6 +10,12 @@ impl StubCapture {
     }
 }
 
+impl Default for StubCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScreenCapture for StubCapture {
     fn init(&mut self) -> Result<(), CaptureError> {
         Err(CaptureError::Unavailable)

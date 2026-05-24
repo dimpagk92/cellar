@@ -404,7 +404,7 @@ mod tests {
         let d = dom("button", None, None, Some("Approve"), "");
         let el = dom_element_to_context_element(&d, 0);
         assert!(
-            el.properties.get("css_selector").is_none(),
+            !el.properties.contains_key("css_selector"),
             "no stable identifier → no css_selector"
         );
     }

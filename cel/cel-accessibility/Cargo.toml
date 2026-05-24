@@ -18,7 +18,7 @@ tokio = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 core-graphics = "0.24"
-rayon = "1.10"
+rayon = "1.12"
 
 # macOS-only examples — gated behind a feature so cargo skips them on
 # Linux. Enable via `cargo build --features macos-examples --example …`.

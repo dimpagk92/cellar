@@ -290,7 +290,11 @@ mod tests {
         assert_eq!(*store.upsert_calls.lock().unwrap(), 1);
         // Within the cooldown window: no fire → no upsert.
         assert!(!t.try_fire("r", 60));
-        assert_eq!(*store.upsert_calls.lock().unwrap(), 1, "no upsert on suppressed fire");
+        assert_eq!(
+            *store.upsert_calls.lock().unwrap(),
+            1,
+            "no upsert on suppressed fire"
+        );
     }
 
     #[test]
@@ -316,7 +320,11 @@ mod tests {
         // backed by the same store. The persisted row should suppress the
         // would-be refire — this is the bug the persistence layer closes.
         let t2 = CooldownTracker::with_store(store);
-        assert_eq!(t2.tracked_rules(), 1, "restart should rehydrate persisted row");
+        assert_eq!(
+            t2.tracked_rules(),
+            1,
+            "restart should rehydrate persisted row"
+        );
         assert!(
             !t2.try_fire("long_cool", 3600),
             "rule fired pre-restart inside 1h window must still be suppressed"

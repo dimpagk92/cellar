@@ -46,7 +46,9 @@ use crate::bus::EventBus;
 use crate::chat_bus::ChatBus;
 use crate::confirmation::ConfirmationBus;
 use crate::fire_bus::FireBus;
-use crate::recent::{agent_action_matches, event_matches, event_to_value, fire_matches, fire_to_value};
+use crate::recent::{
+    agent_action_matches, event_matches, event_to_value, fire_matches, fire_to_value,
+};
 
 /// Per-subscription backpressure bookkeeping (IPC RFC §6).
 ///
@@ -373,9 +375,9 @@ pub fn spawn_events_forwarder(
                                 );
                                 break;
                             }
-                            SendOutcome::CriticalOverflow => unreachable!(
-                                "events.subscribe is Standard, not Critical"
-                            ),
+                            SendOutcome::CriticalOverflow => {
+                                unreachable!("events.subscribe is Standard, not Critical")
+                            }
                         }
                     }
                 }
@@ -450,9 +452,9 @@ pub fn spawn_fires_forwarder(
                                 );
                             }
                             SendOutcome::Closed => break,
-                            SendOutcome::CriticalOverflow => unreachable!(
-                                "fires.subscribe is Standard, not Critical"
-                            ),
+                            SendOutcome::CriticalOverflow => {
+                                unreachable!("fires.subscribe is Standard, not Critical")
+                            }
                         }
                     }
                 }
@@ -506,12 +508,8 @@ pub fn spawn_agent_actions_forwarder(
                                 action: frame.action,
                             },
                         };
-                        match push_with_backpressure(
-                            &sink,
-                            &gap_state,
-                            ForwarderKind::Standard,
-                            sf,
-                        ) {
+                        match push_with_backpressure(&sink, &gap_state, ForwarderKind::Standard, sf)
+                        {
                             SendOutcome::Sent { catch_up_gap } => {
                                 if let Some(gap) = catch_up_gap {
                                     let gf = gap_frame(id_for_task.clone(), gap);
@@ -526,9 +524,9 @@ pub fn spawn_agent_actions_forwarder(
                                 );
                             }
                             SendOutcome::Closed => break,
-                            SendOutcome::CriticalOverflow => unreachable!(
-                                "agent_actions.subscribe is Standard, not Critical"
-                            ),
+                            SendOutcome::CriticalOverflow => {
+                                unreachable!("agent_actions.subscribe is Standard, not Critical")
+                            }
                         }
                     }
                 }
@@ -601,9 +599,9 @@ pub fn spawn_agent_chat_forwarder(
                             sink.request_close();
                             break;
                         }
-                        SendOutcome::Dropped => unreachable!(
-                            "agent.chat.subscribe is Critical, not Standard"
-                        ),
+                        SendOutcome::Dropped => {
+                            unreachable!("agent.chat.subscribe is Critical, not Standard")
+                        }
                     }
                 }
                 Err(RecvError::Lagged(dropped)) => {
@@ -652,12 +650,8 @@ pub fn spawn_confirmation_forwarder(
                             confirmation: pending,
                         },
                     };
-                    match push_with_backpressure(
-                        &sink,
-                        &gap_state,
-                        ForwarderKind::Critical,
-                        frame,
-                    ) {
+                    match push_with_backpressure(&sink, &gap_state, ForwarderKind::Critical, frame)
+                    {
                         SendOutcome::Sent { .. } => {}
                         SendOutcome::Closed => break,
                         SendOutcome::CriticalOverflow => {
@@ -669,9 +663,9 @@ pub fn spawn_confirmation_forwarder(
                             sink.request_close();
                             break;
                         }
-                        SendOutcome::Dropped => unreachable!(
-                            "confirmation.subscribe is Critical, not Standard"
-                        ),
+                        SendOutcome::Dropped => {
+                            unreachable!("confirmation.subscribe is Critical, not Standard")
+                        }
                     }
                 }
                 Err(RecvError::Lagged(dropped)) => {

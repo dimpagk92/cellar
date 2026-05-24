@@ -436,11 +436,7 @@ impl AgentRuntime {
                                 error = %e,
                                 "agent tool dispatch error"
                             );
-                            (
-                                "error".into(),
-                                json!({ "error": e.to_string() }),
-                                true,
-                            )
+                            ("error".into(), json!({ "error": e.to_string() }), true)
                         }
                     };
 
@@ -628,11 +624,11 @@ pub fn role_str_of_chunk(metadata: &Value) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_memory::BasicMemoryProvider;
+    use async_trait::async_trait;
     use cel_act_gateway::{ActionOutcome, AgentGateway, GatewayError, ProposedAction};
+    use cel_memory::BasicMemoryProvider;
     use cellar_llm_router::provider::MockProvider;
     use cellar_llm_router::types::{CompletionResponse, StopReason, Usage};
-    use async_trait::async_trait;
     use serde_json::json;
 
     fn text_response(text: &str) -> CompletionResponse {
@@ -768,11 +764,14 @@ mod tests {
         let mut rx = bus.subscribe();
         let gateway = MockGateway::allow(json!({"clicked": true}));
 
-        let agent = AgentRuntime::new(memory.clone(), provider, "mock-model", bus)
-            .with_gateway(gateway);
+        let agent =
+            AgentRuntime::new(memory.clone(), provider, "mock-model", bus).with_gateway(gateway);
 
         let session_id = fresh_session(&memory).await;
-        let result = agent.run_turn(&session_id, "Click the button").await.unwrap();
+        let result = agent
+            .run_turn(&session_id, "Click the button")
+            .await
+            .unwrap();
 
         assert_eq!(result.tool_calls_dispatched, 1);
         assert_eq!(result.assistant_text, "Done! I clicked the button.");
@@ -840,8 +839,8 @@ mod tests {
         let provider = MockProvider::new(vec![text_response("ok")]);
         let bus = ChatBus::new();
         let gateway = MockGateway::allow(json!({}));
-        let agent = AgentRuntime::new(memory.clone(), provider, "mock-model", bus)
-            .with_gateway(gateway);
+        let agent =
+            AgentRuntime::new(memory.clone(), provider, "mock-model", bus).with_gateway(gateway);
         // system_prompt should no longer contain the "not yet enabled" verbiage.
         assert!(
             !agent.system_prompt.contains("not yet enabled"),

@@ -21,9 +21,7 @@ use crate::receipt::BriefReceipt;
 /// IDs should be short, snake_case, and unique within a single
 /// [`crate::builder::BriefBuilder`]. A `BriefBuilder` rejects two sources with
 /// the same ID at registration time.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SourceId(pub String);
 
@@ -181,9 +179,7 @@ pub struct ToolSchema {
 /// Drives both ordering and the per-priority floor in [`TokenBudget`].
 /// Sources should pick the lowest priority that still preserves correctness:
 /// over-claiming `Critical` defeats the budget's purpose.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     /// Lowest priority. Pruned first when over budget.
@@ -361,7 +357,12 @@ mod tests {
     fn priority_all_is_sorted_ascending() {
         let all = Priority::ALL;
         for window in all.windows(2) {
-            assert!(window[0] < window[1], "{:?} should be < {:?}", window[0], window[1]);
+            assert!(
+                window[0] < window[1],
+                "{:?} should be < {:?}",
+                window[0],
+                window[1]
+            );
         }
         assert_eq!(all.len(), 4);
     }
@@ -381,7 +382,10 @@ mod tests {
         let budget = TokenBudget::new(1000, 100)
             .with_floor(Priority::Critical, 200)
             .with_floor(Priority::High, 100);
-        assert_eq!(budget.floor_per_priority.get(&Priority::Critical), Some(&200));
+        assert_eq!(
+            budget.floor_per_priority.get(&Priority::Critical),
+            Some(&200)
+        );
         assert_eq!(budget.floor_per_priority.get(&Priority::High), Some(&100));
         assert!(!budget.floor_per_priority.contains_key(&Priority::Low));
     }

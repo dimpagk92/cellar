@@ -32,7 +32,11 @@ use crate::sender::{Sender, WebhookSecret};
 pub trait WebhookRegistry: Send + Sync {
     /// Register (or replace) a webhook configuration. Takes effect on the
     /// next delivery from the background worker.
-    fn register_webhook(&self, config: cellar_types::webhook::WebhookConfig, secret: Option<WebhookSecret>);
+    fn register_webhook(
+        &self,
+        config: cellar_types::webhook::WebhookConfig,
+        secret: Option<WebhookSecret>,
+    );
 
     /// Remove a webhook configuration. In-flight jobs queued before the
     /// removal will log a "dropping job" warning and be discarded.
@@ -40,7 +44,11 @@ pub trait WebhookRegistry: Send + Sync {
 }
 
 impl<S: Sender + Send + Sync + 'static> WebhookRegistry for WebhookService<S> {
-    fn register_webhook(&self, config: cellar_types::webhook::WebhookConfig, secret: Option<WebhookSecret>) {
+    fn register_webhook(
+        &self,
+        config: cellar_types::webhook::WebhookConfig,
+        secret: Option<WebhookSecret>,
+    ) {
         WebhookService::register_webhook(self, config, secret);
     }
 
@@ -460,7 +468,7 @@ mod tests {
                     max_backoff_ms: 1,
                 },
             },
-            HashMap::new(),  // empty
+            HashMap::new(), // empty
             HashMap::new(),
             sender,
             move |r: DispatchResult| {

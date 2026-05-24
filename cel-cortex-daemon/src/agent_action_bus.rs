@@ -195,9 +195,7 @@ mod tests {
         let mut rx = bus.subscribe();
 
         let action = sample_action();
-        let outcome = ActionOutcome::Executed {
-            result: json!({}),
-        };
+        let outcome = ActionOutcome::Executed { result: json!({}) };
         hook.on_action(&action, &outcome).await;
 
         let frame = rx.recv().await.unwrap();

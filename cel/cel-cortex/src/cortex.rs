@@ -837,8 +837,7 @@ impl Cortex {
                             // refresh_ms > tick_ms (browser-rs, Numbers, Excel,
                             // SAP, Bloomberg all declare 200ms+).
                             for el in &adapter.last_elements {
-                                element_adapter_index
-                                    .insert(el.id.clone(), adapter_name.clone());
+                                element_adapter_index.insert(el.id.clone(), adapter_name.clone());
                                 new_context.elements.push(el.clone());
                             }
                             active_adapter_names.push(adapter_name);
@@ -1590,7 +1589,12 @@ impl Cortex {
                 {
                     let cdp = self.cdp_client.lock().unwrap().clone();
                     if let Some(client) = cdp {
-                        return Ok(dispatch_type_via_cdp(client.as_ref(), target_id.as_deref(), text).await);
+                        return Ok(dispatch_type_via_cdp(
+                            client.as_ref(),
+                            target_id.as_deref(),
+                            text,
+                        )
+                        .await);
                     }
                 }
                 // No target_id means "type into whatever's focused" — the

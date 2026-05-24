@@ -859,10 +859,7 @@ async fn summarize_session_writes_summary_and_links_members() {
     assert_eq!(summary.kind, ChunkKind::JobSummary);
     assert_eq!(summary.session_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(summary.caller_id, "embedded");
-    assert_eq!(
-        summary.content,
-        "the user closed the chat after Q4 review"
-    );
+    assert_eq!(summary.content, "the user closed the chat after Q4 review");
     // Importance defaulted via the §10.2 heuristic: JobSummary bumps
     // baseline 0.5 by +0.2, no other signals → 0.7.
     assert!(
@@ -918,10 +915,7 @@ async fn summarize_session_writes_summary_and_links_members() {
     );
     assert_eq!(calls[0].kind_label.as_deref(), Some("session"));
     // The session title flows into the note slot.
-    assert_eq!(
-        calls[0].note.as_deref(),
-        Some("session title: Q4 review")
-    );
+    assert_eq!(calls[0].note.as_deref(), Some("session title: Q4 review"));
 }
 
 #[tokio::test]
@@ -958,11 +952,9 @@ async fn summarize_session_repeats_dont_double_link_members() {
         let conn = provider.conn_for_test();
         let guard = conn.lock().await;
         guard
-            .query_row::<i64, _, _>(
-                "SELECT COUNT(*) FROM memory_summary_members",
-                [],
-                |r| r.get(0),
-            )
+            .query_row::<i64, _, _>("SELECT COUNT(*) FROM memory_summary_members", [], |r| {
+                r.get(0)
+            })
             .unwrap()
     };
     // Two summaries × one member each = two rows. The point is no

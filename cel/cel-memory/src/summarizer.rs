@@ -231,7 +231,10 @@ mod tests {
     #[tokio::test]
     async fn mock_no_input_errors() {
         let s = MockSummarizer::new("ignored");
-        let err = s.summarize(&[], &SummaryContext::default()).await.unwrap_err();
+        let err = s
+            .summarize(&[], &SummaryContext::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, SummarizerError::NoInput));
     }
 

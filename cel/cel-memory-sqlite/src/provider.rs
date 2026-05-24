@@ -1381,8 +1381,10 @@ impl MemoryProvider for SqliteMemoryProvider {
                 .map(|t| format!("session title: {t}")),
             max_words: None,
         };
-        let summary_text = summarizer.summarize(&members, &ctx).await.map_err(|e| {
-            match e {
+        let summary_text = summarizer
+            .summarize(&members, &ctx)
+            .await
+            .map_err(|e| match e {
                 cel_memory::SummarizerError::NoInput => MemoryError::InvalidArgument(
                     "summarizer received no input despite session having chunks".into(),
                 ),
@@ -1390,8 +1392,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                     "summarizer {} failed: {other}",
                     summarizer.name()
                 )),
-            }
-        })?;
+            })?;
 
         // 4. Persist the summary as a fresh JobSummary chunk via the
         //    public write path so importance scoring (§10.2) and the

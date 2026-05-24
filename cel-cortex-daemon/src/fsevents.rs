@@ -162,10 +162,7 @@ impl RecentSizes {
 
     /// Number of cached entries.
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .map(|g| g.map.len())
-            .unwrap_or(0)
+        self.inner.lock().map(|g| g.map.len()).unwrap_or(0)
     }
 
     /// Returns true iff there are no cached entries.
@@ -586,7 +583,7 @@ mod tests {
         c.insert(PathBuf::from("/a"), 1);
         c.insert(PathBuf::from("/b"), 2);
         c.insert(PathBuf::from("/a"), 11); // refreshes /a
-        // Inserting /c evicts /b (now LRU), not /a.
+                                           // Inserting /c evicts /b (now LRU), not /a.
         c.insert(PathBuf::from("/c"), 3);
         assert_eq!(c.take(Path::new("/b")), None, "/b should be evicted");
         assert_eq!(c.take(Path::new("/a")), Some(11));
@@ -743,10 +740,7 @@ mod tests {
         // Pre-seed the cache to verify nothing reads from it either.
         cache.insert(PathBuf::from("/tmp/x.bin"), 999);
         let events = translate_with_cache(
-            &notify_event(
-                NotifyKind::Remove(RemoveKind::File),
-                vec!["/tmp/x.bin"],
-            ),
+            &notify_event(NotifyKind::Remove(RemoveKind::File), vec!["/tmp/x.bin"]),
             &cfg,
             &cache,
         );

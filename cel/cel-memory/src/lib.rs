@@ -42,6 +42,6 @@ pub use provider::MemoryProvider;
 pub use query::{CallerScope, MemoryPredicate, MemoryQuery, RetrievalProfile};
 pub use session::{MemorySession, NewMemorySession, SessionFilter, SessionOutcome};
 pub use summarizer::{
-    MockSummarizer, MockSummaryCall, SummaryContext, Summarizer, SummarizerError, SummarizerResult,
+    MockSummarizer, MockSummaryCall, Summarizer, SummarizerError, SummarizerResult, SummaryContext,
 };
 pub use write_hook::{ClosureHook, MemoryWriteHook, WriteDecision};

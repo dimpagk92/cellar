@@ -42,4 +42,6 @@ pub use cooldown::{CooldownPersistence, CooldownTracker};
 pub use decision::{Decision, FiredRuleSnapshot};
 pub use error::GatewayError;
 pub use gateway::Gateway;
-pub use traits::{AgentActionHook, AgentGateway, Actuator, ConfirmationBroker, RuleSource, WebhookHook};
+pub use traits::{
+    Actuator, AgentActionHook, AgentGateway, ConfirmationBroker, RuleSource, WebhookHook,
+};

@@ -891,9 +891,9 @@ impl Handler for DaemonIpcHandler {
         };
         let limit = params.filter.limit.unwrap_or(100).min(1000);
         let f = params.filter.clone();
-        let frames = streams
-            .agent_action_ring
-            .filtered(limit, move |frame| crate::recent::agent_action_matches(frame, &f));
+        let frames = streams.agent_action_ring.filtered(limit, move |frame| {
+            crate::recent::agent_action_matches(frame, &f)
+        });
         Ok(frames.into_iter().map(|fr| fr.action).collect())
     }
 
@@ -1554,8 +1554,15 @@ mod tests {
         let agent_action_ring: Arc<crate::agent_action_bus::AgentActionRing> =
             Arc::new(crate::agent_action_bus::AgentActionRing::new());
         let registry = Arc::new(crate::subscriptions::SubscriptionRegistry::new());
-        DaemonIpcHandler::new("test", store)
-            .with_streams(event_bus, fire_bus, event_ring, fire_ring, agent_action_bus, agent_action_ring, registry)
+        DaemonIpcHandler::new("test", store).with_streams(
+            event_bus,
+            fire_bus,
+            event_ring,
+            fire_ring,
+            agent_action_bus,
+            agent_action_ring,
+            registry,
+        )
     }
 
     #[tokio::test]
@@ -1612,8 +1619,15 @@ mod tests {
             })
             .unwrap();
 
-        let h = DaemonIpcHandler::new("test", store)
-            .with_streams(event_bus, fire_bus, event_ring, fire_ring, agent_action_bus, agent_action_ring, registry);
+        let h = DaemonIpcHandler::new("test", store).with_streams(
+            event_bus,
+            fire_bus,
+            event_ring,
+            fire_ring,
+            agent_action_bus,
+            agent_action_ring,
+            registry,
+        );
 
         let r = h
             .rules_test(RulesTestParams {
@@ -1665,8 +1679,15 @@ mod tests {
             })
             .unwrap();
 
-        let h = DaemonIpcHandler::new("test", store)
-            .with_streams(event_bus, fire_bus, event_ring, fire_ring, agent_action_bus, agent_action_ring, registry);
+        let h = DaemonIpcHandler::new("test", store).with_streams(
+            event_bus,
+            fire_bus,
+            event_ring,
+            fire_ring,
+            agent_action_bus,
+            agent_action_ring,
+            registry,
+        );
 
         // Since = 5 min ago — only the "now" event counts.
         let r = h

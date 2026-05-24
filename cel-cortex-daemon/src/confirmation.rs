@@ -277,11 +277,7 @@ impl IpcConfirmationBroker {
                     kind: RuleKind::Guard,
                     enabled: true,
                     match_expr: Expression::all(vec![
-                        Expression::leaf(
-                            "kind",
-                            Operator::Eq,
-                            json!("agent_action_attempted"),
-                        ),
+                        Expression::leaf("kind", Operator::Eq, json!("agent_action_attempted")),
                         Expression::leaf(
                             "data.action_type",
                             Operator::Eq,
@@ -609,7 +605,10 @@ mod tests {
         assert!(outcome.resolved);
         // The exception rule was created — remembered_as reflects what was applied.
         assert!(
-            matches!(outcome.remembered_as, Some(RememberKind::ExceptionRule { .. })),
+            matches!(
+                outcome.remembered_as,
+                Some(RememberKind::ExceptionRule { .. })
+            ),
             "expected ExceptionRule in remembered_as, got {:?}",
             outcome.remembered_as
         );

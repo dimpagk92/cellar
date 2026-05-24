@@ -115,11 +115,7 @@ impl Contribution {
     }
 
     /// Build a [`ContributionContent::Text`] contribution.
-    pub fn text(
-        role: Role,
-        content: impl Into<String>,
-        estimated_tokens: usize,
-    ) -> Self {
+    pub fn text(role: Role, content: impl Into<String>, estimated_tokens: usize) -> Self {
         Contribution {
             content: ContributionContent::Text {
                 role,
@@ -213,10 +209,7 @@ pub trait Source: Send + Sync {
     fn priority(&self) -> Priority;
 
     /// Produce zero or more [`Contribution`]s for this turn.
-    async fn contribute(
-        &self,
-        ctx: &BriefContext,
-    ) -> Result<Vec<Contribution>, SourceError>;
+    async fn contribute(&self, ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError>;
 }
 
 #[cfg(test)]
@@ -238,11 +231,11 @@ mod tests {
             Priority::Critical
         }
 
-        async fn contribute(
-            &self,
-            _ctx: &BriefContext,
-        ) -> Result<Vec<Contribution>, SourceError> {
-            Ok(vec![Contribution::system("You are a helpful assistant.", 7)])
+        async fn contribute(&self, _ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError> {
+            Ok(vec![Contribution::system(
+                "You are a helpful assistant.",
+                7,
+            )])
         }
     }
 
@@ -260,10 +253,7 @@ mod tests {
             Priority::Critical
         }
 
-        async fn contribute(
-            &self,
-            ctx: &BriefContext,
-        ) -> Result<Vec<Contribution>, SourceError> {
+        async fn contribute(&self, ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError> {
             let Some(msg) = ctx.user_message.as_deref() else {
                 return Err(SourceError::Skipped("no user message".into()));
             };
@@ -311,8 +301,7 @@ mod tests {
     #[tokio::test]
     async fn echo_source_round_trips_user_message() {
         let source = EchoUserSource;
-        let ctx = BriefContext::new(TokenBudget::default())
-            .with_user_message("Hello, world!");
+        let ctx = BriefContext::new(TokenBudget::default()).with_user_message("Hello, world!");
         let contributions = source.contribute(&ctx).await.expect("contribute ok");
         assert_eq!(contributions.len(), 1);
         match &contributions[0].content {

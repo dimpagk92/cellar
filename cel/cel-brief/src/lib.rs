@@ -36,6 +36,5 @@ pub use receipt::{
 };
 pub use source::{Contribution, ContributionContent, Source, SourceError};
 pub use types::{
-    Brief, BriefContext, BriefMessage, ImageData, Priority, Role, SourceId, TokenBudget,
-    ToolSchema,
+    Brief, BriefContext, BriefMessage, ImageData, Priority, Role, SourceId, TokenBudget, ToolSchema,
 };

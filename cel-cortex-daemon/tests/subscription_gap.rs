@@ -156,10 +156,7 @@ async fn confirmation_subscribe_drops_connection_on_slow_consumer() {
     let (daemon, client, notif_rx, server_task) = wire_daemon_with_client().await;
 
     let _sub: SubscribeResult = client
-        .call(
-            "confirmation.subscribe",
-            ConfirmationSubscribeParams {},
-        )
+        .call("confirmation.subscribe", ConfirmationSubscribeParams {})
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;

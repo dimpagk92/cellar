@@ -212,7 +212,8 @@ mod tests {
                 if passthrough_fires.iter().any(|f| f.rule_id == "exc")
                 && passthrough_fires.iter().any(|f| f.rule_id == "guard")
             ),
-            "expected Allow with both rules in passthrough, got {:?}", d
+            "expected Allow with both rules in passthrough, got {:?}",
+            d
         );
     }
 
@@ -223,7 +224,8 @@ mod tests {
         let d = Decision::from_matches(&[make_match(&exc), make_match(&veto)]);
         assert!(
             matches!(d, Decision::Allow { .. }),
-            "Allow rule should override Veto, got {:?}", d
+            "Allow rule should override Veto, got {:?}",
+            d
         );
     }
 
@@ -233,8 +235,15 @@ mod tests {
         let guard = rule_with("g", ActionType::RequireConfirmation);
         let d = Decision::from_matches(&[make_match(&veto), make_match(&guard)]);
         assert!(
-            matches!(d, Decision::Veto { soft_block: false, .. }),
-            "expected Veto, got {:?}", d
+            matches!(
+                d,
+                Decision::Veto {
+                    soft_block: false,
+                    ..
+                }
+            ),
+            "expected Veto, got {:?}",
+            d
         );
     }
 
@@ -247,7 +256,8 @@ mod tests {
             matches!(d, Decision::RequireConfirmation { ref passthrough_fires, .. }
                 if passthrough_fires.iter().any(|f| f.rule_id == "l")
             ),
-            "expected RequireConfirmation with log passthrough, got {:?}", d
+            "expected RequireConfirmation with log passthrough, got {:?}",
+            d
         );
     }
 }

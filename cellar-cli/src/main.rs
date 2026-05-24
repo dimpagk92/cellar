@@ -962,9 +962,9 @@ async fn run_service(cmd: ServiceCmd, _json: bool) -> Result<()> {
                     }
                 }
             };
-            let daemon_bin = daemon_bin.canonicalize().with_context(|| {
-                format!("canonicalize daemon path {}", daemon_bin.display())
-            })?;
+            let daemon_bin = daemon_bin
+                .canonicalize()
+                .with_context(|| format!("canonicalize daemon path {}", daemon_bin.display()))?;
 
             // Resolve log directory.
             let log_dir = match log_dir {
@@ -1105,9 +1105,7 @@ async fn run_service(cmd: ServiceCmd, _json: bool) -> Result<()> {
                 .arg("-u")
                 .output()
                 .context("run `id -u`")?;
-            let uid = String::from_utf8_lossy(&uid_out.stdout)
-                .trim()
-                .to_string();
+            let uid = String::from_utf8_lossy(&uid_out.stdout).trim().to_string();
             let service_target = format!("gui/{uid}/com.cellar.daemon");
 
             let output = std::process::Command::new("launchctl")
@@ -1130,7 +1128,9 @@ async fn run_service(cmd: ServiceCmd, _json: bool) -> Result<()> {
                 }
                 println!("✓ service is loaded by launchd");
             } else {
-                println!("✗ service is NOT loaded (launchctl print {service_target} returned an error)");
+                println!(
+                    "✗ service is NOT loaded (launchctl print {service_target} returned an error)"
+                );
                 println!("  Run `cellar service install` to register and start the daemon.");
             }
             Ok(())

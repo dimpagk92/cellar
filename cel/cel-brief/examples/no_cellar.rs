@@ -12,8 +12,8 @@
 use async_trait::async_trait;
 
 use cel_brief::{
-    Brief, BriefContext, BriefMessage, BriefReceipt, Contribution, ContributionContent,
-    Priority, Role, Source, SourceError, SourceId, TokenBudget,
+    Brief, BriefContext, BriefMessage, BriefReceipt, Contribution, ContributionContent, Priority,
+    Role, Source, SourceError, SourceId, TokenBudget,
 };
 
 /// Static system prompt — Critical priority, never redactable.
@@ -31,10 +31,7 @@ impl Source for StaticSystemPrompt {
         Priority::Critical
     }
 
-    async fn contribute(
-        &self,
-        _ctx: &BriefContext,
-    ) -> Result<Vec<Contribution>, SourceError> {
+    async fn contribute(&self, _ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError> {
         Ok(vec![Contribution::system(
             self.text,
             // ~4 chars/token rule of thumb.
@@ -58,10 +55,7 @@ impl Source for UserMessageEcho {
         Priority::Critical
     }
 
-    async fn contribute(
-        &self,
-        ctx: &BriefContext,
-    ) -> Result<Vec<Contribution>, SourceError> {
+    async fn contribute(&self, ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError> {
         let Some(msg) = ctx.user_message.as_deref() else {
             return Err(SourceError::Skipped("no user message on context".into()));
         };
@@ -122,7 +116,11 @@ async fn main() {
                                 source: id.clone(),
                             });
                         }
-                        ContributionContent::ToolCall { id: call_id, name, args } => {
+                        ContributionContent::ToolCall {
+                            id: call_id,
+                            name,
+                            args,
+                        } => {
                             messages.push(BriefMessage::ToolCall {
                                 id: call_id,
                                 name,
@@ -130,7 +128,10 @@ async fn main() {
                                 source: id.clone(),
                             });
                         }
-                        ContributionContent::ToolResult { id: call_id, content } => {
+                        ContributionContent::ToolResult {
+                            id: call_id,
+                            content,
+                        } => {
                             messages.push(BriefMessage::ToolResult {
                                 id: call_id,
                                 content,
@@ -170,13 +171,19 @@ async fn main() {
     }
     for (idx, msg) in brief.messages.iter().enumerate() {
         match msg {
-            BriefMessage::Text { role, content, source } => {
+            BriefMessage::Text {
+                role,
+                content,
+                source,
+            } => {
                 println!("[{idx}] text role={role:?} src={source}: {content}");
             }
             BriefMessage::Image { role, source, .. } => {
                 println!("[{idx}] image role={role:?} src={source}");
             }
-            BriefMessage::ToolCall { id, name, source, .. } => {
+            BriefMessage::ToolCall {
+                id, name, source, ..
+            } => {
                 println!("[{idx}] tool_call id={id} name={name} src={source}");
             }
             BriefMessage::ToolResult { id, source, .. } => {

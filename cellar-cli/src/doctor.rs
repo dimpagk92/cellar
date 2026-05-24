@@ -309,7 +309,10 @@ pub fn parse_webhook_url_host(url: &str) -> String {
         .next()
         .unwrap_or(after_scheme);
     // Strip userinfo if present.
-    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     if host.is_empty() {
         url.to_string()
     } else {
@@ -444,9 +447,8 @@ pub async fn daemon_rows(client: &Client) -> Vec<CheckResult> {
     }
 
     // daemon.status: health + memory ceiling + confirmations.
-    let status_result: Result<cellar_ipc::results::daemon::DaemonStatusResult, _> = client
-        .call("daemon.status", serde_json::json!({}))
-        .await;
+    let status_result: Result<cellar_ipc::results::daemon::DaemonStatusResult, _> =
+        client.call("daemon.status", serde_json::json!({})).await;
     match status_result {
         Ok(r) => {
             rows.push(if r.healthy {
@@ -490,10 +492,7 @@ pub async fn daemon_rows(client: &Client) -> Vec<CheckResult> {
 }
 
 /// List configured webhooks and probe each one.
-pub async fn webhook_rows(
-    client: &Client,
-    probe: &dyn WebhookProbe,
-) -> Vec<CheckResult> {
+pub async fn webhook_rows(client: &Client, probe: &dyn WebhookProbe) -> Vec<CheckResult> {
     let list: Result<cellar_ipc::results::webhooks::WebhooksListResult, _> = client
         .call(
             "webhooks.list",
@@ -607,11 +606,25 @@ pub fn parse_ollama_list(text: &str) -> BTreeSet<String> {
 pub fn render_report(rows: &[CheckResult]) -> i32 {
     println!("[cellar doctor]");
     for row in rows {
-        println!("  {}  {:<24}  {}", row.status.glyph(), row.name, row.message);
+        println!(
+            "  {}  {:<24}  {}",
+            row.status.glyph(),
+            row.name,
+            row.message
+        );
     }
-    let fails = rows.iter().filter(|r| r.status == CheckStatus::Fail).count();
-    let warns = rows.iter().filter(|r| r.status == CheckStatus::Warn).count();
-    let passes = rows.iter().filter(|r| r.status == CheckStatus::Pass).count();
+    let fails = rows
+        .iter()
+        .filter(|r| r.status == CheckStatus::Fail)
+        .count();
+    let warns = rows
+        .iter()
+        .filter(|r| r.status == CheckStatus::Warn)
+        .count();
+    let passes = rows
+        .iter()
+        .filter(|r| r.status == CheckStatus::Pass)
+        .count();
     println!(
         "[cellar doctor] {} passed, {} warning(s), {} failure(s)",
         passes, warns, fails
@@ -755,11 +768,18 @@ mod tests {
 
     #[test]
     fn infers_ollama_use_local_fallback_flag() {
-        assert!(infers_ollama_use([
-            ("CELLAR_MEMORY_FALLBACK_TO_LOCAL", "true"),
-        ]));
-        assert!(infers_ollama_use([("CELLAR_MEMORY_FALLBACK_TO_LOCAL", "1")]));
-        assert!(infers_ollama_use([("CELLAR_MEMORY_FALLBACK_TO_LOCAL", "ON")]));
+        assert!(infers_ollama_use([(
+            "CELLAR_MEMORY_FALLBACK_TO_LOCAL",
+            "true"
+        ),]));
+        assert!(infers_ollama_use([(
+            "CELLAR_MEMORY_FALLBACK_TO_LOCAL",
+            "1"
+        )]));
+        assert!(infers_ollama_use([(
+            "CELLAR_MEMORY_FALLBACK_TO_LOCAL",
+            "ON"
+        )]));
         assert!(!infers_ollama_use([(
             "CELLAR_MEMORY_FALLBACK_TO_LOCAL",
             "false"
@@ -797,7 +817,9 @@ mod tests {
         let r = classify_ollama_models(&inputs).expect("row");
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(r.message.contains("not on PATH"));
-        assert!(r.message.contains("ollama pull llama3.2:3b-instruct-q4_K_M"));
+        assert!(r
+            .message
+            .contains("ollama pull llama3.2:3b-instruct-q4_K_M"));
     }
 
     #[test]
@@ -811,7 +833,9 @@ mod tests {
         };
         let r = classify_ollama_models(&inputs).expect("row");
         assert_eq!(r.status, CheckStatus::Fail);
-        assert!(r.message.contains("ollama pull llama3.2:3b-instruct-q4_K_M"));
+        assert!(r
+            .message
+            .contains("ollama pull llama3.2:3b-instruct-q4_K_M"));
     }
 
     #[test]
@@ -867,7 +891,10 @@ llama3.1:latest                    f00d            4.7 GB    1 day ago
 
     #[test]
     fn parse_webhook_url_host_https() {
-        assert_eq!(parse_webhook_url_host("https://hooks.example.com/abc"), "hooks.example.com");
+        assert_eq!(
+            parse_webhook_url_host("https://hooks.example.com/abc"),
+            "hooks.example.com"
+        );
     }
 
     #[test]
@@ -888,12 +915,18 @@ llama3.1:latest                    f00d            4.7 GB    1 day ago
 
     #[test]
     fn parse_webhook_url_host_no_scheme() {
-        assert_eq!(parse_webhook_url_host("hooks.example.com/abc"), "hooks.example.com");
+        assert_eq!(
+            parse_webhook_url_host("hooks.example.com/abc"),
+            "hooks.example.com"
+        );
     }
 
     #[test]
     fn parse_webhook_url_host_fragment_only() {
-        assert_eq!(parse_webhook_url_host("https://hooks.example.com#frag"), "hooks.example.com");
+        assert_eq!(
+            parse_webhook_url_host("https://hooks.example.com#frag"),
+            "hooks.example.com"
+        );
     }
 
     // ───── render_report ─────
@@ -940,10 +973,7 @@ llama3.1:latest                    f00d            4.7 GB    1 day ago
         // hand-build the rows the way `webhook_rows` would.
         let probe = MockProbe {
             responses: [
-                (
-                    "https://ok.example/".to_string(),
-                    Ok::<bool, String>(true),
-                ),
+                ("https://ok.example/".to_string(), Ok::<bool, String>(true)),
                 (
                     "https://soft.example/".to_string(),
                     Ok::<bool, String>(false),

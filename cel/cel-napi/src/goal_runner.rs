@@ -84,6 +84,14 @@ async fn run_local_canonical(config: CanonicalJsConfig) -> napi::Result<String> 
     })?;
     let planner = LlmPlanProducer::new(Arc::new(llm_client));
     let executor = CortexStepExecutor::new(cortex);
+    // Capture the action log handle BEFORE the executor is moved into
+    // the runner — we read it AFTER run() to get the real per-task
+    // step count. Without this, render_outcome_for_js had no metrics
+    // input and bench harnesses saw `llmCalls=0` even for tasks that
+    // made 10+ planner round-trips. The 2026-05-26 WV smoke flagged
+    // this: Amazon FAIL showed "0 calls / 233s" but the trace listed
+    // 10+ "Executing batch" entries.
+    let log_handle = executor.log_handle();
     let runner = CanonicalGoalRunner::new(planner, executor);
     let limits = RunLimits {
         max_steps: config.max_steps,
@@ -94,14 +102,24 @@ async fn run_local_canonical(config: CanonicalJsConfig) -> napi::Result<String> 
         memory_db_path: None,
     };
     let outcome = runner.run(&config.goal, limits).await;
-    serde_json::to_string(&render_outcome_for_js(&outcome))
+    let step_count = log_handle.lock().map(|l| l.len()).unwrap_or(0) as u32;
+    serde_json::to_string(&render_outcome_for_js(&outcome, step_count))
         .map_err(|e| napi::Error::from_reason(format!("Result serialization failed: {e}")))
 }
 
 /// Flatten a canonical [`GoalOutcome`] into the JSON shape the CLI and MCP
 /// already know how to display. Keeps `status` / `summary` / `duration_ms`
 /// stable so the TS side doesn't need a second schema migration.
-fn render_outcome_for_js(outcome: &GoalOutcome) -> serde_json::Value {
+///
+/// `step_count` is the number of ActionRecords the executor accumulated
+/// during the run — surfaced as `metrics.llmCalls` + `stepsExecuted` so
+/// bench harnesses can distinguish "real attempt that ran out of budget"
+/// (10+ steps) from "framework gave up before any planner call" (0 steps).
+fn render_outcome_for_js(outcome: &GoalOutcome, step_count: u32) -> serde_json::Value {
+    let metrics = serde_json::json!({
+        "llmCalls": step_count,
+        "stepsExecuted": step_count,
+    });
     match outcome {
         GoalOutcome::Succeeded {
             summary,
@@ -110,6 +128,8 @@ fn render_outcome_for_js(outcome: &GoalOutcome) -> serde_json::Value {
             "status": "Achieved",
             "summary": summary,
             "extracted_data": extracted_data,
+            "stepsExecuted": step_count,
+            "metrics": metrics,
         }),
         GoalOutcome::Failed(report) => serde_json::json!({
             "status": "Failed",
@@ -120,11 +140,15 @@ fn render_outcome_for_js(outcome: &GoalOutcome) -> serde_json::Value {
                 report.attempts.len(),
             ),
             "failure_report": report,
+            "stepsExecuted": step_count,
+            "metrics": metrics,
         }),
         GoalOutcome::Refused { summary } => serde_json::json!({
             "status": "Refused",
             "summary": format!("Clarification needed: {summary}"),
             "question": summary,
+            "stepsExecuted": step_count,
+            "metrics": metrics,
         }),
     }
 }

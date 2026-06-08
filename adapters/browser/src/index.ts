@@ -448,6 +448,31 @@ export class BrowserAdapter {
       this.downloadWatchdog.attach(this.client.page);
       this.securityWatchdog.attach(this.client.page);
     }
+
+    // Re-bind cortex to THIS adapter's page (page-handle unification).
+    //
+    // Why: cel.ensureBrowser() above already calls bindBrowserCdpUrl, but it
+    // passes the browser-level URL — bind_browser_cdp_url then picks the
+    // FIRST page via /json/list (Chromium's initial about:blank). After
+    // client.connect() runs we have OUR isolated page, with its own target;
+    // re-bind the cortex to THAT page so cortex.cdp_evaluate /
+    // cortex.cdp_navigate / cortex.cdp_screenshot all act on the same page
+    // the adapter perceives/screenshots.
+    //
+    // Without this, the WV/M2W bench runs hit the ArXiv / Apple / BBC
+    // FAIL pattern from 2026-05-26: the Rust cortex drives page A through
+    // a successful task, but adapter.screenshot() captures page B (still on
+    // the start URL), and GPT-4V scores it FAIL.
+    if (this._cel && this.client.pageWsUrl) {
+      try {
+        await this._cel.bindBrowserCdpUrl(this.client.pageWsUrl);
+        console.error(`[browser-adapter] cortex re-bound to adapter page ${this.client.pageWsUrl}`);
+      } catch (e) {
+        // Best-effort — bind failure just means we keep legacy split-page
+        // behavior; surface it in stderr so split-page bugs are debuggable.
+        console.error(`[browser-adapter] cortex re-bind failed: ${(e as Error).message}`);
+      }
+    }
   }
 
   /** Reconnect CDP to the current active tab.

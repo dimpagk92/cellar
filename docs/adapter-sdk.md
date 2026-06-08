@@ -6,14 +6,28 @@ Adapters are Layer 1 in the three-layer model (see [adapters-cel-agents.md](./ad
 
 ## Status and Versioning
 
-- `adapter-common`: **v0.1.0** (workspace version, Apache-2.0). Pre-1.0. The trait surface is stable enough for first-party work, but minor-version bumps may still change signatures.
-- The mature driver trait (`cel_cortex::adapter::AdapterDriver`) is a superset of the older `adapter_common::Adapter` trait. New adapters should target `AdapterDriver`. The `Adapter` trait in `adapter-common` is kept for the existing NAPI adapter-registry path and will be reconciled with `AdapterDriver` before v1.
+- **`cel-adapter-sdk`: v0.1.0** (workspace version, MIT). This is the crate you depend on. It holds the `AdapterDriver` trait, the manifest types, `ActionResult`/`AdapterError`, and the discovery/registration helpers — and it depends only on the low-level shared crates (`cel-context`, `cel-contracts`, `cel-cdp`), **not** on the `cel-cortex` engine. Adding an adapter no longer pulls in the perception runtime. Pre-1.0: stable in shape, minor bumps may still change signatures.
+- `cel-cortex` re-exports the entire SDK surface (`pub use cel_adapter_sdk::*` from `cel_cortex::adapter`), so older code referencing `cel_cortex::AdapterDriver` keeps compiling — but new adapters should depend on `cel-adapter-sdk` directly.
+- A second, simpler trait — `adapter_common::Adapter` — predates the SDK and survives only for four Windows-finance adapters (excel, sap-gui, bloomberg, metatrader) and the NAPI adapter-registry path. **Do not target it for new work.** It will be folded into `cel-adapter-sdk` before v1. See "Which trait do I implement?" below.
 - v1 criteria (proposal; TODO: user confirm):
-  - `AdapterDriver` and `Adapter` unified to a single trait
+  - `adapter_common::Adapter` retired into `cel-adapter-sdk` (single trait)
   - Manifest schema frozen (additive only after v1)
   - `ContextElement` + `ActionResult` declared stable
   - At least one third-party adapter shipping on the contract
+  - `cel-adapter-sdk` published to crates.io
   - Security/review policy in [adapter-security.md](./adapter-security.md) finalized
+
+## Which trait do I implement?
+
+Implement **`cel_adapter_sdk::AdapterDriver`**. Full stop, for all new adapters
+— native Rust (implement the trait directly) or any other language (speak the
+process protocol in [building-adapters.md](./building-adapters.md), which the
+runtime maps onto the same trait).
+
+You may notice `adapter_common::Adapter` while reading the tree. It is the older,
+narrower trait kept alive for the four legacy Windows-finance adapters and the
+NAPI registry only. It is not the contract — `AdapterDriver` is. If you're unsure,
+the rule is simply: depend on `cel-adapter-sdk`, implement `AdapterDriver`.
 
 Until v1 is cut, treat the contract as "stable in shape, may move in name." Breaking changes will be called out in release notes.
 
@@ -28,7 +42,7 @@ A conforming adapter must:
 
 Execution (`execute(action, params) -> ActionResult`) is optional if your adapter is read-only, but almost every adapter will want at least one action.
 
-The canonical trait, from `cel/cel-cortex/src/adapter.rs`:
+The canonical trait, from `cel/cel-adapter-sdk/src/lib.rs`:
 
 ```rust
 #[async_trait]
@@ -127,12 +141,13 @@ Today (pre-v1):
 - **First-party adapters**: live in `adapters/` in the monorepo. Apache-2.0 licensed (workspace), with the common trait crate MIT-licensed to invite contributions.
 - **Community / third-party adapters**: there is no crates.io distribution channel yet. The current path is:
   - Fork and add your crate under `adapters/your-name/` in a fork, or
-  - Publish your own crate depending on `adapter-common` from this repo once we ship a crates.io release (TODO: publish `adapter-common` to crates.io; policy not yet set).
+  - Write a process adapter in any language (see [building-adapters.md](./building-adapters.md)) — it needs no Rust dependency at all, just the stdio protocol + an `adapter.json`, or
+  - Publish your own Rust crate depending on `cel-adapter-sdk` once we ship a crates.io release (TODO: publish `cel-adapter-sdk` to crates.io; policy not yet set).
 - **User-local adapters**: dev-mode loading via `adapter.json` at a known path (TODO: confirm the exact directory, currently scanned by `discover_adapters` in `cel_cortex::adapter`).
 
 Open questions tracked here until resolved:
 
-- TODO: when does `adapter-common` go on crates.io, and under what version cadence?
+- TODO: when does `cel-adapter-sdk` go on crates.io, and under what version cadence?
 - TODO: namespacing for third-party adapters — registry prefix (`community/`), manifest `author` field, or nothing?
 - TODO: signing / attestation story — see [adapter-security.md](./adapter-security.md).
 

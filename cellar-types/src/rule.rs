@@ -86,6 +86,20 @@ pub enum ActionType {
     SoftBlock,
     /// Silent log only. Used by `audit` rules.
     LogOnly,
+    /// Suppress persistence of a memory chunk before it lands in the store.
+    ///
+    /// Only meaningful on `MemoryWriteAttempted` events: the daemon's
+    /// `MatcherWriteHook` honors this variant exactly like [`ActionType::Veto`]
+    /// (returning `WriteDecision::Redact` to the memory provider). On every
+    /// other event kind this variant is a no-op — the gateway/matcher
+    /// pipelines route it into the same passthrough-audit bucket as
+    /// [`ActionType::LogOnly`].
+    ///
+    /// This is the sugar layer that lets NL phrasing like
+    /// *"never persist chunks mentioning bank.example.com"* compile to a
+    /// named action rather than the literal `Veto`. See
+    /// `cellar-memory-manager.md` §10.5.
+    RedactMemory,
 }
 
 #[cfg(test)]
@@ -118,6 +132,19 @@ mod tests {
         let s = serde_json::to_string(&r).unwrap();
         let back: Rule = serde_json::from_str(&s).unwrap();
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn redact_memory_action_round_trips() {
+        let action = Action {
+            action_type: ActionType::RedactMemory,
+            webhook_id: None,
+            timeout_s: None,
+        };
+        let s = serde_json::to_value(&action).unwrap();
+        assert_eq!(s["type"], "redact_memory");
+        let back: Action = serde_json::from_value(s).unwrap();
+        assert_eq!(back.action_type, ActionType::RedactMemory);
     }
 
     #[test]

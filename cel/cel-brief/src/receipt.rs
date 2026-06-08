@@ -1,10 +1,9 @@
-//! [`BriefReceipt`] — minimal Phase 1 surface so [`crate::types::Brief`] can
-//! compile.
+//! [`BriefReceipt`] — auditable record of how a [`crate::types::Brief`] was
+//! assembled.
 //!
-//! The full receipt (per-source stats, dropped items, redactions, timings)
-//! lands in Phase 2 per plan §8. Phase 1 ships only the fields that allow the
-//! `Brief` type to compile end-to-end and lets a hand-built `Brief` carry an
-//! empty receipt.
+//! Populated end-to-end by [`crate::builder::BriefBuilder::build`] in
+//! Phase 2; [`BriefReceipt::empty`] remains for tests and for callers that
+//! hand-construct a `Brief` outside the builder.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -15,13 +14,16 @@ use crate::types::{Priority, SourceId};
 
 /// Per-source stats kept on the [`BriefReceipt`].
 ///
-/// Phase 1 ships the field shape from plan §8; Phase 2's builder populates
-/// it during `BriefBuilder::build`.
+/// The builder fills one entry per [`crate::source::Source`] it called,
+/// regardless of whether that source contributed surviving items — a source
+/// that returned 0 contributions or had all its contributions pruned still
+/// gets a `SourceStats` entry with the corresponding counts so the receipt
+/// is exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceStats {
     /// Number of [`crate::source::Contribution`]s the source returned.
     pub contributions: usize,
-    /// Number of contributions that survived budget pruning.
+    /// Number of contributions that survived budget pruning and governance.
     pub kept: usize,
     /// Total tokens attributed to the source after pruning.
     pub tokens: usize,
@@ -63,6 +65,10 @@ pub struct RedactionRecord {
 
 /// Per-phase timings collected by the builder. All durations are wall-clock
 /// time within `BriefBuilder::build`.
+///
+/// `fanout` is the **longest** source `contribute()` time, not the sum —
+/// sources are fanned out in parallel, so wall-clock is bounded by the
+/// slowest source plus serialisation overhead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Timings {
     /// Longest source `contribute()` time (max across the fan-out).
@@ -79,17 +85,17 @@ pub struct Timings {
 
 /// Auditable record of how a [`crate::types::Brief`] was assembled.
 ///
-/// Phase 1: types exist with the field shape from plan §8 so [`crate::types::Brief`]
-/// can compile and callers can hand-construct an empty receipt for testing
-/// (see [`BriefReceipt::empty`]). Phase 2's `BriefBuilder` populates every
-/// field for real.
+/// Populated by [`crate::builder::BriefBuilder::build`]. Callers can still
+/// construct an empty receipt via [`BriefReceipt::empty`] when assembling a
+/// brief by hand (tests, fixtures).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BriefReceipt {
     /// Wall-clock time the receipt was finalised.
     pub built_at: SystemTime,
     /// Total tokens in the assembled brief.
     pub total_tokens: usize,
-    /// Per-source breakdown.
+    /// Per-source breakdown — one entry per source the builder consulted,
+    /// even if the source produced zero contributions.
     pub by_source: HashMap<SourceId, SourceStats>,
     /// Contributions pruned for budget or governance reasons.
     pub dropped: Vec<DroppedContribution>,
@@ -102,9 +108,10 @@ pub struct BriefReceipt {
 impl BriefReceipt {
     /// An empty receipt with `built_at = SystemTime::now()` and zero counts.
     ///
-    /// Useful for tests and the Phase 1 example, where the builder isn't
-    /// available yet. Phase 2 callers should let `BriefBuilder::build`
-    /// produce the receipt.
+    /// Useful for tests and for callers that hand-assemble a [`crate::types::Brief`]
+    /// outside the builder. Phase 2 builder callers should let
+    /// [`crate::builder::BriefBuilder::build`] populate the receipt for
+    /// them.
     pub fn empty() -> Self {
         BriefReceipt {
             built_at: SystemTime::now(),
@@ -147,5 +154,29 @@ mod tests {
         let json = serde_json::to_string(&dropped).expect("serialize");
         let back: DroppedContribution = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(dropped, back);
+    }
+
+    #[test]
+    fn source_stats_round_trips_through_serde_json() {
+        let stats = SourceStats {
+            contributions: 3,
+            kept: 2,
+            tokens: 120,
+            priority: Priority::Normal,
+        };
+        let json = serde_json::to_string(&stats).expect("serialize");
+        let back: SourceStats = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(stats, back);
+    }
+
+    #[test]
+    fn redaction_record_round_trips_through_serde_json() {
+        let rec = RedactionRecord {
+            source: SourceId::new("perception"),
+            rule: "rule:no_bank_dom".into(),
+        };
+        let json = serde_json::to_string(&rec).expect("serialize");
+        let back: RedactionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(rec, back);
     }
 }

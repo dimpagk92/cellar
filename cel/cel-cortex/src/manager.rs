@@ -4,6 +4,7 @@
 //! booted becomes the default (for backwards compatibility with singleton usage).
 
 use crate::cortex::{Cortex, CortexError};
+use crate::daemon_bridge::DaemonBridge;
 use crate::model::MentalModel;
 use cel_accessibility::AccessibilityTree;
 use cel_context::ContextMerger;
@@ -37,11 +38,25 @@ impl CortexManager {
     ///
     /// If `id` is None, an auto-generated ID is used.
     /// The `merger` provides context from the accessibility tree and other streams.
+    /// When `bridge` is `Some`, Cortex-observed events (`url_changed`,
+    /// `app_focused`, `window_opened`) are forwarded to it — the host wraps its
+    /// daemon IPC client so the daemon's rule matcher sees browser navigation
+    /// the daemon cannot observe on its own.
+    ///
+    /// `configure` is a host-supplied hook run on the fresh Cortex *before*
+    /// `boot()` — the point at which adapters must be registered (the
+    /// tick-loop lock is uncontested then). Hosts pass
+    /// `cel_adapters::register_default_adapters` here so this engine crate
+    /// stays adapter-agnostic (it cannot depend on the adapter crates, which
+    /// already depend on it). Pass a no-op closure (`|_| {}`) to register
+    /// nothing.
     pub async fn boot_cortex(
         &self,
         id: Option<String>,
         merger: ContextMerger,
         observer: Box<dyn AccessibilityTree>,
+        bridge: Option<Arc<dyn DaemonBridge>>,
+        configure: impl FnOnce(&mut Cortex),
     ) -> Result<String, CortexError> {
         let id = id.unwrap_or_else(|| {
             let n = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -59,6 +74,12 @@ impl CortexManager {
         // machine, so opt into native input. Eval/test contexts should never
         // route through CortexManager.
         let mut cortex = Cortex::new(id.clone()).with_native_input_unsafe();
+        if let Some(bridge) = bridge {
+            cortex = cortex.with_daemon_bridge(bridge);
+        }
+        // Host adapter wiring. Must run before boot(): register_adapter takes
+        // the adapters write-lock uncontended only before the tick loop spawns.
+        configure(&mut cortex);
         cortex.boot(merger, observer).await?;
         let cortex = Arc::new(cortex);
 

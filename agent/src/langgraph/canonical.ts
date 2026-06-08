@@ -43,7 +43,36 @@ export type CanonicalAction =
   | { type: "notebook_writes"; key?: string; value?: string; category?: string }
   | { type: "extract_with_fallback"; name: string; selectors: string[]; parse_as?: string }
   | { type: "write_cells"; app?: string; sheet?: string | null; table?: string | null; writes: CellWrite[]; verify?: boolean }
-  | { type: "read_cells"; app?: string; sheet?: string | null; table?: string | null; cell_refs: string[] };
+  | { type: "read_cells"; app?: string; sheet?: string | null; table?: string | null; cell_refs: string[] }
+  | {
+      type: "window";
+      op: string;
+      app?: string | null;
+      window_index?: number;
+      x?: number | null;
+      y?: number | null;
+      width?: number | null;
+      height?: number | null;
+      preset?: string | null;
+      display?: number | null;
+    }
+  | {
+      type: "dialog";
+      op: string;
+      button?: string | null;
+      value?: string | null;
+      field_index?: number;
+    }
+  | {
+      type: "dock";
+      op: string;
+      name?: string | null;
+    }
+  | {
+      type: "menu_extra";
+      op: string;
+      name?: string | null;
+    };
 
 export type CanonicalStepKind = "deterministic" | "llm_assisted";
 

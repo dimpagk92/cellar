@@ -135,6 +135,82 @@ async fn compiled_agent_guard_intercepts_action() {
     );
 }
 
+/// Phase 5: the named `redact_memory` action — sugar for `Veto` on
+/// `memory_write_attempted` events. Verifies the full pipeline:
+///   NL phrasing → compiler → `ActionType::RedactMemory` → matcher fires
+///                  on the synthetic memory-write event.
+#[tokio::test]
+async fn compiled_redact_memory_rule_fires_on_matching_chunk() {
+    let llm_json = r#"{
+        "id": "draft",
+        "name": "Redact bank.example.com memory",
+        "nl_original": "never persist any memory chunk mentioning bank.example.com",
+        "kind": "audit",
+        "enabled": true,
+        "created_at": "1970-01-01T00:00:00Z",
+        "match": {
+            "all": [
+                {"leaf": {"field": "kind", "op": "eq", "value": "memory_write_attempted"}},
+                {"leaf": {"field": "data.content_preview", "op": "contains", "value": "bank.example.com"}}
+            ]
+        },
+        "action": {"type": "redact_memory"},
+        "cooldown_seconds": 0
+    }"#;
+
+    let compiler = Compiler::new(mock(llm_json), "mock");
+    let result = compiler
+        .compile(CompileRequest::new(
+            "never persist any memory chunk mentioning bank.example.com",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(result.draft_rule.kind, RuleKind::Audit);
+    assert_eq!(
+        result.draft_rule.action.action_type,
+        cellar_types::rule::ActionType::RedactMemory,
+        "compiler must surface the named RedactMemory variant verbatim"
+    );
+
+    // The compiled rule must fire on a synthetic memory_write_attempted event
+    // whose content_preview contains the matched substring.
+    let ws = InMemoryWatchlists::default();
+    let event = Event::now(EventSource::Memory, EventKind::MemoryWriteAttempted)
+        .with_data("caller", "embedded")
+        .with_data("kind", "chat")
+        .with_data("source", "embedded")
+        .with_data(
+            "content_preview",
+            "I logged into bank.example.com today and saw…",
+        );
+    let rules = [result.draft_rule.clone()];
+    let fired = Matcher::evaluate(&event, &rules, &ws);
+    assert_eq!(
+        fired.len(),
+        1,
+        "redact_memory rule should fire on matching memory_write_attempted"
+    );
+
+    // An innocent chunk doesn't fire — substring isn't there.
+    let innocent = Event::now(EventSource::Memory, EventKind::MemoryWriteAttempted)
+        .with_data("caller", "embedded")
+        .with_data("kind", "chat")
+        .with_data("source", "embedded")
+        .with_data("content_preview", "discussing the weather");
+    let fired = Matcher::evaluate(&innocent, &rules, &ws);
+    assert!(
+        fired.is_empty(),
+        "redact_memory rule should NOT fire on unrelated chunks"
+    );
+
+    // The human-readable summary must call out the variant explicitly.
+    assert!(
+        result.human_readable.contains("redact memory"),
+        "human-readable summary should label the action as 'redact memory'"
+    );
+}
+
 /// Human-readable summary is non-empty and contains the key elements.
 #[tokio::test]
 async fn human_readable_summary_includes_when_then() {

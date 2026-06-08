@@ -425,9 +425,20 @@ const EXTRACTION_SCRIPT = `(() => {
         // (country pickers etc.); 50 is enough to fingerprint the
         // shape so the planner can see "this is a small enum" vs
         // "this is a long list".
-        let selectOptions: Array<{ value: string; label: string }> | undefined;
+        // NOTE: this entire string is sent verbatim to the page via
+        // Runtime.evaluate — V8 sees it as plain JS, NOT TypeScript.
+        // TS type annotations here (colon-shape) parse as labelled
+        // statements in JS and break with "Unexpected token ':'".
+        // Pre-2026-05-25 this declaration was annotated and the
+        // LIGHTWEIGHT_SCRIPT fallback covered for it on most sites;
+        // flightaware / mta.info / cloudflare-fronted pages caused
+        // full extraction to fail and pushed the planner into
+        // extract-only mode for the whole task. Annotation-free only.
+        // (Do not use backticks in this comment block — the entire
+        // outer string is a TS template literal.)
+        let selectOptions;
         if (el.tagName === 'SELECT') {
-          const opts: Array<{ value: string; label: string }> = [];
+          const opts = [];
           const optEls = el.querySelectorAll('option');
           const cap = Math.min(optEls.length, 50);
           for (let oi = 0; oi < cap; oi++) {

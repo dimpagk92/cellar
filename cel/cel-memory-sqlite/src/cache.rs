@@ -23,8 +23,6 @@
 //!   [`RetrieveCache::clear`]. The TTL is a backstop only — if a mutator
 //!   forgets to invalidate, stale reads cap at 30 s.
 //!
-//! See `cellar-memory-manager.md` §8 for the retrieve hot path discussion.
-//!
 //! The cache is generic over the value type so tests don't need real
 //! `MemoryChunk` values.
 

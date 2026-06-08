@@ -1,8 +1,8 @@
 //! Core types: [`Brief`], [`BriefMessage`], [`Role`], [`BriefContext`],
 //! [`TokenBudget`], [`Priority`], [`ToolSchema`], [`ImageData`], [`SourceId`].
 //!
-//! Implements plan §4. See
-//! [cellar-cel-brief.md](file:///Users/dimitriospagkratis/.claude/plans/cellar-cel-brief.md).
+//! These are the provider-agnostic value types the briefing layer assembles and
+//! emits. See this crate's `README.md` for the public overview.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
@@ -97,7 +97,7 @@ pub struct ImageData {
 ///
 /// Tagged with the [`SourceId`] of the contributing source so the
 /// [`BriefReceipt`] can attribute every visible byte. Variants mirror the
-/// `Text | Image | ToolCall | ToolResult` matrix from plan §4.
+/// `Text | Image | ToolCall | ToolResult` matrix.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BriefMessage {

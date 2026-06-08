@@ -86,6 +86,10 @@ Field paths are dotted, addressing the event envelope. Top-level: `kind`, `sourc
   data.url            — browser URL
   data.action_type    — for agent_action_attempted: the cel_act verb (e.g., fs.move, fs.copy, click, type)
   data.action_args.*  — for agent_action_attempted: the call arguments
+  data.caller         — for memory_write_attempted: the caller_id of the writer (e.g. "embedded", "mcp:cursor")
+  data.content_preview — for memory_write_attempted: first 256 chars of the chunk content
+  data.session_id     — for memory_write_attempted: optional session grouping
+  data.source         — for memory_write_attempted: which subsystem produced the chunk (embedded / mcp / gateway / matcher / cortex / system)
 
 Event kinds:
   app_focused, window_opened     — Cortex AX
@@ -93,11 +97,15 @@ Event kinds:
   process_started, process_stopped — process poller
   file_created, file_modified, file_deleted — FSEvents
   agent_action_attempted, agent_action_completed, agent_action_denied — cel_act gateway
+  memory_write_attempted         — memory writer (synthetic; emitted before persisting a chunk; use this for "never remember X" rules)
+  memory_read                    — memory reader (synthetic; sampled; use this for audit-only rules)
+  memory_offdevice_call_attempted — embedding/summarizer client (synthetic; emitted before any off-device call)
 
 Three rule kinds (UI taxonomy, you pick the right one):
   watcher  — notify-only via webhook. Use this when the user wants to be told something happened.
   guard    — intercept and govern. Use this for agent_action_attempted matches that should pause or veto.
   audit    — silent log-only. Use sparingly; only when the user explicitly says "log" / "track without notifying me".
+           — also use `audit` for `redact_memory` rules: they're silent governance over the memory writer.
 
 Action shapes:
   Webhook:               {"type": "webhook", "webhook_id": "default"}
@@ -105,6 +113,12 @@ Action shapes:
   Veto:                  {"type": "veto"}
   Soft block:            {"type": "soft_block"}
   Log only:              {"type": "log_only"}
+  Redact memory:         {"type": "redact_memory"}
+                          Use ONLY when matching `memory_write_attempted` and the user's
+                          intent is "don't persist / never remember chunks about X".
+                          Equivalent to `veto` on memory writes, but more explicit and
+                          surfaces a "redact memory" label in the UI. For any other
+                          event kind use `veto` instead.
 
 Defaults to use unless the user specifies otherwise:
   enabled: true
@@ -221,6 +235,47 @@ Output:
   "action": {"type": "log_only"},
   "cooldown_seconds": 60
 }
+
+Example 6
+Input: "never persist any memory chunk mentioning bank.example.com"
+Output:
+{
+  "id": "draft",
+  "name": "Redact bank.example.com memory",
+  "nl_original": "never persist any memory chunk mentioning bank.example.com",
+  "kind": "audit",
+  "enabled": true,
+  "created_at": "1970-01-01T00:00:00Z",
+  "match": {
+    "all": [
+      {"leaf": {"field": "kind", "op": "eq", "value": "memory_write_attempted"}},
+      {"leaf": {"field": "data.content_preview", "op": "contains", "value": "bank.example.com"}}
+    ]
+  },
+  "action": {"type": "redact_memory"},
+  "cooldown_seconds": 0
+}
+
+Example 7
+Input: "don't remember anything Cursor writes about my home directory"
+Output:
+{
+  "id": "draft",
+  "name": "Redact Cursor home-dir memory",
+  "nl_original": "don't remember anything Cursor writes about my home directory",
+  "kind": "audit",
+  "enabled": true,
+  "created_at": "1970-01-01T00:00:00Z",
+  "match": {
+    "all": [
+      {"leaf": {"field": "kind", "op": "eq", "value": "memory_write_attempted"}},
+      {"leaf": {"field": "data.caller", "op": "eq", "value": "mcp:cursor"}},
+      {"leaf": {"field": "data.content_preview", "op": "contains", "value": "/Users/"}}
+    ]
+  },
+  "action": {"type": "redact_memory"},
+  "cooldown_seconds": 0
+}
 "#;
 
 const OUTPUT_INSTRUCTIONS: &str = r#"
@@ -260,5 +315,32 @@ mod tests {
         assert!(p.contains("missing field `kind`"));
         assert!(p.contains("bad json"));
         assert!(p.contains("rule"));
+    }
+
+    #[test]
+    fn system_prompt_describes_redact_memory_action() {
+        let p = system_prompt(&[]);
+        assert!(
+            p.contains("redact_memory"),
+            "redact_memory action variant must appear in the prompt so the LLM knows it exists"
+        );
+        assert!(
+            p.contains("memory_write_attempted"),
+            "memory_write_attempted event kind must appear so the matcher field paths are documented"
+        );
+    }
+
+    #[test]
+    fn system_prompt_includes_redact_memory_few_shot() {
+        // Two redact_memory examples — content-based and caller-scoped.
+        let p = system_prompt(&[]);
+        assert!(
+            p.contains("bank.example.com"),
+            "few-shot example for content-based memory redaction must be present"
+        );
+        assert!(
+            p.contains("Redact Cursor home-dir memory"),
+            "few-shot example for caller-scoped memory redaction must be present"
+        );
     }
 }

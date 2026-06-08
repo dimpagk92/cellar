@@ -1,0 +1,24 @@
+[package]
+name = "cel-spaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL Spaces / virtual-desktop control via private SkyLight APIs (capability-gated)"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "0.10", optional = true }
+
+[features]
+# OFF by default: normal builds get safe stubs and never link the private
+# SkyLight framework. Enable `spaces` to compile the real FFI. A runtime
+# version/connection probe is the second safety net (see lib.rs).
+default = []
+spaces = ["dep:core-foundation"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

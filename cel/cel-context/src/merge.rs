@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use crate::element::{Bounds, ContentRole, ContextElement, ContextSource, ScreenContext};
 use cel_accessibility::{AccessibilityElement, AccessibilityTree, ElementRole};
-use cel_display::ScreenCapture;
+use cel_display::{Frame, ScreenCapture};
 use cel_network::{NetworkEvent, NetworkMonitor};
 use cel_signals::SignalBus;
 use cel_vision::VisionProvider;
@@ -11,6 +11,11 @@ use std::time::{Duration, Instant};
 /// below which the vision fallback is triggered.
 /// Set to 5 to avoid unnecessary vision calls on simple dialogs (OK/Cancel = 2 buttons).
 const VISION_FALLBACK_THRESHOLD: usize = 5;
+/// How long an OCR fallback result is reused before re-recognizing. A
+/// full-screen Vision OCR is ~100-500ms, so without this throttle it would run
+/// on every sparse tick; 1s caps the overhead while staying fresh enough for a
+/// last-resort perception tier.
+const OCR_CACHE_TTL: Duration = Duration::from_millis(1000);
 const GENERIC_ACTION_LABELS: &[&str] = &[
     "open",
     "close",
@@ -138,6 +143,20 @@ pub struct ContextMerger {
     /// missing AX trust, AX-hostile foreground apps). Cleared on
     /// recovery so the next failure WARNs again.
     last_ax_error: Option<String>,
+    /// Optional fallback that returns a Frame via CDP `Page.captureScreenshot`
+    /// when the host-display `capture_frame()` errors. On headless Linux
+    /// (Hetzner bench server, CI) xcap reports "no monitors found" /
+    /// "Connection error" because there's no X server or framebuffer —
+    /// without this fallback the vision tier is permanently dark on those
+    /// hosts. The closure is invoked SYNCHRONOUSLY so callers that need
+    /// to await CDP must wrap their async screenshot in their own
+    /// `block_on` (`Cortex::build_cdp_screenshot_fallback` does this).
+    cdp_screenshot_fallback: Option<Box<dyn Fn() -> Option<Frame> + Send + Sync>>,
+    /// Throttle for the OCR fallback. A full-screen Vision OCR is ~100-500ms,
+    /// so its result is reused for up to `OCR_CACHE_TTL` rather than re-run on
+    /// every sparse tick. Stores (recognized-at, raw OCR elements pre-dedup);
+    /// the per-tick dedup against the live element set still runs each call.
+    last_ocr: Option<(Instant, Vec<ContextElement>)>,
 }
 
 impl ContextMerger {
@@ -155,6 +174,8 @@ impl ContextMerger {
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started: false,
             last_ax_error: None,
+            cdp_screenshot_fallback: None,
+            last_ocr: None,
         }
     }
 
@@ -176,6 +197,8 @@ impl ContextMerger {
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started: false,
             last_ax_error: None,
+            cdp_screenshot_fallback: None,
+            last_ocr: None,
         }
     }
 
@@ -206,7 +229,24 @@ impl ContextMerger {
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started,
             last_ax_error: None,
+            cdp_screenshot_fallback: None,
+            last_ocr: None,
         }
+    }
+
+    /// Attach a CDP-screenshot fallback used when host display capture fails.
+    /// The closure runs synchronously from `run_vision_fallback`, so it
+    /// must perform its own `block_on` if it wraps an async CDP call
+    /// (see `Cortex::build_cdp_screenshot_fallback`). Return `None` to
+    /// mean "CDP can't help either" — vision is skipped for this tick.
+    /// Designed for headless Linux (Hetzner bench server / CI) where
+    /// xcap reports "no monitors found" and host capture is unavailable.
+    pub fn with_cdp_screenshot_fallback<F>(mut self, fallback: F) -> Self
+    where
+        F: Fn() -> Option<Frame> + Send + Sync + 'static,
+    {
+        self.cdp_screenshot_fallback = Some(Box::new(fallback));
+        self
     }
 
     /// Attach a vision provider for automatic fallback when accessibility is insufficient.
@@ -329,13 +369,23 @@ impl ContextMerger {
             }
         }
 
-        // Vision fallback: if too few actionable elements, capture screen and run vision
+        // Vision fallback: if too few actionable elements, capture screen and run vision.
         let actionable_count = elements
             .iter()
             .filter(|e| is_actionable_type(&e.element_type) && e.state.enabled && e.state.visible)
             .count();
 
-        if actionable_count < self.vision_threshold {
+        // CEL_VISION_ALWAYS=1 forces vision EVERY tick when ANY vision
+        // provider is configured. Designed for benchmarks (WebVoyager,
+        // Mind2Web) where DOM-only perception loses to anti-bot pages,
+        // image-heavy layouts, and "find the green button" tasks that
+        // need visual reasoning. Off by default — pay the per-tick
+        // vision cost (~1-5s + LLM call) only when explicitly enabled.
+        let always_vision = std::env::var("CEL_VISION_ALWAYS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if always_vision || actionable_count < self.vision_threshold {
             if let Some(vision_elements) = self.run_vision_fallback() {
                 for ve in vision_elements {
                     // Check if an a11y element overlaps this vision element.
@@ -371,6 +421,10 @@ impl ContextMerger {
                 }
             }
         }
+
+        // NOTE: the OCR last-resort fallback runs in the cortex tick AFTER the
+        // CDP/adapter merge (so it dedups against the full element set, not just
+        // AX+vision). See `run_ocr_fallback`, called from `tick.rs`.
 
         // Drain network events (supplementary context)
         if let Some(ref mut net) = self.network {
@@ -507,18 +561,54 @@ impl ContextMerger {
 
     /// Run vision analysis on the current screen, returning ContextElements.
     /// Returns None if vision is not configured or capture/analysis fails.
-    fn run_vision_fallback(&mut self) -> Option<Vec<ContextElement>> {
-        let vision = self.vision.as_ref()?;
-        let display = self.display.as_mut()?;
-        let runtime = self.runtime.as_ref()?;
-
-        let frame = match display.capture_frame() {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!("Vision fallback: capture failed: {}", e);
-                return None;
+    /// Capture a screenshot `Frame` for a perception fallback.
+    ///
+    /// Host-display capture first (xcap on macOS / X11 / Wayland). On headless
+    /// Linux (bench server, CI) that errors ("no monitors found") because no
+    /// display server is attached, so we fall back to the CDP-bound browser's
+    /// `Page.captureScreenshot` when available. Shared by the vision and OCR
+    /// fallbacks.
+    fn capture_screen_frame(&mut self) -> Option<Frame> {
+        match self.display.as_mut().map(|d| d.capture_frame()) {
+            Some(Ok(f)) => Some(f),
+            Some(Err(host_err)) => {
+                if let Some(fb) = &self.cdp_screenshot_fallback {
+                    if let Some(cdp_frame) = fb() {
+                        tracing::debug!(
+                            "perception fallback: host capture failed ({host_err}); using CDP screenshot"
+                        );
+                        Some(cdp_frame)
+                    } else {
+                        tracing::warn!(
+                            "perception fallback: capture failed: {host_err} (CDP fallback returned None — no bound browser?)"
+                        );
+                        None
+                    }
+                } else {
+                    tracing::warn!("perception fallback: capture failed: {host_err}");
+                    None
+                }
             }
-        };
+            None => {
+                // No display configured at all. Try CDP directly.
+                let fb = self.cdp_screenshot_fallback.as_ref()?;
+                let cdp_frame = fb()?;
+                tracing::debug!("perception fallback: no host display; using CDP screenshot");
+                Some(cdp_frame)
+            }
+        }
+    }
+
+    fn run_vision_fallback(&mut self) -> Option<Vec<ContextElement>> {
+        // Require vision + runtime, but release the borrows before the
+        // `&mut self` frame capture below.
+        self.vision.as_ref()?;
+        self.runtime.as_ref()?;
+
+        let frame = self.capture_screen_frame()?;
+
+        let vision = self.vision.as_ref()?;
+        let runtime = self.runtime.as_ref()?;
 
         tracing::info!("Running vision fallback ({} provider)", vision.name());
 
@@ -573,6 +663,90 @@ impl ContextMerger {
         } else {
             Some(context_elements)
         }
+    }
+
+    /// On-device OCR **last-resort** fallback for AX-less surfaces.
+    ///
+    /// Called from the cortex tick *after* every structured source (AX, vision,
+    /// CDP, adapters) has merged into `existing`, so OCR only ever adds text
+    /// that nothing richer already covers — in particular `<canvas>` / WebGL /
+    /// PDF / image content that the CDP DOM walk is blind to.
+    ///
+    /// Self-gating: returns empty unless `CEL_OCR_FALLBACK` is set AND
+    /// `existing` is still sparse (few actionable elements). Then it captures
+    /// the screen, recognizes text via the macOS Vision framework (local,
+    /// deterministic, no LLM), and returns only the recognized lines whose
+    /// bounds don't overlap an existing element.
+    pub fn run_ocr_fallback(&mut self, existing: &[ContextElement]) -> Vec<ContextElement> {
+        if !ocr_fallback_enabled() || !cel_ocr::ocr_available() {
+            return Vec::new();
+        }
+        // Only when the full model is still sparse. OCR is the last resort, not
+        // a supplement to a page CDP/AX already mapped richly.
+        let actionable = existing
+            .iter()
+            .filter(|e| is_actionable_type(&e.element_type) && e.state.enabled && e.state.visible)
+            .count();
+        if actionable >= self.vision_threshold {
+            return Vec::new();
+        }
+        // Reuse a recent OCR pass when one is still warm — a full-screen
+        // recognize is ~100-500ms, so re-running it on every sparse tick would
+        // stall the loop. The per-tick dedup below still runs on the live set,
+        // so cached text is re-checked against whatever AX/CDP found this tick.
+        let cached = match &self.last_ocr {
+            Some((at, els)) if at.elapsed() < OCR_CACHE_TTL => Some(els.clone()),
+            _ => None,
+        };
+        let raw: Vec<ContextElement> = if let Some(els) = cached {
+            els
+        } else {
+            let Some(frame) = self.capture_screen_frame() else {
+                return Vec::new();
+            };
+            let png = match cel_display::encode_png(&frame) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("OCR fallback: PNG encode failed: {e}");
+                    return Vec::new();
+                }
+            };
+            let lines = match cel_ocr::recognize_text(&png) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("OCR fallback: recognize failed: {e}");
+                    return Vec::new();
+                }
+            };
+            let els: Vec<ContextElement> = lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| ocr_line_to_element(l, i))
+                .collect();
+            self.last_ocr = Some((Instant::now(), els.clone()));
+            els
+        };
+
+        // Keep only OCR text that no existing (AX / vision / CDP / adapter)
+        // element already covers — OCR fills the gaps, it doesn't duplicate.
+        let fresh: Vec<ContextElement> = raw
+            .into_iter()
+            .filter(|oe| {
+                !existing.iter().any(|e| {
+                    matches!(
+                        (&e.bounds, &oe.bounds),
+                        (Some(eb), Some(ob)) if bounds_overlap(eb, ob) > 0.5
+                    )
+                })
+            })
+            .collect();
+        if !fresh.is_empty() {
+            tracing::info!(
+                "OCR fallback added {} text line(s) on an AX-less surface",
+                fresh.len()
+            );
+        }
+        fresh
     }
 
     /// Detect the foreground application and window title.
@@ -1310,6 +1484,44 @@ fn context_richness_cached(
 }
 
 /// Compute intersection-over-union of two bounding boxes.
+/// Whether the OCR perception fallback is enabled (`CEL_OCR_FALLBACK` truthy).
+/// Off by default: a full-screen Vision OCR costs ~100-500ms, so it is opt-in
+/// until a host wants deterministic text on AX-less surfaces.
+fn ocr_fallback_enabled() -> bool {
+    std::env::var("CEL_OCR_FALLBACK")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Convert one OCR-recognized line into a [`ContextElement`]. Pure (unit-tested).
+///
+/// OCR text is classified `Content` (read, don't execute — it is untrusted
+/// pixel text, same trust tier as VLM-read text) but carries pixel bounds, so
+/// the planner can still target it as a click site on an AX-less surface. The
+/// id is `ocr:<index>`, matching the `vision:<index>` convention.
+fn ocr_line_to_element(line: &cel_ocr::OcrLine, i: usize) -> ContextElement {
+    ContextElement {
+        id: format!("ocr:{i}"),
+        label: Some(line.text.clone()),
+        description: None,
+        element_type: "text".to_string(),
+        value: None,
+        bounds: Some(Bounds {
+            x: line.bounds.x.round() as i32,
+            y: line.bounds.y.round() as i32,
+            width: line.bounds.width.round().max(0.0) as u32,
+            height: line.bounds.height.round().max(0.0) as u32,
+        }),
+        state: cel_accessibility::ElementState::default_visible(),
+        parent_id: None,
+        actions: vec![],
+        confidence: line.confidence as f64,
+        source: ContextSource::Ocr,
+        content_role: ContentRole::Content,
+        properties: std::collections::HashMap::new(),
+    }
+}
+
 fn bounds_overlap(a: &Bounds, b: &Bounds) -> f64 {
     let ax2 = a.x.saturating_add(a.width as i32);
     let ay2 = a.y.saturating_add(a.height as i32);
@@ -1340,6 +1552,36 @@ fn bounds_overlap(a: &Bounds, b: &Bounds) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ocr_line_maps_to_content_element_with_pixel_bounds() {
+        let line = cel_ocr::OcrLine {
+            text: "Invoice 12345".into(),
+            confidence: 0.97,
+            bounds: cel_ocr::OcrBounds {
+                x: 10.4,
+                y: 20.6,
+                width: 100.2,
+                height: 18.9,
+            },
+        };
+        let el = ocr_line_to_element(&line, 3);
+        assert_eq!(el.id, "ocr:3");
+        assert_eq!(el.label.as_deref(), Some("Invoice 12345"));
+        assert_eq!(el.source, ContextSource::Ocr);
+        // OCR text is untrusted content — read, don't execute.
+        assert_eq!(el.content_role, ContentRole::Content);
+        // f64 OCR bounds round to integer pixel Bounds.
+        let b = el.bounds.expect("ocr element has bounds");
+        assert_eq!((b.x, b.y, b.width, b.height), (10, 21, 100, 19));
+    }
+
+    #[test]
+    fn ocr_fallback_off_without_env() {
+        // Default is opt-in: with the var unset, the fallback stays off.
+        std::env::remove_var("CEL_OCR_FALLBACK");
+        assert!(!ocr_fallback_enabled());
+    }
 
     #[test]
     fn test_bounds_overlap_full() {
@@ -1899,6 +2141,8 @@ mod tests {
             vision_threshold: VISION_FALLBACK_THRESHOLD,
             network_started: false,
             last_ax_error: None,
+            cdp_screenshot_fallback: None,
+            last_ocr: None,
         };
         assert!(merger.recent_network_events().is_empty());
     }

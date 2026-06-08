@@ -73,6 +73,54 @@ export const celSeeSchema = z.discriminatedUnion("mode", [
       ),
   }),
 
+  // --- region: capture a sub-rectangle of a display (WS18) ---
+  z.object({
+    mode: z.literal("region"),
+    x: z.number().int().min(0).describe("Region left edge, px from display top-left."),
+    y: z.number().int().min(0).describe("Region top edge, px from display top-left."),
+    width: z.number().int().positive().describe("Region width in px."),
+    height: z.number().int().positive().describe("Region height in px."),
+    display_id: z
+      .number()
+      .optional()
+      .describe(
+        "Optional monitor id (from cel_see mode 'monitors'). When omitted, " +
+          "captures from the display containing the frontmost app's key window. " +
+          "The region is clamped to the display bounds.",
+      ),
+  }),
+
+  // --- ocr: on-device text recognition (Vision), full display or a region ---
+  z.object({
+    mode: z.literal("ocr"),
+    x: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        "Optional region left edge, px from display top-left. Provide all of " +
+          "x/y/width/height to OCR a sub-rectangle; omit them to OCR the whole display.",
+      ),
+    y: z.number().int().min(0).optional().describe("Optional region top edge, px."),
+    width: z.number().int().positive().optional().describe("Optional region width, px."),
+    height: z.number().int().positive().optional().describe("Optional region height, px."),
+    display_id: z
+      .number()
+      .optional()
+      .describe("Optional monitor id (cel_see 'monitors'). Omit → the active display."),
+    fast: z
+      .boolean()
+      .optional()
+      .describe("Faster, lower-accuracy recognition pass (default: accurate)."),
+    min_confidence: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("Drop recognized lines below this confidence (0..1)."),
+  }),
+
   // --- observation: load a previously persisted observation snapshot ---
   z.object({
     mode: z.literal("observation"),
@@ -405,6 +453,71 @@ export async function handleCelSee(cel: Cel, args: Input) {
             },
           ],
         };
+      }
+
+      case "region": {
+        const buffer = cel.captureRegion(
+          args.x,
+          args.y,
+          args.width,
+          args.height,
+          args.display_id,
+        );
+        const base64 = buffer.toString("base64");
+        // Receipt: record exactly what rectangle/display was captured so the
+        // trust loop can cite the region alongside the returned pixels.
+        const receipt = JSON.stringify({
+          op: "capture_region",
+          region: {
+            x: args.x,
+            y: args.y,
+            width: args.width,
+            height: args.height,
+          },
+          display: args.display_id ?? "active",
+          bytes: buffer.length,
+        });
+        return {
+          content: [
+            { type: "image" as const, data: base64, mimeType: "image/png" },
+            { type: "text" as const, text: receipt },
+          ],
+        };
+      }
+
+      case "ocr": {
+        if (!cel.ocrAvailable()) {
+          return errorResult(
+            "OCR is unavailable on this platform (Vision is macOS-only).",
+          );
+        }
+        // OCR a sub-rectangle when a full region is given; otherwise the whole
+        // display. Reuses the well-tested capture path, then recognizes
+        // on-device (no LLM, no network).
+        const hasRegion =
+          args.x !== undefined &&
+          args.y !== undefined &&
+          args.width !== undefined &&
+          args.height !== undefined;
+        const buffer = hasRegion
+          ? cel.captureRegion(args.x!, args.y!, args.width!, args.height!, args.display_id)
+          : cel.captureScreen(args.display_id);
+        const { count, lines } = cel.ocr(buffer, {
+          fast: args.fast,
+          minConfidence: args.min_confidence,
+        });
+        // Receipt: record exactly what was captured + recognized so the trust
+        // loop can cite the source region alongside the extracted text.
+        return textResult({
+          op: "ocr",
+          source: hasRegion
+            ? { region: { x: args.x, y: args.y, width: args.width, height: args.height } }
+            : { display: args.display_id ?? "active" },
+          engine: "macos-vision",
+          level: args.fast ? "fast" : "accurate",
+          count,
+          lines,
+        });
       }
 
       case "observation": {

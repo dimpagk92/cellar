@@ -107,10 +107,41 @@ impl InputController for EnigoInput {
             .map_err(|e| InputError::Failed(e.to_string()))
     }
 
+    fn mouse_down(&mut self, x: i32, y: i32, button: MouseButton) -> Result<(), InputError> {
+        self.mouse_move(x, y)?;
+        // Same settle delay as click() — let the window server register the
+        // cursor position before the press lands.
+        thread::sleep(Duration::from_millis(10));
+        self.enigo
+            .button(map_button(button), Direction::Press)
+            .map_err(|e| InputError::Failed(e.to_string()))
+    }
+
+    fn mouse_up(&mut self, x: i32, y: i32, button: MouseButton) -> Result<(), InputError> {
+        self.mouse_move(x, y)?;
+        thread::sleep(Duration::from_millis(10));
+        self.enigo
+            .button(map_button(button), Direction::Release)
+            .map_err(|e| InputError::Failed(e.to_string()))
+    }
+
     fn type_text(&mut self, text: &str) -> Result<(), InputError> {
         self.enigo
             .text(text)
             .map_err(|e| InputError::Failed(e.to_string()))
+    }
+
+    fn type_text_cadence(&mut self, text: &str, delay_ms: u32) -> Result<(), InputError> {
+        if delay_ms == 0 {
+            return self.type_text(text);
+        }
+        for ch in text.chars() {
+            self.enigo
+                .text(&ch.to_string())
+                .map_err(|e| InputError::Failed(e.to_string()))?;
+            thread::sleep(Duration::from_millis(delay_ms as u64));
+        }
+        Ok(())
     }
 
     fn key_press(&mut self, key: &str) -> Result<(), InputError> {

@@ -17,7 +17,7 @@ pub enum InputError {
     ScriptingUnavailable { app: String, reason: String },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MouseButton {
     Left,
     Right,
@@ -99,6 +99,17 @@ pub trait InputController: Send + Sync {
     /// Double-click at absolute screen coordinates.
     fn double_click(&mut self, x: i32, y: i32, button: MouseButton) -> Result<(), InputError>;
 
+    /// Press (and hold) a mouse button at absolute screen coordinates — the
+    /// mouse counterpart to [`key_down`](Self::key_down). Pairs with
+    /// [`mouse_up`](Self::mouse_up) to drive faithful press-drag-release
+    /// (move the pointer between the two), or any drag-and-hold interaction a
+    /// single [`click`](Self::click) can't express.
+    fn mouse_down(&mut self, x: i32, y: i32, button: MouseButton) -> Result<(), InputError>;
+
+    /// Release a held mouse button at absolute screen coordinates — the mouse
+    /// counterpart to [`key_up`](Self::key_up).
+    fn mouse_up(&mut self, x: i32, y: i32, button: MouseButton) -> Result<(), InputError>;
+
     /// Type a string of text (uses fast unicode input).
     fn type_text(&mut self, text: &str) -> Result<(), InputError>;
 
@@ -110,6 +121,27 @@ pub trait InputController: Send + Sync {
 
     /// Scroll at the current mouse position.
     fn scroll(&mut self, dx: i32, dy: i32) -> Result<(), InputError>;
+
+    /// Perform a directional swipe at the current pointer — a distinct gesture
+    /// verb implemented as a scroll in `direction` (`up` | `down` | `left` |
+    /// `right`) by `amount` units. (True multi-touch trackpad swipes need
+    /// private gesture APIs; this is the portable, reliable approximation;
+    /// the exact sign convention is calibrated against a live trackpad.)
+    fn swipe(&mut self, direction: &str, amount: i32) -> Result<(), InputError> {
+        let amount = amount.abs();
+        let (dx, dy) = match direction.to_ascii_lowercase().as_str() {
+            "up" => (0, amount),
+            "down" => (0, -amount),
+            "left" => (-amount, 0),
+            "right" => (amount, 0),
+            other => {
+                return Err(InputError::InvalidKey(format!(
+                    "swipe direction `{other}` (use up | down | left | right)"
+                )))
+            }
+        };
+        self.scroll(dx, dy)
+    }
 
     /// Get the current mouse cursor position as (x, y).
     fn mouse_position(&self) -> Result<(i32, i32), InputError>;
@@ -141,4 +173,12 @@ pub trait InputController: Send + Sync {
     /// Move the mouse smoothly from current position to target with human-like interpolation.
     /// `duration_ms`: how long the movement should take (0 = instant, like mouse_move).
     fn mouse_move_smooth(&mut self, x: i32, y: i32, duration_ms: u32) -> Result<(), InputError>;
+
+    /// Type text with a per-character delay for human-like cadence (WS8).
+    /// `delay_ms` = 0 types instantly (identical to `type_text`). The default
+    /// impl ignores cadence; backends override for real per-key timing.
+    fn type_text_cadence(&mut self, text: &str, delay_ms: u32) -> Result<(), InputError> {
+        let _ = delay_ms;
+        self.type_text(text)
+    }
 }

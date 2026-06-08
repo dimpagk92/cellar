@@ -5,10 +5,8 @@ All notable changes to `cel-memory` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Pre-`0.1.0` versions develop in-workspace as part of [Cellar](https://github.com/dimpagk92/cellar);
-the first published release on crates.io will be `0.1.0`. See
-[`plans/cellar-oss-extraction-prep.md`](../../plans/cellar-oss-extraction-prep.md)
-for the extraction roadmap.
+Pre-`0.1.0` versions develop in-workspace as part of the Cellar project; the
+first published release on crates.io will be `0.1.0`.
 
 ## [Unreleased]
 

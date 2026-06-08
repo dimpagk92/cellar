@@ -1,0 +1,11 @@
+# Pin the Rust toolchain so CI and local development lint, build, and test
+# against the *same* compiler. Previously CI floated on `stable`
+# (`dtolnay/rust-toolchain@stable`), which let rust 1.95.0 silently introduce
+# new clippy lints (e.g. `manual_pattern_char_comparison`) that surfaced as a
+# surprise red build with no source change.
+#
+# To bump: change `channel` here, run `cargo clippy --workspace --all-targets
+# -- -D warnings`, fix any new-lint fallout in the same commit, then land it.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]

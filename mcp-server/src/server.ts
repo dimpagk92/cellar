@@ -5,6 +5,9 @@ import { celSeeSchema, handleCelSee } from "./tools/cel-see.js";
 import { celActSchema, handleCelAct } from "./tools/cel-act.js";
 import { celThinkSchema, handleCelThink } from "./tools/cel-think.js";
 import { celPerceiveSchema, handleCelPerceive } from "./tools/cel-perceive.js";
+import { celRememberSchema, handleCelRemember } from "./tools/cel-remember.js";
+import { celRecallSchema, handleCelRecall } from "./tools/cel-recall.js";
+import { celForgetSchema, handleCelForget } from "./tools/cel-forget.js";
 import { registerPrompts } from "./prompts.js";
 import { registerScreenResources } from "./resources.js";
 
@@ -355,6 +358,68 @@ export function createCelMcpServer(cel?: Cel): McpServer {
       inputSchema: celPerceiveSchema,
     },
     degraded ? stubHandler : async (args) => handleCelPerceive(instance, args),
+  );
+
+  // ───── Cellar Memory Manager — cel_remember / cel_recall / cel_forget ─────
+  //
+  // These three tools surface the daemon's Cellar memory store
+  // (~/.cellar/memory.sqlite, owned by cel-cortex-daemon) to external MCP
+  // clients. Each call is scoped by caller_id (`mcp:<client>`) so two
+  // clients have isolated views by default; explicit shareable=true on a
+  // write surfaces it to any caller using scope=own_plus_shared.
+
+  server.registerTool(
+    "cel_remember",
+    {
+      title: "CEL Remember",
+      description:
+        "Persist a memory chunk against the user's local Cellar memory store. The chunk is " +
+          "scoped to this MCP client (`mcp:<client>`); other clients won't see it unless you " +
+          "mark it `shareable: true`.\n\n" +
+          "Use for: durable assistant context (chat turns, observations, corrections, file/" +
+          "project focus episodes). Not for ephemeral working memory — that's the caller's job.\n\n" +
+          "Returns the persisted chunk including the provider-assigned `id`, `created_at`, " +
+          "and `caller_id`. Subject to the user's rule matcher — a `redact_memory` rule can " +
+          "veto a write (the returned chunk's `metadata.redacted` is then true).",
+      inputSchema: celRememberSchema,
+    },
+    degraded ? stubHandler : async (args) => handleCelRemember(instance, args),
+  );
+
+  server.registerTool(
+    "cel_recall",
+    {
+      title: "CEL Recall",
+      description:
+        "Hybrid retrieve (vector + FTS + recency) over the user's Cellar memory store. Returns " +
+          "the top-k chunks ranked by fused score.\n\n" +
+          "Scope: defaults to `own` (only chunks this client wrote). Use `own_plus_shared` to " +
+          "additionally surface chunks other clients marked shareable=true (cross-tool " +
+          "preferences). `global` is reserved for the Memory tab and audit timeline.\n\n" +
+          "Tuning: `min_importance` filters out low-signal chunks; `kind` narrows to specific " +
+          "categories (corrections, observations, etc.); `session_id` restricts to one " +
+          "conversation. The retriever's recall@5 target is >= 0.85.",
+      inputSchema: celRecallSchema,
+    },
+    degraded ? stubHandler : async (args) => handleCelRecall(instance, args),
+  );
+
+  server.registerTool(
+    "cel_forget",
+    {
+      title: "CEL Forget",
+      description:
+        "Delete chunks from the user's Cellar memory store. Two modes, mutually exclusive:\n\n" +
+          "1. `chunk_ids`: exact IDs to delete. Only chunks owned by this MCP client are " +
+          "actually deleted; ids owned by other callers are silently skipped.\n" +
+          "2. `predicate`: criteria-based delete. Combine `kind`, `older_than`, and `tag` " +
+          "(ANDed). Always scoped to this caller's chunks.\n\n" +
+          "Returns the count actually deleted. Every deletion emits an EvictionLog row with " +
+          "reason `user_delete` so the Memory tab's eviction audit reflects this call. " +
+          "Idempotent — re-running with the same ids returns 0 for the second invocation.",
+      inputSchema: celForgetSchema,
+    },
+    degraded ? stubHandler : async (args) => handleCelForget(instance, args),
   );
 
   registerPrompts(server);

@@ -41,9 +41,13 @@ impl Drop for Client {
     }
 }
 
-type PendingMap = Mutex<std::collections::HashMap<String, oneshot::Sender<RpcResult>>>;
+type PendingMap = Mutex<std::collections::HashMap<String, oneshot::Sender<RpcEnvelope>>>;
 
 type RpcResult = Result<Value, crate::envelope::JsonRpcError>;
+
+/// What the reader task hands back to the waiting `call_inner`: the
+/// JSON-RPC result/error plus the daemon-echoed `trace_id` (when present).
+type RpcEnvelope = (RpcResult, Option<String>);
 
 /// A notification (subscription frame, ping, etc.) the server pushed without
 /// being asked.
@@ -54,6 +58,11 @@ pub struct NotificationMessage {
     /// Notification params; for subscription frames this deserialises into
     /// a [`StreamFrame`].
     pub params: Value,
+    /// Optional correlation token from the originating subscribe request.
+    /// For subscription frames this echoes whatever `trace_id` the
+    /// `*.subscribe` call carried; for ad-hoc server-initiated
+    /// notifications (`system.ping`) the field is `None`.
+    pub trace_id: Option<String>,
 }
 
 impl Client {
@@ -85,12 +94,13 @@ impl Client {
                     Ok(Some(Message::Response(resp))) => {
                         let id_key = resp.id.as_ref().map(|id| id.to_str()).unwrap_or_default();
                         if let Some(tx) = pending_cl.lock().await.remove(&id_key) {
+                            let trace_id = resp.trace_id.clone();
                             let payload = if let Some(err) = resp.error {
                                 Err(err)
                             } else {
                                 Ok(resp.result.unwrap_or(Value::Null))
                             };
-                            let _ = tx.send(payload);
+                            let _ = tx.send((payload, trace_id));
                         } else {
                             tracing::debug!(id = id_key, "orphan response ignored");
                         }
@@ -102,6 +112,7 @@ impl Client {
                             let n = NotificationMessage {
                                 method: req.method,
                                 params: req.params.unwrap_or(Value::Null),
+                                trace_id: req.trace_id,
                             };
                             if notif_tx_cl.send(n).await.is_err() {
                                 break;
@@ -123,11 +134,14 @@ impl Client {
             // Signal any waiters that the connection is gone.
             let mut map = pending_cl.lock().await;
             for (_id, tx) in map.drain() {
-                let _ = tx.send(Err(crate::envelope::JsonRpcError {
-                    code: -32603,
-                    message: "connection closed".into(),
-                    data: None,
-                }));
+                let _ = tx.send((
+                    Err(crate::envelope::JsonRpcError {
+                        code: -32603,
+                        message: "connection closed".into(),
+                        data: None,
+                    }),
+                    None,
+                ));
             }
         });
 
@@ -147,8 +161,49 @@ impl Client {
         ))
     }
 
-    /// Make an RPC call with typed params and typed response.
+    /// Make an RPC call with typed params and typed response. The daemon
+    /// mints a fresh trace_id server-side for correlation; use
+    /// [`Self::call_with_trace`] to supply one (e.g., from the Tauri
+    /// command's UUID v7 so the UI action and daemon log lines share an
+    /// id).
     pub async fn call<P, R>(&self, method: &str, params: P) -> IpcResult<R>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        self.call_inner(method, params, None).await.map(|(r, _)| r)
+    }
+
+    /// Make an RPC call with typed params, typed response, and an
+    /// explicit `trace_id` to propagate through the daemon's structured
+    /// logs and any subscription frames produced by this call. Returns
+    /// the typed result alongside the `trace_id` the daemon echoed back
+    /// (always the one supplied here, but returned for completeness so
+    /// callers can use the same code path for both call variants).
+    pub async fn call_with_trace<P, R>(
+        &self,
+        method: &str,
+        params: P,
+        trace_id: impl Into<String>,
+    ) -> IpcResult<(R, Option<String>)>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        self.call_inner(method, params, Some(trace_id.into())).await
+    }
+
+    /// Shared call body. Returns the parsed result alongside the
+    /// daemon-echoed `trace_id` (the daemon always echoes a trace_id —
+    /// the client's when supplied, a freshly minted one otherwise — so
+    /// callers that didn't pass one can still discover what the daemon
+    /// stamped on the request).
+    async fn call_inner<P, R>(
+        &self,
+        method: &str,
+        params: P,
+        trace_id: Option<String>,
+    ) -> IpcResult<(R, Option<String>)>
     where
         P: Serialize,
         R: DeserializeOwned,
@@ -157,7 +212,10 @@ impl Client {
         let id_key = id.to_str();
         let params_v = serde_json::to_value(&params)
             .map_err(|e| IpcError::Codec(format!("serialize params: {e}")))?;
-        let req = JsonRpcRequest::new(id.clone(), method, params_v);
+        let req = match trace_id {
+            Some(t) => JsonRpcRequest::new_with_trace(id.clone(), method, params_v, t),
+            None => JsonRpcRequest::new(id.clone(), method, params_v),
+        };
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id_key.clone(), tx);
@@ -171,9 +229,10 @@ impl Client {
             }
         }
 
-        let resp = rx.await.map_err(|_| IpcError::ConnectionClosed)?;
+        let (resp, echoed_trace_id) = rx.await.map_err(|_| IpcError::ConnectionClosed)?;
         match resp {
             Ok(v) => serde_json::from_value(v)
+                .map(|r| (r, echoed_trace_id))
                 .map_err(|e| IpcError::Codec(format!("deserialize result: {e}"))),
             Err(err) => Err(map_jsonrpc_error(err)),
         }

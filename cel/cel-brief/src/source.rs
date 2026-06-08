@@ -1,6 +1,6 @@
 //! [`Source`] trait + [`Contribution`] + [`ContributionContent`] + [`SourceError`].
 //!
-//! Implements plan §5. A `Source` is the unit of pluggability: every per-turn
+//! A `Source` is the unit of pluggability: every per-turn
 //! input — memory, perception, history, tools, the user message — implements
 //! the same trait, returns the same [`Contribution`] shape, and is composed
 //! by [`crate::builder::BriefBuilder`] (Phase 2). The crate has zero opinions
@@ -92,9 +92,9 @@ pub struct Contribution {
     /// Free-form tags (e.g. `"summary"`, `"recent"`) used by governance and
     /// debugging.
     ///
-    /// Plan §5 sketches this as `Vec<&'static str>`; Phase 1 widens it to
+    /// Originally sketched as `Vec<&'static str>`, widened to
     /// `Vec<String>` so [`Contribution`] can satisfy [`serde::Deserialize`]
-    /// — required by plan §9 Phase 1 ("Serde impls for all types"). Static
+    /// — required so all brief types round-trip through serde. Static
     /// callers pay one allocation per tag; receipt-side consumers gain
     /// round-trippability.
     #[serde(default)]

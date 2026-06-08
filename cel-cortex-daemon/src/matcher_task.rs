@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use cel_act_gateway::{CooldownTracker, FiredRuleSnapshot, RuleSource, WebhookHook};
 use cel_memory::{ChunkKind, ChunkSource, MemoryProvider, NewMemoryChunk};
+use cellar_ipc::params::confirmation::{PendingConfirmation, PendingRule};
 use cellar_types::{matcher::WatchlistLookup, ActionType, Event, EventKind, Matcher, Rule};
 use chrono::Utc;
 use serde_json::json;
@@ -31,12 +32,27 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::bus::EventBus;
+use crate::confirmation::IpcConfirmationBroker;
 use crate::fire_bus::{FireBus, FireFrame};
 
 /// Stable `caller_id` written into every `Fire` chunk this task produces.
 /// Lets retrievals filter or scope by "this came from the rule matcher,
 /// not from the gateway or an external MCP client."
 pub const MATCHER_CALLER_ID: &str = "matcher";
+
+/// Borrowed bundle of every dependency [`process_event`] needs, so the
+/// hot-path signature stays at `(event, &ctx)` rather than positional args.
+/// Built once per spawned task (or per `run_once*` test call) and reused
+/// across every event.
+struct MatcherContext<'a, R, W> {
+    rules: &'a R,
+    watchlists: &'a W,
+    memory: &'a dyn MemoryProvider,
+    cooldown: Option<&'a CooldownTracker>,
+    webhook_hook: Option<&'a dyn WebhookHook>,
+    fire_bus: Option<&'a FireBus>,
+    confirmation: Option<&'a IpcConfirmationBroker>,
+}
 
 /// Spawn the matcher consumer task. Returns the [`JoinHandle`] so callers
 /// can `.await` shutdown if desired; in normal operation the task lives
@@ -45,6 +61,13 @@ pub const MATCHER_CALLER_ID: &str = "matcher";
 /// All deps are `Arc`-wrapped because the task is a `'static` future. The
 /// optional `cooldown` is shared with the gateway so per-rule cooldown
 /// windows count fires from either path.
+///
+/// `confirmation` is optional: when supplied, rules whose action is
+/// [`ActionType::RequireConfirmation`] will enqueue a non-blocking pending
+/// confirmation so `confirmation.list_pending` / `confirmation.subscribe`
+/// clients surface it to the user. Unlike the gateway path, there is no
+/// action to block — the confirmation is informational / advisory.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn<R, W>(
     bus: &EventBus,
     rules: Arc<R>,
@@ -53,6 +76,7 @@ pub fn spawn<R, W>(
     cooldown: Option<Arc<CooldownTracker>>,
     webhook_hook: Option<Arc<dyn WebhookHook>>,
     fire_bus: Option<FireBus>,
+    confirmation: Option<Arc<IpcConfirmationBroker>>,
 ) -> JoinHandle<()>
 where
     R: RuleSource + 'static,
@@ -61,19 +85,19 @@ where
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         tracing::info!("matcher consumer task started");
+        let ctx = MatcherContext {
+            rules: rules.as_ref(),
+            watchlists: watchlists.as_ref(),
+            memory: memory.as_ref(),
+            cooldown: cooldown.as_deref(),
+            webhook_hook: webhook_hook.as_deref(),
+            fire_bus: fire_bus.as_ref(),
+            confirmation: confirmation.as_deref(),
+        };
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    process_event(
-                        &event,
-                        rules.as_ref(),
-                        watchlists.as_ref(),
-                        memory.as_ref(),
-                        cooldown.as_deref(),
-                        webhook_hook.as_deref(),
-                        fire_bus.as_ref(),
-                    )
-                    .await;
+                    process_event(&event, &ctx).await;
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!(dropped = n, "matcher consumer task lagged behind event bus");
@@ -95,7 +119,16 @@ where
     R: RuleSource,
     W: WatchlistLookup + Send + Sync,
 {
-    process_event(event, rules, watchlists, memory, None, None, None).await
+    let ctx = MatcherContext {
+        rules,
+        watchlists,
+        memory,
+        cooldown: None,
+        webhook_hook: None,
+        fire_bus: None,
+        confirmation: None,
+    };
+    process_event(event, &ctx).await
 }
 
 /// Variant of [`run_once`] that also consults a [`CooldownTracker`]. Used
@@ -110,7 +143,16 @@ pub async fn run_once_with_cooldown<R, W>(
     R: RuleSource,
     W: WatchlistLookup + Send + Sync,
 {
-    process_event(event, rules, watchlists, memory, Some(cooldown), None, None).await
+    let ctx = MatcherContext {
+        rules,
+        watchlists,
+        memory,
+        cooldown: Some(cooldown),
+        webhook_hook: None,
+        fire_bus: None,
+        confirmation: None,
+    };
+    process_event(event, &ctx).await
 }
 
 /// Variant of [`run_once`] that also calls a [`WebhookHook`] for any
@@ -129,27 +171,20 @@ pub async fn run_once_full<R, W>(
     R: RuleSource,
     W: WatchlistLookup + Send + Sync,
 {
-    process_event(
-        event,
+    let ctx = MatcherContext {
         rules,
         watchlists,
         memory,
         cooldown,
         webhook_hook,
         fire_bus,
-    )
-    .await
+        confirmation: None,
+    };
+    process_event(event, &ctx).await
 }
 
-async fn process_event<R, W>(
-    event: &Event,
-    rules: &R,
-    watchlists: &W,
-    memory: &dyn MemoryProvider,
-    cooldown: Option<&CooldownTracker>,
-    webhook_hook: Option<&dyn WebhookHook>,
-    fire_bus: Option<&FireBus>,
-) where
+async fn process_event<R, W>(event: &Event, ctx: &MatcherContext<'_, R, W>)
+where
     R: RuleSource,
     W: WatchlistLookup + Send + Sync,
 {
@@ -159,8 +194,8 @@ async fn process_event<R, W>(
         return;
     }
 
-    let rules_snapshot = rules.snapshot();
-    let fired = Matcher::evaluate(event, &rules_snapshot, watchlists);
+    let rules_snapshot = ctx.rules.snapshot();
+    let fired = Matcher::evaluate(event, &rules_snapshot, ctx.watchlists);
 
     for matched in fired {
         // Cooldown gate: a rule still within its `cooldown_seconds` window
@@ -168,7 +203,7 @@ async fn process_event<R, W>(
         // gateway uses the same tracker for its own intercept path so a
         // rule that fires through one path can't be re-fired through the
         // other within the window.
-        if let Some(cd) = cooldown {
+        if let Some(cd) = ctx.cooldown {
             if !cd.try_fire(&matched.rule.id, matched.rule.cooldown_seconds) {
                 tracing::trace!(
                     rule_id = %matched.rule.id,
@@ -179,7 +214,7 @@ async fn process_event<R, W>(
             }
         }
 
-        if let Err(e) = write_fire_chunk(memory, matched.rule, event).await {
+        if let Err(e) = write_fire_chunk(ctx.memory, matched.rule, event).await {
             tracing::error!(
                 error = %e,
                 rule_id = %matched.rule.id,
@@ -189,14 +224,14 @@ async fn process_event<R, W>(
         }
 
         // Publish to the fire bus for `fires.subscribe` / `fires.recent`.
-        if let Some(fb) = fire_bus {
+        if let Some(fb) = ctx.fire_bus {
             fb.publish(build_fire_frame(matched.rule, event));
         }
 
         // Webhook fan-out for ambient-event matches. The hook owns its
         // own retry queue, so this returns near-immediately; HTTP failures
         // are logged inside the hook, not propagated here.
-        if let Some(hook) = webhook_hook {
+        if let Some(hook) = ctx.webhook_hook {
             if matches!(matched.rule.action.action_type, ActionType::Webhook) {
                 let snap = FiredRuleSnapshot {
                     rule_id: matched.rule.id.clone(),
@@ -207,6 +242,46 @@ async fn process_event<R, W>(
                     webhook_id: matched.rule.action.webhook_id.clone(),
                 };
                 hook.deliver(&snap, event).await;
+            }
+        }
+
+        // Confirmation enqueue for ambient-event require_confirmation rules.
+        // Unlike the gateway path (which blocks), this is advisory: the
+        // confirmation appears in the pending list so the UI / CLI can surface
+        // it, but there is no action to block or unblock.
+        if let Some(broker) = ctx.confirmation {
+            if matches!(
+                matched.rule.action.action_type,
+                ActionType::RequireConfirmation
+            ) {
+                let timeout_s = matched.rule.action.timeout_s.unwrap_or(60);
+                let now = Utc::now();
+                let expires_at = now + chrono::Duration::seconds(timeout_s as i64);
+                let id = Uuid::now_v7().to_string();
+                let event_json = serde_json::to_value(event).unwrap_or_default();
+                let pending = PendingConfirmation {
+                    id: id.clone(),
+                    created_at: now,
+                    expires_at,
+                    rule: PendingRule {
+                        id: matched.rule.id.clone(),
+                        name: matched.rule.name.clone(),
+                        nl_original: matched.rule.nl_original.clone(),
+                    },
+                    event: event_json.clone(),
+                    originating_action: event_json,
+                    caller: serde_json::to_value(event.source)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_else(|| "matcher".to_string()),
+                    agent_session_id: None,
+                };
+                tracing::info!(
+                    rule_id = %matched.rule.id,
+                    confirmation_id = %id,
+                    "matcher: enqueuing advisory confirmation for require_confirmation rule"
+                );
+                broker.enqueue_confirmation(pending);
             }
         }
     }
@@ -302,6 +377,7 @@ fn action_type_str(action_type: &cellar_types::ActionType) -> &'static str {
         ActionType::Veto => "veto",
         ActionType::SoftBlock => "soft_block",
         ActionType::LogOnly => "log_only",
+        ActionType::RedactMemory => "redact_memory",
     }
 }
 
@@ -567,7 +643,16 @@ mod tests {
         let watchlists = Arc::new(InMemoryWatchlists::default());
 
         let bus = EventBus::new();
-        let handle = spawn(&bus, rules, watchlists, memory.clone(), None, None, None);
+        let handle = spawn(
+            &bus,
+            rules,
+            watchlists,
+            memory.clone(),
+            None,
+            None,
+            None,
+            None,
+        );
 
         // Give the task a moment to subscribe before we publish.
         tokio::task::yield_now().await;

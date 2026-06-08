@@ -26,3 +26,8 @@ pub struct SystemShutdownParams {
 fn default_drain_timeout() -> u64 {
     30
 }
+
+/// Params for `system.connected_clients`. Empty struct — included so the
+/// JSON-RPC envelope can carry `{}` without a deserialisation error.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SystemConnectedClientsParams {}

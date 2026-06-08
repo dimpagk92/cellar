@@ -15,25 +15,26 @@ xcap = ["cel-display/xcap"]
 cel-display = { workspace = true }
 cel-input = { workspace = true }
 cel-accessibility = { workspace = true }
+cel-ocr = { workspace = true }
 cel-llm = { workspace = true }
 cel-context = { workspace = true }
 cel-network = { workspace = true }
 cel-audio = { workspace = true }
 cel-vision = { workspace = true }
 cel-store = { workspace = true }
+cel-memory = { workspace = true }
+cel-memory-sqlite = { workspace = true }
 cel-contracts = { workspace = true }
 cel-planner = { workspace = true }
 cel-cdp = { workspace = true }
 cel-cortex = { workspace = true }
 cel-signals = { workspace = true }
 adapter-common = { workspace = true }
-adapter-browser = { workspace = true }
-# Mail / Calendar / Reminders / Messages run as ProcessDriver adapters (see
-# adapters/<name>/adapter.json + cel-cortex::discover_adapters in
-# src/cortex.rs). They are NOT linked here — the cortex spawns them as
-# subprocesses at runtime.
-adapter-notes = { workspace = true }
-adapter-numbers = { workspace = true }
+# All default adapters — in-process Numbers / Notes / Browser plus the
+# process-driver discover scan for Mail / Calendar / Reminders / Messages —
+# are wired through the single shared `cel-adapters` registry, not registered
+# here. See `src/cortex.rs`.
+cel-adapters = { workspace = true }
 cel-goal-runner = { workspace = true }
 cellar-worker = { path = "../../cellar-worker" }
 tokio = { workspace = true }

@@ -69,9 +69,9 @@ It owns:
 - freshness, anomaly, and state tracking
 - adapter lifecycle and dispatch
 - canonical action execution
-- execution receipts with dispatch path, timing, verification requirement, and evidence hints
+- execution receipts that prove the *dispatch / observed-execution path* (with timing, verification requirement, and evidence hints) — not task completion; see Design Rule 7
 - MCP / CLI / SDK / N-API tool surfaces
-- memory and context management when those serve device understanding and execution
+- live context and observed-effect tracking — but the durable cross-turn memory *contract* lives in the `cel-memory` crate (with `cel-memory-sqlite` as one backend), and per-turn LLM brief assembly / token budgeting lives in the `cel-brief` crate. CEL's live-perception core (`cel-cortex`) never owns brief or prompt construction. See [`architecture.md`](./architecture.md) § "Context, memory, and briefing crates" for the full split and the execution-receipt vs brief-receipt distinction.
 
 CEL should not be defined by one planner or one orchestration framework.
 

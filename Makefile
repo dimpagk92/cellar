@@ -39,7 +39,7 @@ lint-rust-fmt:
 	cargo fmt --all -- --check
 
 lint-rust-clippy:
-	cargo clippy --workspace -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 lint-ts:
 	pnpm lint

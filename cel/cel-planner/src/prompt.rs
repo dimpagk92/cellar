@@ -27,7 +27,13 @@ pub struct PromptResult {
 /// Default maximum elements to include in the prompt (sorted by interaction priority).
 /// Set high enough to avoid missing the correct element — aggressive filtering
 /// (invisible, disabled, no-bounds) happens upstream in the adapter.
-const DEFAULT_MAX_ELEMENTS: usize = 80;
+// Bumped 80 → 200 on 2026-05-26 — bench traces showed the planner
+// emitting clicks against `dom:button:alle-akzeptieren` / `recaptcha-
+// anchor` etc. that weren't in perception because the page had >80
+// interactive elements and the right one got filtered out. The prompt
+// cost scales linearly but gemini-flash easily handles 200 elements
+// in 4k tokens.
+const DEFAULT_MAX_ELEMENTS: usize = 200;
 
 /// Default maximum recent steps to include in history.
 /// Increased from 10 to 25 so the LLM sees more of its action history,
@@ -182,6 +188,12 @@ const CORE_SECTION: &str = r#"You are a desktop and web automation agent. You ob
 15. SCROLL LIMIT: If you've scrolled 2+ times without finding new data, STOP. The data is likely already in the PAGE TEXT section below or in the element labels. Use "done" with data from the visible context, or "extract" to read it. NEVER scroll more than 3 times.
 16. CLICK FAILURES: If clicking an element fails 2+ times, do NOT keep clicking it. Try: (a) use "act" with a natural-language description instead, (b) scroll the element into view first, or (c) navigate directly to the target URL.
 17. PAGE TEXT: If a "PAGE TEXT" section is shown below the elements, it contains the FULL visible text of the page. For extraction goals, READ THIS FIRST — it often has all the data you need without clicking or scrolling.
+18. NEVER INVENT IDs. target_id MUST be either (a) a bracket number `[N]` from the element table, OR (b) a `dom:role:id` string that appears VERBATIM in that table. Do NOT construct `dom:button:buy-macbook-air` by slugifying the label you see — that's hallucination and the click will fail with `no-match`. If you can't find the element you want in the table, use `"act"` with a natural-language instruction (the resolver matches against labels) OR pick a numeric index `[N]`. Examples:
+    BAD:  {"type":"click","target_id":"dom:button:buy-macbook-air"}  ← invented
+    BAD:  {"type":"click","target_id":"macbook-air"}                 ← missing dom: prefix
+    GOOD: {"type":"click","target_id":"7"}                            ← bracket index
+    GOOD: {"type":"click","target_id":"dom:button:hero-buy-mb-air"}  ← copied verbatim from table
+    GOOD: {"type":"act","instruction":"click Buy MacBook Air"}      ← let resolver find it
 18. EXACT LINK MATCHING: When the goal says to click a specific link like "Machine learning", find the element whose label EXACTLY matches "Machine learning". Do NOT click "Learning" or "Machine" — those are partial matches. Match the FULL phrase.
 19. EXACT TARGET MATCHING: When the goal specifies multiple attributes for an interactive target (for example name + role, name + email, invoice ID + company, or version + service), match ALL of them before clicking. If near-duplicate buttons exist, prefer the candidate whose full label matches the quoted phrase/email/role exactly. Do NOT click a near match like "Jaime" for "Jamie", "editor" for "viewer", or a different email.
 17. TIME INPUTS: For time fields, use set_value with 24-hour format "HH:MM" (e.g., "14:30" not "2:30 PM"). Convert 12-hour times: add 12 to PM hours (except 12 PM stays 12), 12 AM becomes 00.
@@ -379,6 +391,112 @@ Why cdp-first: each step costs ~2s of perception+planning round-trip. Batching 5
 - **Spotlight**: key_combo ["Cmd","Space"] opens Spotlight. Type the app name, then press Enter. But prefer activate_app for launching apps — it's more reliable.
 "#;
 
+/// Section injected when running on headless Linux (benchmark server,
+/// CI, etc.) instead of `DESKTOP_SECTION`. Tells the planner what's
+/// actually available so it stops wasting steps on macOS-only actions.
+const HEADLESS_LINUX_SECTION: &str = r#"
+## Environment (Headless Linux)
+
+You are running in a HEADLESS LINUX environment (Hetzner benchmark
+server, CI, or similar). Specifically:
+
+- **No GUI**, no window manager, no desktop apps to switch between.
+- **No AT-SPI accessibility tree** — accessibility queries return
+  empty. Don't reason about a desktop "focused app" beyond the
+  `Browser` shown in context headers.
+- **No vision / no screenshots** — the display-capture pipeline is
+  stub-only. The planner has DOM perception via the browser adapter
+  ONLY. Don't wait for vision; don't request screenshot escalation.
+- **A Chromium browser IS already running** and the adapter is
+  attached to it via CDP. You do NOT need to launch Safari, Chrome,
+  Firefox, or any other browser — they don't exist as desktop apps
+  on this host. The browser tab is your entire world.
+
+### Actions to AVOID on this host
+
+- `activate_app` for ANY value (Safari, Chrome, Firefox, Mail, ...)
+  — these apps don't exist. The runtime will warn "app was activated
+  but did not become frontmost". Skip the attempt entirely.
+- `key_combo` with `Cmd+...` modifiers — macOS-only.
+- Spotlight (`Cmd+Space`) — macOS-only.
+- `ax_action` against page content — there is no AX tree to act on.
+  AX actions on the browser chrome are also unavailable.
+
+### Actions to PREFER
+
+- `navigate` for URL changes (the cleanest way to load a page).
+- `cdp_eval` for clicks, scrolls, form fills, extractions — same
+  idioms as the macOS browser-in-tab section but it is the ONLY
+  game in town here. The browser adapter exposes `dom:*` element
+  ids; you can target them via `click` / `set_value` / `type` as
+  usual, and the runtime routes those through CDP automatically.
+- One-shot batching: navigate + wait + cdp_eval + cdp_eval in a
+  single planner turn to amortise the ~2s perception/planning cost.
+
+If the goal mentions a desktop app (Calendar, Mail, Notes,
+Spotlight, etc.) without a clear browser path, return:
+  {"type": "fail", "reason": "Goal requires a macOS desktop app that
+  is not available on this headless Linux host."}
+
+### Direct navigation rule (avoid the Google-reCAPTCHA trap)
+
+If the task mentions a specific website (e.g. "find a recipe on
+allrecipes.com", "compare prices on apple.com", "search arxiv.org
+for quantum computing"), NAVIGATE DIRECTLY to that domain's homepage.
+DO NOT route through Google Search — Google's bot detection serves
+reCAPTCHA to headless browsers on the very first query, which is
+unsolvable from this environment and burns the entire step budget.
+
+EXAMPLES:
+  Goal: "Find a vegetarian lasagna on Allrecipes"
+  WRONG: navigate google.com → search → click result
+  RIGHT: navigate https://www.allrecipes.com → use the site's
+         own search bar (no captcha)
+
+  Goal: "Latest preprints on quantum computing"
+  WRONG: navigate google.com → search "arxiv quantum computing"
+  RIGHT: navigate https://arxiv.org → use arxiv's search
+
+### Bail fast on anti-bot walls
+
+Sites with cloudflare / akamai / "Access Denied" / "Verifying you
+are human" / "503 service unavailable" / captcha challenge pages
+WILL NOT clear from this environment — we don't have residential
+proxies or captcha-solving wired in. Heuristics for the page being
+a wall:
+
+- Page title contains "Just a moment...", "Access Denied", "403",
+  "Attention Required", "Checking your browser", "verifying you
+  are human"
+- Body shows "Cloudflare", "ddos protection by", "ray ID:", "you
+  have been blocked"
+- URL hostname is `challenges.cloudflare.com` or contains `__cf_`
+
+After ONE retry of the original navigation produces the same wall,
+IMMEDIATELY emit:
+  {"type": "fail", "reason": "Target site (<host>) gates with
+  Cloudflare/anti-bot wall that cannot be cleared from this
+  headless environment."}
+
+DO NOT loop "wait for verification to complete" — verification
+doesn't complete for headless and you'll burn the whole budget.
+
+### Search engines
+
+Only use a search engine when the task GIVES you no site to start
+from (e.g. "what's the weather in Berlin"). When you DO need one,
+ALWAYS use https://duckduckgo.com/?q=<query> — google.com throws
+reCAPTCHA at headless browsers on the very first query and burns
+the entire step budget on an unsolvable challenge. DDG does NOT
+captcha-gate headless yet. Use a direct query URL (skip the
+homepage) so the results render in ONE navigate:
+
+  RIGHT: navigate https://duckduckgo.com/?q=vegetarian+lasagna+allrecipes
+  WRONG: navigate https://google.com → type "vegetarian lasagna" → submit
+  WRONG: navigate https://duckduckgo.com → click search box → type → submit
+         (DDG works but burns 4 extra steps when ?q= would do it in 1)
+"#;
+
 const OUTPUT_FORMAT_SECTION: &str = r#"
 ## Context Tier
 Set context_tier for the NEXT step:
@@ -421,8 +539,22 @@ pub fn build_composable_system_prompt_with_adapters(
         let lower = b.to_lowercase();
         lower.contains("macos") || lower.contains("darwin") || lower.contains("mac os")
     });
+    let is_linux = device_baseline.is_some_and(|b| {
+        let lower = b.to_lowercase();
+        lower.contains("linux") || lower.contains("ubuntu") || lower.contains("debian")
+    });
     if is_macos {
         prompt.push_str(DESKTOP_SECTION);
+    } else if is_linux {
+        // Headless Linux server (Hetzner benchmark box, CI): no AT-SPI,
+        // no vision (xcap fails on no-monitor systems), but a CDP browser
+        // is already attached. Without this section the planner wastes
+        // its first 5+ steps on "activate Safari" / "activate Chrome" /
+        // Spotlight-style app switching, all of which fail and exhaust
+        // the step budget before any real work happens. Net effect on
+        // 2026-05-25 WebVoyager smoke: 0/5 with every task spending
+        // ~30s on bogus activate_app attempts.
+        prompt.push_str(HEADLESS_LINUX_SECTION);
     }
 
     // === [ACTIONS] Section — filtered by page state ===
@@ -1657,6 +1789,9 @@ fn summarize_action_with_label(action: &PlannedAction, label: Option<&str>) -> S
         } => {
             format!("extract({}, {} selectors)", name, selectors.len())
         }
+        // Window / Dialog / Dock are host-driven (cel_act) actions the planner
+        // never emits; a catch-all keeps this summary match future-proof.
+        _ => "(action)".to_string(),
     }
 }
 

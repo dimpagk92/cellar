@@ -163,6 +163,45 @@ impl CdpClient {
         Ok(())
     }
 
+    /// Enable page lifecycle events (`Page.loadEventFired`, `Page.frameNavigated`).
+    pub async fn enable_page(&self) -> Result<(), CdpError> {
+        self.send_command("Page.enable", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    /// Drain CDP *event* frames (messages carrying a `method`, no `id`) that have
+    /// buffered on the socket, without blocking.
+    ///
+    /// Safe against `send_command`: both take the same `ws` lock, and
+    /// `send_command` never returns until it has consumed its own response — so
+    /// between commands only event frames remain buffered. We poll with a tiny
+    /// timeout and stop as soon as no frame is immediately ready. Bounded to
+    /// `MAX_DRAIN_PER_CALL` so an event flood can't hold the `ws` lock long
+    /// enough to stall concurrent commands on the caller's tick.
+    pub async fn drain_cdp_events(&self) -> Vec<serde_json::Value> {
+        // Cap on frames drained per call, bounding worst-case `ws` lock hold.
+        const MAX_DRAIN_PER_CALL: usize = 64;
+        let mut out = Vec::new();
+        let mut ws = self.ws.lock().await;
+        for _ in 0..MAX_DRAIN_PER_CALL {
+            match tokio::time::timeout(std::time::Duration::from_millis(1), ws.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if v.get("method").is_some() && v.get("id").is_none() {
+                            out.push(v);
+                        }
+                    }
+                }
+                Ok(Some(Ok(_))) => continue, // non-text frame
+                Ok(Some(Err(_))) => break,   // socket error
+                Ok(None) => break,           // socket closed
+                Err(_) => break,             // nothing ready — done
+            }
+        }
+        out
+    }
+
     /// Get the page title.
     pub async fn get_title(&self) -> Result<String, CdpError> {
         let result = self.evaluate("document.title").await?;

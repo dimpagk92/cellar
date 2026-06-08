@@ -1,0 +1,19 @@
+[package]
+name = "cel-hotkey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL global hotkeys — register system-wide shortcuts that trigger CEL actions"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+global-hotkey = "0.8"
+
+# The macOS event delivery needs the main-thread run loop pumped.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
+[dev-dependencies]
+serde_json = { workspace = true }

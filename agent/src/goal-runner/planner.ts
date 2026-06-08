@@ -179,16 +179,22 @@ export async function planStep(
     }
   }
 
-  // All retries exhausted — return a safe fallback instead of crashing.
-  // Include page-text content so the extract has real data instead of empty string.
+  // All retries exhausted — return a structured `fail` so the runner
+  // surfaces the planner outage honestly rather than fake-succeeding
+  // via an `extract` that the eval (GPT-4V / DOM-text matcher) might
+  // accept as a "the agent gave an answer" signal. Pre-2026-05-25
+  // this returned `{ type: "extract", data: pageText }` which let
+  // every "Native module not available" failure score as a partial
+  // success on Mind2Web (4/5 false-positives, 80% phantom pass rate).
+  // Changing to `fail` collapses the metric to the truth — if the
+  // planner can't think, the run is failed, not extracted.
   const errorMsg = String(lastError).slice(0, 100);
-  console.warn(`[planner] All ${PLAN_MAX_RETRIES} retries failed: ${errorMsg}. Returning extract fallback.`);
-  const pageText = context.elements?.find(e => e.id === "page-text")?.value?.slice(0, 500) ?? "";
+  console.warn(`[planner] All ${PLAN_MAX_RETRIES} retries failed: ${errorMsg}. Returning fail action.`);
   return {
-    reasoning: `Planning failed after ${PLAN_MAX_RETRIES} retries (${errorMsg}). Extracting visible data.`,
-    action: { type: "extract", goal: "Extract any visible data from the current page", data: pageText || "No data available" },
-    expected_outcome: "Return whatever data is currently visible",
-    confidence: 0.3,
+    reasoning: `Planning failed after ${PLAN_MAX_RETRIES} retries (${errorMsg}). No further action possible.`,
+    action: { type: "fail", reason: `Planner unavailable: ${errorMsg}` },
+    expected_outcome: "Task aborted — planner could not generate a step.",
+    confidence: 0.1,
   };
 }
 

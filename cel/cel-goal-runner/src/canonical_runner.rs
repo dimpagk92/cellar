@@ -69,6 +69,18 @@ pub trait StepExecutor: Send + Sync {
         empty_context()
     }
 
+    /// Snapshot the per-step action log accumulated so far (WS9 resumable
+    /// sessions). Default empty — executors that don't track a log opt out of
+    /// checkpointing for free; `CortexStepExecutor` returns its real log.
+    fn snapshot_action_log(&self) -> Vec<ActionRecord> {
+        Vec::new()
+    }
+
+    /// Pre-seed the action log when resuming a session (WS9). Default no-op;
+    /// `CortexStepExecutor` replaces its log with the provided records so a
+    /// resumed run continues with prior step context.
+    fn seed_action_log(&self, _log: Vec<ActionRecord>) {}
+
     /// Force a fresh cortex tick + return the resulting perception.
     /// Used by the canonical runner BEFORE `verify_done` so the
     /// post-action UI state is captured before the LLM grades the
@@ -291,6 +303,16 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
         // skips the cosine boost, behaviour matches pre-WK2.
         let goal_embedding = compute_goal_embedding(self.embedder.as_ref(), goal).await;
 
+        // WS9 resumable sessions — opt-in via env, default-off (so normal runs
+        // see zero behaviour change). `CELLAR_SESSION_DIR` enables per-step
+        // checkpointing + a final persist; `CELLAR_RESUME` seeds from a prior
+        // session of the same `CELLAR_SESSION_ID`.
+        let session_dir = std::env::var("CELLAR_SESSION_DIR")
+            .ok()
+            .map(std::path::PathBuf::from);
+        let session_id = std::env::var("CELLAR_SESSION_ID")
+            .unwrap_or_else(|_| format!("run-{}", crate::session::now_ms()));
+
         let outcome = self
             .run_inner(
                 goal,
@@ -298,8 +320,27 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                 start,
                 memory_store.as_ref(),
                 goal_embedding.as_deref(),
+                session_dir.as_deref(),
+                &session_id,
             )
             .await;
+
+        // Persist the finished run as a resumable session (terminal status).
+        if let Some(ref dir) = session_dir {
+            let log = self.executor.snapshot_action_log();
+            let session = crate::session::SessionState::from_outcome(
+                session_id.clone(),
+                goal,
+                &outcome,
+                log,
+                crate::outcome::GoalMetrics::default(),
+                crate::session::now_ms(),
+            );
+            if let Err(e) = crate::session::save_session(dir, &session) {
+                warn!(error = %e, "WS9: failed to persist final session");
+            }
+        }
+
         write_outcome_memory_if_enabled(
             memory_store.as_ref(),
             self.embedder.as_ref(),
@@ -313,6 +354,10 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
         outcome
     }
 
+    // The inner run loop legitimately threads goal + limits + timing + memory +
+    // embedding + the (WS9) session checkpoint dir/id. Grouping these into a
+    // struct would add indirection to the hot loop for no real clarity gain.
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
         goal: &str,
@@ -320,6 +365,8 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
         start: Instant,
         memory_store: Option<&std::sync::Mutex<cel_store::CelStore>>,
         goal_embedding: Option<&[u8]>,
+        session_dir: Option<&std::path::Path>,
+        session_id: &str,
     ) -> GoalOutcome {
         info!(
             goal,
@@ -338,7 +385,43 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
         // On the 2nd fire we auto-dispatch activate_app(terminal_app).
         let mut phase_gate_fires: u32 = 0;
 
+        // WS9 resume (history-exact): if enabled and a prior session exists,
+        // advance the step counter to the cursor, seed the executor's action
+        // log, AND seed the planner's in-memory AttemptRecord history — so a
+        // resumed run continues the planner's reasoning rather than re-planning
+        // from scratch. (Idempotency of the cursor step — an action whose side
+        // effect landed but whose verification didn't persist — remains the
+        // documented caveat; see session.rs.)
+        if let Some(dir) = session_dir {
+            if std::env::var("CELLAR_RESUME").is_ok() {
+                if let Ok(prev) = crate::session::load_session(dir, session_id) {
+                    steps_used = prev.next_step_index();
+                    self.executor.seed_action_log(prev.action_log.clone());
+                    history = prev.attempt_history.clone();
+                    info!(
+                        steps_used,
+                        history_len = history.len(),
+                        session_id,
+                        "WS9: resumed session (history-exact)"
+                    );
+                }
+            }
+        }
+
         loop {
+            // WS9 checkpoint: persist progress at each iteration boundary so an
+            // interrupted run leaves a resumable session file. One write per
+            // step; cheap next to an LLM round-trip. Gated on `session_dir`, so
+            // off by default.
+            if let Some(dir) = session_dir {
+                let mut snap =
+                    crate::session::SessionState::new(session_id, goal, crate::session::now_ms());
+                snap.action_log = self.executor.snapshot_action_log();
+                snap.attempt_history = history.clone();
+                if let Err(e) = crate::session::save_session(dir, &snap) {
+                    warn!(error = %e, "WS9: checkpoint save failed");
+                }
+            }
             if steps_used >= limits.max_steps {
                 return self
                     .budget_exhausted_with_outcome_check(
@@ -370,6 +453,31 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
             }
 
             let perception = self.executor.perceive().await;
+            // Cortex-level anti-bot wall bail. The HEADLESS_LINUX prompt
+            // section tells the planner to fail-fast on Cloudflare /
+            // Access Denied / "Verifying you are human" pages — but
+            // gemini-flash ignores it (2026-05-26 WV smoke: Amazon
+            // burned 233s trying to click reCAPTCHA checkboxes after the
+            // bail rule shipped). Detect at the cortex layer and
+            // short-circuit BEFORE planner is even called. Cheap check
+            // — just string-scan window/app/element labels for known
+            // wall fingerprints. False-positive risk is low because
+            // these phrases rarely appear outside actual wall pages.
+            if let Some(wall) = detect_anti_bot_wall(&perception) {
+                let host = perception.window.clone();
+                tracing::warn!(
+                    wall = %wall,
+                    host = %host,
+                    "Cortex detected anti-bot wall — short-circuit failing without planner round-trip"
+                );
+                return GoalOutcome::Failed(FailureReport {
+                    failing_sub_goal: goal.to_string(),
+                    failing_step: format!("anti_bot_wall:{wall}"),
+                    attempts: vec![format!(
+                        "Page is an anti-bot wall ({wall}) at \"{host}\". Cannot bypass from headless environment without residential proxies / captcha solver."
+                    )],
+                });
+            }
             let screenshot = self.executor.screenshot_png().await;
             let mut caps = self.executor.capabilities().await;
             caps.steps_used = steps_used;
@@ -1116,7 +1224,16 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
                                 data: serde_json::Value::Null,
                                 next_action_hint: None,
                             });
-                            steps_used += 1;
+                            // Pre-2026-05-26 this charged a step against the
+                            // budget. But the planner DIDN'T get a usable
+                            // turn — its proposed action was filtered before
+                            // execution. Charging it wasted budget on a no-op,
+                            // shortening the task's effective horizon by
+                            // (often) 3-5 steps when the planner stubbornly
+                            // re-proposed the same dead action. Keep the
+                            // history entry (so next prompt sees the ban) but
+                            // don't decrement budget.
+                            // steps_used += 1;  // REMOVED
                             // Don't run remaining steps in the batch —
                             // they were planned against the state this
                             // blocked step was supposed to produce.
@@ -1152,6 +1269,21 @@ impl<P: PlanProducer, X: StepExecutor> CanonicalGoalRunner<P, X> {
 
                         let action_hash = hash_action(&step.action);
                         let result = self.executor.execute(&step, 1).await;
+                        // Navigation-style actions move the page out from
+                        // under perception: a cortex tick is ~200ms but
+                        // SPAs and CDN-fronted sites re-render faster.
+                        // Without a forced refresh, the NEXT loop iteration
+                        // reads stale perception → planner sees "elements
+                        // from the OLD page" → emits a click against a
+                        // node that no longer exists → "Element not
+                        // found" / "perception corrupted" complaints
+                        // (2026-05-26 WV trace: Apple country popup).
+                        // Force a fresh perception tick when the JUST-
+                        // EXECUTED action was a navigation or a cdp_eval
+                        // that changed window.location.
+                        if navigate_target_url(&step.action).is_some() {
+                            let _ = self.executor.perceive_fresh().await;
+                        }
                         let (succeeded, error, data) = match result {
                             StepResult::Ok {
                                 data,
@@ -2239,6 +2371,102 @@ fn sample_dom_ids(perception: &ScreenContext, max: usize) -> Vec<&str> {
 /// length, capped at 8). The threshold catches `dom:button:foo-bar`
 /// → `dom:button:foo` cleanly but rejects `dom:tr:row-42` →
 /// `dom:button:submit` as not-actually-related.
+/// Detect anti-bot walls (Cloudflare, "Access Denied", "Verifying you
+/// are human", reCAPTCHA gates) by scanning perception's window title
+/// and element labels for known fingerprints. Returns the wall kind
+/// (e.g. "cloudflare", "access_denied", "recaptcha") when matched —
+/// the canonical_runner short-circuits the goal with a structured
+/// Failed outcome BEFORE the planner is ever called, freeing the
+/// 200-300s the planner used to burn on unsolvable challenges.
+///
+/// Phrases are case-insensitive, scanned across window title + the
+/// first 50 element labels (cheap, no full DOM walk). False-positive
+/// risk is low — these phrases rarely appear outside actual wall
+/// pages.
+fn detect_anti_bot_wall(perception: &ScreenContext) -> Option<&'static str> {
+    // Don't bail on benign empty perception (e.g. fresh tab,
+    // page mid-load). Walls always have substantive text content.
+    if perception.window.is_empty() && perception.elements.is_empty() {
+        return None;
+    }
+    // Build the haystack once. Window title is the strongest signal —
+    // Cloudflare sets `<title>Just a moment...</title>`, sites with
+    // Cloudflare protection set it to "Attention Required! | <site>",
+    // Akamai sets "Access Denied" etc.
+    let mut haystack = String::with_capacity(2048);
+    haystack.push_str(&perception.window.to_lowercase());
+    haystack.push('\n');
+    for el in perception.elements.iter().take(50) {
+        if let Some(l) = el.label.as_deref() {
+            haystack.push_str(&l.to_lowercase());
+            haystack.push('\n');
+        }
+        if let Some(v) = el.value.as_deref() {
+            haystack.push_str(&v.to_lowercase());
+            haystack.push('\n');
+        }
+    }
+    // Order matters — more specific patterns first so we report the
+    // most informative wall kind. Phrases are case-insensitive after
+    // the .to_lowercase() at haystack-build time.
+    //
+    // KEEP THESE TIGHT. A false-positive bails the entire task without
+    // a single planner turn, so erring on the side of specific multi-
+    // word phrases is much safer than short single-word triggers.
+    // Pre-2026-05-26 the "recaptcha" single-word needle matched an
+    // arxiv.org paper title containing the substring → bailed in 1s
+    // on a goal that previously PASSED in 54s. Now require the
+    // distinctive widget marker "g-recaptcha" + the actual challenge
+    // page wording.
+    const PATTERNS: &[(&str, &[&str])] = &[
+        (
+            "cloudflare",
+            &[
+                "just a moment...",
+                "checking your browser before accessing",
+                "enable javascript and cookies to continue",
+                "cloudflare ray id:",
+                "attention required! | cloudflare",
+                "verifying you are human. this may take a few seconds",
+            ],
+        ),
+        (
+            "akamai_access_denied",
+            &[
+                "you don't have permission to access",
+                "reference #18.", // Akamai's distinctive 'Reference #18' error code
+            ],
+        ),
+        (
+            "recaptcha",
+            &[
+                // `g-recaptcha` is Google's widget class — distinctive,
+                // unlikely to appear in legitimate content. Bare
+                // "recaptcha" was too broad (matched arxiv titles).
+                "g-recaptcha",
+                "recaptcha challenge expires",
+                "please solve the captcha",
+            ],
+        ),
+        ("perimeterx", &["please verify you are a human", "_pxhd"]),
+        (
+            "datadome",
+            &[
+                "datadome captcha",
+                "your interaction with this site has been blocked",
+            ],
+        ),
+    ];
+    for (kind, needles) in PATTERNS {
+        for needle in *needles {
+            if haystack.contains(needle) {
+                return Some(*kind);
+            }
+        }
+    }
+    None
+}
+
 fn closest_dom_id<'p>(target_id: &str, perception: &'p ScreenContext) -> Option<&'p str> {
     let threshold = (target_id.len() / 2).min(8);
     let mut best: Option<(usize, &'p str)> = None;
@@ -2395,6 +2623,12 @@ pub struct CortexStepExecutor {
     cortex: Arc<Cortex>,
     log: Arc<Mutex<Vec<ActionRecord>>>,
     step_counter: Arc<AtomicU32>,
+    /// Dry-run: reason without executing. When set, `execute` reports success
+    /// without dispatching the action. Everything else (perception, caps,
+    /// adapter facts, screenshots) stays real, so the planner reasons with full
+    /// inputs — `--dry-run` shows what the agent *would* attempt. (The device
+    /// doesn't change, so the plan diverges from reality after the first step.)
+    dry_run: bool,
 }
 
 impl CortexStepExecutor {
@@ -2403,7 +2637,16 @@ impl CortexStepExecutor {
             cortex,
             log: Arc::new(Mutex::new(Vec::new())),
             step_counter: Arc::new(AtomicU32::new(0)),
+            // Reachable via env for any agent path (daemon / MCP / eval) without
+            // per-caller wiring; `with_dry_run` overrides explicitly.
+            dry_run: std::env::var("CELLAR_DRY_RUN").is_ok(),
         }
+    }
+
+    /// Enable dry-run (reason without executing) on this executor.
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
     }
 
     pub fn log_handle(&self) -> Arc<Mutex<Vec<ActionRecord>>> {
@@ -2417,7 +2660,28 @@ impl CortexStepExecutor {
 
 #[async_trait]
 impl StepExecutor for CortexStepExecutor {
+    fn snapshot_action_log(&self) -> Vec<ActionRecord> {
+        self.snapshot_log()
+    }
+
+    fn seed_action_log(&self, log: Vec<ActionRecord>) {
+        // Replace the log wholesale so a resumed run continues from the
+        // persisted step history. Best-effort: a poisoned lock is ignored.
+        if let Ok(mut guard) = self.log.lock() {
+            *guard = log;
+        }
+    }
+
     async fn execute(&self, step: &Step, _attempt: u32) -> StepResult {
+        if self.dry_run {
+            // Reason-only: do NOT dispatch. Report success so the planner
+            // advances; the action that *would* have run is described by `step`.
+            tracing::info!(purpose = %step.purpose, "dry-run: skipping execution");
+            return StepResult::Ok {
+                data: serde_json::json!({ "dry_run": true }),
+                discovered_sub_goal: None,
+            };
+        }
         let context = self.perceive().await;
         let started = Instant::now();
         let (result, err_str): (StepResult, Option<String>) =
@@ -2682,6 +2946,9 @@ fn action_kind(action: &PlannedAction) -> String {
         PlannedAction::WriteCells { .. } => "write_cells".into(),
         PlannedAction::ReadCells { .. } => "read_cells".into(),
         PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback".into(),
+        // Window / Dialog / Dock are host-driven (cel_act) actions the canonical
+        // runner never emits; a catch-all keeps this kind-string match future-proof.
+        _ => "other".into(),
     }
 }
 

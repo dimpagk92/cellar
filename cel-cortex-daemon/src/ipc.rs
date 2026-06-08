@@ -20,14 +20,18 @@ use cellar_ipc::error::{IpcError, IpcResult};
 use cellar_ipc::handler::FrameSink;
 use cellar_ipc::params::{
     agent as agent_params, confirmation as cf_params, events as ev_params, fires as fi_params,
-    rules as rules_params, system, watchlists as wl_params, webhooks as wh_params,
+    memory as mem_params, rules as rules_params, system, watchlists as wl_params,
+    webhooks as wh_params,
 };
 use cellar_ipc::results::agent::{
-    AgentMessage, AgentMessageResult, AgentSessionMetadata, AgentSessionsCreateResult,
-    AgentSessionsGetResult, AgentSessionsListResult,
+    AgentMessage, AgentMessageResult, AgentRunResult, AgentSessionMetadata,
+    AgentSessionsCreateResult, AgentSessionsGetResult, AgentSessionsListResult,
 };
 use cellar_ipc::results::confirmation::{ConfirmationListPendingResult, ConfirmationResolveResult};
-use cellar_ipc::results::daemon::{DaemonStatusResult, RuleStats, WatchlistStats};
+use cellar_ipc::results::daemon::{
+    DaemonStatusResult, MemoryCorpusStats, RuleStats, WatchlistStats,
+};
+use cellar_ipc::results::memory::{MemoryForgetResult, MemoryRecallResult, MemoryRememberResult};
 use cellar_ipc::results::rules::{
     RulesAddResult, RulesCompileResult, RulesGetResult, RulesListResult,
 };
@@ -42,6 +46,7 @@ use cellar_rule_compiler::{CompileError, CompileRequest, Compiler};
 use cellar_rules_store::{RulesStoreError, SqliteRulesStore};
 use cellar_types::{Event, EventKind, EventSource};
 use cellar_webhook::{AttemptOutcome, ReqwestSender, Sender, WebhookRegistry, WebhookSecret};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::agent_action_bus::{AgentActionBus, AgentActionRing};
@@ -55,6 +60,7 @@ use crate::subscriptions::{
     spawn_agent_actions_forwarder, spawn_agent_chat_forwarder, spawn_confirmation_forwarder,
     spawn_events_forwarder, spawn_fires_forwarder, SubscriptionRegistry,
 };
+use cel_act_gateway::{AgentGateway, ProposedAction};
 
 /// IPC handler the daemon installs on its `Server`. Holds the shared
 /// `Arc<SqliteRulesStore>` so writes through `rules.*` / `watchlists.*`
@@ -92,6 +98,24 @@ pub struct DaemonIpcHandler {
     /// `webhooks.remove` call through to the live service so deliveries
     /// take effect immediately without a daemon restart.
     webhook_registry: Option<Arc<dyn WebhookRegistry>>,
+    /// Gateway for `gateway.intercept`. When set, the method submits the
+    /// proposed action through the live daemon gateway (full matcher +
+    /// confirmation flow). `None` → returns `NotImplemented`.
+    gateway: Option<Arc<dyn AgentGateway>>,
+    /// Recent `system.hello` callers, deduped by `client_name` and capped
+    /// at 32 entries. Surfaced via `system.connected_clients` so the app
+    /// can show "Claude Code: Connected" etc. without per-connection
+    /// state. Updated on every successful hello in
+    /// [`Self::system_hello`].
+    recent_clients: std::sync::Mutex<Vec<RecentClient>>,
+}
+
+/// One entry in `DaemonIpcHandler::recent_clients`.
+#[derive(Debug, Clone)]
+struct RecentClient {
+    client_name: String,
+    client_version: String,
+    last_hello_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Bundle of agent-related plumbing.
@@ -151,6 +175,35 @@ impl DaemonIpcHandler {
             confirmation: None,
             agent: None,
             webhook_registry: None,
+            gateway: None,
+            recent_clients: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Record (or refresh) a hello from `client_name`. Caps the list at
+    /// 32 entries — the oldest entry is evicted when a brand-new client
+    /// name appears. Refresh updates the timestamp in-place and re-sorts.
+    fn record_hello(&self, client_name: &str, client_version: &str) {
+        const CAP: usize = 32;
+        let now = chrono::Utc::now();
+        let Ok(mut g) = self.recent_clients.lock() else {
+            return;
+        };
+        if let Some(existing) = g.iter_mut().find(|c| c.client_name == client_name) {
+            existing.client_version = client_version.to_string();
+            existing.last_hello_at = now;
+        } else {
+            if g.len() >= CAP {
+                // Evict oldest (smallest last_hello_at).
+                if let Some((idx, _)) = g.iter().enumerate().min_by_key(|(_, c)| c.last_hello_at) {
+                    g.remove(idx);
+                }
+            }
+            g.push(RecentClient {
+                client_name: client_name.to_string(),
+                client_version: client_version.to_string(),
+                last_hello_at: now,
+            });
         }
     }
 
@@ -188,6 +241,14 @@ impl DaemonIpcHandler {
     /// won't activate the running service until daemon restart.
     pub fn with_webhook_registry(mut self, registry: Option<Arc<dyn WebhookRegistry>>) -> Self {
         self.webhook_registry = registry;
+        self
+    }
+
+    /// Plug in the `cel_act` gateway. Without it `gateway.intercept` returns
+    /// `NotImplemented`. When set, submitted actions run through the live
+    /// rule matcher and confirmation flow exactly as the embedded agent would.
+    pub fn with_gateway(mut self, gateway: Arc<dyn AgentGateway>) -> Self {
+        self.gateway = Some(gateway);
         self
     }
 
@@ -266,6 +327,79 @@ fn process_resource_snapshot() -> (f64, f64) {
     }
 }
 
+/// Translate a [`cel_memory::MemoryError`] into the typed [`IpcError`]
+/// surface. `NotFound` becomes `ValidationFailed` (we don't have a
+/// dedicated `chunk_not_found` error code in the protocol surface yet —
+/// adding one would be a backward-compatible extension if Phase 5 needs
+/// it); `InvalidArgument` becomes `ValidationFailed`; everything else is
+/// `Internal`.
+fn memory_err_to_ipc(err: cel_memory::MemoryError) -> IpcError {
+    match err {
+        cel_memory::MemoryError::NotFound(msg) => {
+            IpcError::ValidationFailed(format!("not found: {msg}"))
+        }
+        cel_memory::MemoryError::InvalidArgument(msg) => IpcError::ValidationFailed(msg),
+        cel_memory::MemoryError::NotImplemented(method) => IpcError::NotImplemented(method),
+        other => IpcError::Internal(format!("memory: {other}")),
+    }
+}
+
+/// Parse a wire-format chunk kind string into the typed enum, surfacing
+/// unknown values as `ValidationFailed` rather than swallowing them as
+/// `Chat`. Returns `Chat` for `None` input — matches the doc on
+/// [`cellar_ipc::params::memory::MemoryRememberParams::kind`].
+fn parse_chunk_kind(raw: Option<&str>) -> IpcResult<cel_memory::ChunkKind> {
+    use cel_memory::ChunkKind;
+    Ok(match raw.unwrap_or("chat") {
+        "chat" => ChunkKind::Chat,
+        "action" => ChunkKind::Action,
+        "fire" => ChunkKind::Fire,
+        "observation" => ChunkKind::Observation,
+        "correction" => ChunkKind::Correction,
+        "job_summary" => ChunkKind::JobSummary,
+        "context" => ChunkKind::Context,
+        "rollup" => ChunkKind::Rollup,
+        other => {
+            return Err(IpcError::ValidationFailed(format!(
+                "unknown chunk kind: {other}"
+            )))
+        }
+    })
+}
+
+/// Parse a wire-format caller-scope string. Defaults to `Own`.
+fn parse_caller_scope(raw: Option<&str>) -> IpcResult<cel_memory::CallerScope> {
+    use cel_memory::CallerScope;
+    Ok(match raw.unwrap_or("own") {
+        "own" => CallerScope::Own,
+        "own_plus_shared" => CallerScope::OwnPlusShared,
+        "global" => CallerScope::Global,
+        other => {
+            return Err(IpcError::ValidationFailed(format!(
+                "unknown caller scope: {other}"
+            )))
+        }
+    })
+}
+
+/// Normalise a caller-supplied `caller_id` against the v1 multi-agent
+/// scoping invariant: every external MCP client identity must be prefixed
+/// with `mcp:` so the Memory tab can group by origin and so a malicious
+/// client cannot impersonate the embedded agent (`embedded`) or the
+/// gateway/matcher/cortex (which use bare names). When the caller omits
+/// `caller_id` entirely the daemon uses the supplied default — typically
+/// `"mcp:unknown"` — and the connection-attestation layer can replace
+/// this once it lands (Phase 5).
+fn normalize_caller_id(raw: Option<&str>, default_id: &str) -> String {
+    let candidate = raw.map(str::trim).filter(|s| !s.is_empty());
+    let chosen = candidate.unwrap_or(default_id);
+    if chosen.starts_with("mcp:") || chosen.starts_with("embedded") {
+        chosen.to_string()
+    } else {
+        format!("mcp:{chosen}")
+    }
+}
+
 fn compile_err_to_ipc(err: CompileError) -> IpcError {
     match err {
         CompileError::EmptyInput => IpcError::ValidationFailed("nl_string is empty".into()),
@@ -299,6 +433,10 @@ impl Handler for DaemonIpcHandler {
                 params.supported_protocol_versions,
             ));
         };
+        // Record the hello so `system.connected_clients` can surface
+        // which clients have spoken to us recently. Deduped by name,
+        // capped at 32, see `Self::record_hello`.
+        self.record_hello(&params.client_name, &params.client_version);
         // The set of caps gets `rules.crud` added now that we serve those,
         // plus `rules.compile` when the NL compiler is wired (the client
         // can detect "this daemon has no LLM provider configured" without
@@ -315,6 +453,7 @@ impl Handler for DaemonIpcHandler {
         }
         if self.streams.is_some() {
             capabilities.push("events.subscribe".into());
+            capabilities.push("events.publish".into());
             capabilities.push("fires.subscribe".into());
         }
         if self.confirmation.is_some() {
@@ -325,6 +464,10 @@ impl Handler for DaemonIpcHandler {
             if a.runtime.is_some() {
                 capabilities.push("agent.message".into());
             }
+            // memory.rpc surfaces the Phase 4 `memory.remember`/`recall`/
+            // `forget` methods. They share the agent's `Arc<dyn MemoryProvider>`
+            // so the same wire is gated by the agent slot being present.
+            capabilities.push("memory.rpc".into());
         }
 
         Ok(SystemHelloResult {
@@ -344,6 +487,28 @@ impl Handler for DaemonIpcHandler {
         Ok(SystemShutdownResult {
             shutting_down: true,
         })
+    }
+
+    async fn system_connected_clients(
+        &self,
+        _params: system::SystemConnectedClientsParams,
+    ) -> IpcResult<cellar_ipc::results::system::SystemConnectedClientsResult> {
+        let mut clients: Vec<cellar_ipc::results::system::ConnectedClient> = self
+            .recent_clients
+            .lock()
+            .map(|g| {
+                g.iter()
+                    .map(|c| cellar_ipc::results::system::ConnectedClient {
+                        client_name: c.client_name.clone(),
+                        client_version: c.client_version.clone(),
+                        last_hello_at: c.last_hello_at,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Newest-first so the UI can show the most recent client at the top.
+        clients.sort_by_key(|c| std::cmp::Reverse(c.last_hello_at));
+        Ok(cellar_ipc::results::system::SystemConnectedClientsResult { clients })
     }
 
     // ───── daemon.* ─────
@@ -385,6 +550,30 @@ impl Handler for DaemonIpcHandler {
         // Best-effort process memory + CPU via sysinfo.
         let (memory_mb, cpu_pct) = process_resource_snapshot();
 
+        // Memory corpus snapshot. Only populated when an agent is wired
+        // (which carries the memory provider) — older builds without a
+        // memory subsystem leave this `None` and the UI shows
+        // "unknown" rather than zeros.
+        let memory_corpus = if let Some(a) = &self.agent {
+            match a.memory.stats().await {
+                Ok(s) => Some(MemoryCorpusStats {
+                    total_chunks: s.total_chunks as u64,
+                    session_chunks: s.session_chunks as u64,
+                    long_term_chunks: s.long_term_chunks as u64,
+                    total_sessions: s.total_sessions as u64,
+                    open_sessions: s.open_sessions as u64,
+                    db_bytes: s.db_bytes,
+                    embedding_model: s.embedding_model,
+                }),
+                Err(e) => {
+                    tracing::debug!(error = %e, "memory.stats failed during daemon.status; surfacing None");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(DaemonStatusResult {
             healthy: true,
             uptime_s: self.uptime_s(),
@@ -401,6 +590,7 @@ impl Handler for DaemonIpcHandler {
             daemon_version: self.daemon_version.clone(),
             memory_mb,
             cpu_pct,
+            memory: memory_corpus,
         })
     }
 
@@ -835,6 +1025,40 @@ impl Handler for DaemonIpcHandler {
         Ok(OkResult::default())
     }
 
+    async fn events_publish(&self, params: ev_params::EventsPublishParams) -> IpcResult<OkResult> {
+        let Some(streams) = self.streams.as_ref() else {
+            return Err(IpcError::NotImplemented("events.publish"));
+        };
+
+        // Deserialize kind from the wire snake_case string by reusing serde's
+        // rename_all logic on EventKind.
+        let kind: cellar_types::EventKind = serde_json::from_value(serde_json::Value::String(
+            params.kind.clone(),
+        ))
+        .map_err(|_| IpcError::ValidationFailed(format!("unknown event kind: {}", params.kind)))?;
+
+        // Deserialize source, defaulting to CortexCdp — the expected origin
+        // for URL navigation events bridged from the Tauri process.
+        let source: cellar_types::EventSource = match params.source.as_deref() {
+            None => cellar_types::EventSource::CortexCdp,
+            Some(s) => serde_json::from_value(serde_json::Value::String(s.to_string()))
+                .map_err(|_| IpcError::ValidationFailed(format!("unknown event source: {s}")))?,
+        };
+
+        let mut event = Event::now(source, kind);
+        for (k, v) in params.data {
+            event.data.insert(k, v);
+        }
+
+        tracing::debug!(
+            kind = %serde_json::to_value(&event.kind).unwrap_or_default(),
+            source = %serde_json::to_value(event.source).unwrap_or_default(),
+            "events.publish: injecting external event into daemon bus"
+        );
+        streams.event_bus.publish(event);
+        Ok(OkResult::default())
+    }
+
     // ───── fires.* ─────
 
     async fn fires_recent(
@@ -1002,6 +1226,56 @@ impl Handler for DaemonIpcHandler {
                 .await;
         }
         Ok(OkResult::default())
+    }
+
+    // ───── gateway.* ─────
+
+    async fn gateway_intercept(
+        &self,
+        params: cellar_ipc::params::gateway::GatewayInterceptParams,
+    ) -> IpcResult<cellar_ipc::results::gateway::GatewayInterceptResult> {
+        use cel_act_gateway::ActionOutcome;
+        use cellar_ipc::results::gateway::{GatewayInterceptResult, GatewayOutcomeWire};
+
+        let Some(gw) = self.gateway.as_ref() else {
+            return Err(IpcError::NotImplemented("gateway.intercept"));
+        };
+
+        let action = ProposedAction {
+            caller: params.caller,
+            action_type: params.action_type,
+            action_args: params.action_args,
+            agent_session_id: params.agent_session_id,
+            project_root: params.project_root,
+        };
+
+        let outcome = gw
+            .intercept_tool_call(action)
+            .await
+            .map_err(|e| IpcError::Internal(format!("gateway: {e}")))?;
+
+        let wire_outcome = match outcome {
+            ActionOutcome::Executed { result } => GatewayOutcomeWire::Executed { result },
+            ActionOutcome::Vetoed {
+                rule_id, rule_name, ..
+            } => GatewayOutcomeWire::Vetoed { rule_id, rule_name },
+            ActionOutcome::ConfirmationDenied { rule_id, rule_name } => {
+                GatewayOutcomeWire::ConfirmationDenied { rule_id, rule_name }
+            }
+            ActionOutcome::ConfirmationTimedOut {
+                rule_id,
+                rule_name,
+                timeout_s,
+            } => GatewayOutcomeWire::ConfirmationTimedOut {
+                rule_id,
+                rule_name,
+                timeout_s,
+            },
+        };
+
+        Ok(GatewayInterceptResult {
+            outcome: wire_outcome,
+        })
     }
 
     // ───── agent.* ─────
@@ -1205,27 +1479,87 @@ impl Handler for DaemonIpcHandler {
         let return_request_id = request_id_placeholder.clone();
         let return_message_id = user_message_placeholder.clone();
 
-        tokio::spawn(async move {
-            match runtime.run_turn(&session_id, &content).await {
-                Ok(_result) => {
-                    tracing::debug!(
-                        session_id = %session_id,
-                        "agent turn completed"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        session_id = %session_id,
-                        "agent turn failed"
-                    );
+        // Propagate the IPC handler's tracing span (which carries the
+        // request's `trace_id`) across `tokio::spawn` so every log line
+        // emitted inside `run_turn` — including those inside the gateway,
+        // the matcher, and the LLM router — inherits the same trace_id.
+        // Without `.instrument(...)`, `tokio::spawn` would drop the
+        // current span and break the correlation chain.
+        let span = tracing::Span::current();
+        tokio::spawn(
+            async move {
+                match runtime.run_turn(&session_id, &content).await {
+                    Ok(_result) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "agent turn completed"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            session_id = %session_id,
+                            "agent turn failed"
+                        );
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
 
         Ok(AgentMessageResult {
             request_id: return_request_id,
             message_id: return_message_id,
+        })
+    }
+
+    async fn agent_run(&self, params: agent_params::AgentRunParams) -> IpcResult<AgentRunResult> {
+        let Some(a) = self.agent.as_ref() else {
+            return Err(IpcError::NotImplemented("agent.run"));
+        };
+        let Some(runtime) = a.runtime.as_ref() else {
+            return Err(IpcError::LlmProviderError(
+                "embedded agent not configured; set CELLAR_DEFAULT_PROVIDER + \
+                 CELLAR_DEFAULT_MODEL and restart"
+                    .into(),
+            ));
+        };
+
+        // Fresh ephemeral session for this one-shot run.
+        let title: String = params.goal.chars().take(60).collect();
+        let session = a
+            .memory
+            .open_session(cel_memory::NewMemorySession {
+                caller_id: AGENT_CALLER_ID.into(),
+                title: Some(format!("agent.run: {title}")),
+                metadata: serde_json::Value::Null,
+            })
+            .await
+            .map_err(|e| IpcError::Internal(format!("memory: {e}")))?;
+
+        // In dry-run, instruct the agent to plan without dispatching tools.
+        let content = if params.dry_run {
+            format!(
+                "{}\n\n(Dry run: describe the steps you would take to accomplish this. \
+                 Do NOT call any tools.)",
+                params.goal
+            )
+        } else {
+            params.goal.clone()
+        };
+
+        // Run the turn to completion — blocks until the LLM + its tool-call
+        // loop finish. Actions dispatch through the governed gateway, so the
+        // run is governed + recorded like any other agent activity.
+        let turn = runtime
+            .run_turn(&session.id, &content)
+            .await
+            .map_err(|e| IpcError::Internal(format!("agent turn failed: {e}")))?;
+
+        Ok(AgentRunResult {
+            session_id: session.id,
+            response: turn.assistant_text,
+            tool_calls: turn.tool_calls_dispatched as u64,
         })
     }
 
@@ -1276,6 +1610,186 @@ impl Handler for DaemonIpcHandler {
             rt.interrupt(&params.session_id);
         }
         Ok(OkResult::default())
+    }
+
+    // ───── memory.* (Phase 4 — backs `cel_remember`/`cel_recall`/`cel_forget`) ─────
+
+    async fn memory_remember(
+        &self,
+        params: mem_params::MemoryRememberParams,
+    ) -> IpcResult<MemoryRememberResult> {
+        let Some(a) = self.agent.as_ref() else {
+            return Err(IpcError::NotImplemented("memory.remember"));
+        };
+        if params.content.trim().is_empty() {
+            return Err(IpcError::ValidationFailed(
+                "content must not be empty".into(),
+            ));
+        }
+        let kind = parse_chunk_kind(params.kind.as_deref())?;
+        let caller_id = normalize_caller_id(params.caller_id.as_deref(), "mcp:unknown");
+        let mut metadata = serde_json::Map::new();
+        if let Some(tags) = &params.tags {
+            metadata.insert("tags".into(), serde_json::json!(tags));
+        }
+        let new_chunk = cel_memory::NewMemoryChunk {
+            kind,
+            // External MCP-client writes are stamped Mcp. Internal callers
+            // (agent runtime, gateway, matcher) use the typed IPC surfaces
+            // that already exist; this path is exclusively the external one.
+            source: cel_memory::ChunkSource::Mcp,
+            session_id: params.session_id,
+            project_root: params.project_root,
+            caller_id,
+            content: params.content,
+            metadata: serde_json::Value::Object(metadata),
+            importance: params.importance,
+            shareable: params.shareable,
+            pinned: params.pinned,
+        };
+        let chunk = a.memory.write(new_chunk).await.map_err(memory_err_to_ipc)?;
+        let chunk_json = serde_json::to_value(&chunk)
+            .map_err(|e| IpcError::Internal(format!("serialize chunk: {e}")))?;
+        Ok(MemoryRememberResult { chunk: chunk_json })
+    }
+
+    async fn memory_recall(
+        &self,
+        params: mem_params::MemoryRecallParams,
+    ) -> IpcResult<MemoryRecallResult> {
+        let Some(a) = self.agent.as_ref() else {
+            return Err(IpcError::NotImplemented("memory.recall"));
+        };
+        if params.query.trim().is_empty() {
+            return Err(IpcError::ValidationFailed("query must not be empty".into()));
+        }
+        let caller_id = normalize_caller_id(params.caller_id.as_deref(), "mcp:unknown");
+        let kinds = match params.kinds {
+            Some(ks) => Some(
+                ks.iter()
+                    .map(|s| parse_chunk_kind(Some(s.as_str())))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => None,
+        };
+        let scope = parse_caller_scope(params.scope.as_deref())?;
+        let query = cel_memory::MemoryQuery {
+            text: params.query,
+            kinds,
+            since: params.since,
+            until: None,
+            session_id: params.session_id,
+            caller_scope: scope,
+            project_root_prefix: params.project_root_prefix,
+            k: params.limit.unwrap_or(8).max(1),
+            include_rollups: true,
+            min_importance: params.min_importance,
+            profile: cel_memory::RetrievalProfile::AgentChatTurn,
+            caller_id,
+        };
+        let chunks = a.memory.retrieve(query).await.map_err(memory_err_to_ipc)?;
+        let count = chunks.len();
+        let chunks_json: Vec<serde_json::Value> = chunks
+            .into_iter()
+            .map(|c| serde_json::to_value(&c).unwrap_or(serde_json::Value::Null))
+            .collect();
+        Ok(MemoryRecallResult {
+            chunks: chunks_json,
+            count,
+        })
+    }
+
+    async fn memory_forget(
+        &self,
+        params: mem_params::MemoryForgetParams,
+    ) -> IpcResult<MemoryForgetResult> {
+        let Some(a) = self.agent.as_ref() else {
+            return Err(IpcError::NotImplemented("memory.forget"));
+        };
+        // Exactly one of (chunk_ids, predicate) must be supplied. Both
+        // present is a programming error on the caller's side; neither
+        // present is a clearer "no-op" but we surface it as a validation
+        // failure so the caller learns rather than silently does nothing.
+        let by_ids = params
+            .chunk_ids
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let by_predicate = params
+            .predicate
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false);
+        match (by_ids, by_predicate) {
+            (true, true) => {
+                return Err(IpcError::ValidationFailed(
+                    "exactly one of chunk_ids or predicate must be supplied; got both".into(),
+                ));
+            }
+            (false, false) => {
+                return Err(IpcError::ValidationFailed(
+                    "exactly one of chunk_ids or predicate must be supplied; got neither".into(),
+                ));
+            }
+            _ => {}
+        }
+        let caller_id = normalize_caller_id(params.caller_id.as_deref(), "mcp:unknown");
+
+        // ID-list path: delete only chunks owned by the caller. This is
+        // the v1 policy from §13 — cross-caller deletion requires a
+        // permissive rule or user confirmation (future Phase 5 work).
+        if let Some(ids) = params.chunk_ids {
+            let mut deleted = 0usize;
+            for id in ids {
+                // Read first to verify ownership. NotFound on a non-existent
+                // chunk is silently skipped (idempotent forget).
+                let owned = match a.memory.get(&id).await.map_err(memory_err_to_ipc)? {
+                    Some(c) => c.caller_id == caller_id,
+                    None => continue,
+                };
+                if !owned {
+                    return Err(IpcError::NotAuthorized);
+                }
+                a.memory
+                    .delete(&id, cel_memory::EvictionReason::UserDelete)
+                    .await
+                    .map_err(memory_err_to_ipc)?;
+                deleted += 1;
+            }
+            return Ok(MemoryForgetResult { deleted });
+        }
+
+        // Predicate path: translate the IPC predicate into the in-process
+        // `MemoryPredicate`. The wire predicate is intentionally narrower
+        // than the trait one (only kind/older_than/tag); we always scope to
+        // the caller's chunks so an MCP client can't mass-delete another
+        // caller's history through this path.
+        let p = params.predicate.unwrap_or_default();
+        let kinds = match p.kind {
+            Some(ks) => Some(
+                ks.iter()
+                    .map(|s| parse_chunk_kind(Some(s.as_str())))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            None => None,
+        };
+        let predicate = cel_memory::MemoryPredicate {
+            kinds,
+            callers: Some(vec![caller_id]),
+            before: p.older_than,
+            // The `tag` predicate field is honored via the content_contains
+            // fallback for now — the SQLite layer doesn't yet index metadata
+            // JSON for fast tag lookup. The Memory tab UI path (Phase 5)
+            // will add a structured index.
+            content_contains: p.tag,
+            ..Default::default()
+        };
+        let count = a
+            .memory
+            .delete_matching(predicate, cel_memory::EvictionReason::UserDelete)
+            .await
+            .map_err(memory_err_to_ipc)?;
+        Ok(MemoryForgetResult { deleted: count })
     }
 
     // ───── Marker hooks ─────

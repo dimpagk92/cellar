@@ -11,8 +11,7 @@ readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true
-cel-memory = { path = "../cel-memory" }
-cellar-llm-router = { path = "../../cellar-llm-router" }
+cel-memory = { path = "../cel-memory", version = "0.1.0" }
 chrono = { workspace = true, features = ["serde"] }
 rusqlite = { workspace = true, features = ["functions"] }
 serde_json.workspace = true
@@ -36,7 +35,7 @@ fastembed = ["dep:fastembed"]
 chrono = { workspace = true, features = ["serde"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-# NOTE: cel-act-gateway and cellar-types intentionally NOT dev-deps here.
-# Daemon-level integration tests (rule + gateway + sqlite provider) live in
-# cel-cortex-daemon/tests/scenario_4_sqlite.rs, where those deps are first-class.
-# See ~/.claude/plans/cellar-oss-extraction-prep.md §D2 for the rationale.
+# NOTE: daemon-only crates (rule gateway, Cellar event types) are intentionally
+# NOT dev-deps here. Daemon-level integration tests that need them live in the
+# downstream Cellar daemon; keeping them out keeps this crate standalone-testable
+# with only cel-memory + storage deps.

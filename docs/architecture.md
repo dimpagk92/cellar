@@ -137,11 +137,47 @@ The right approach is:
 
 - `cel-accessibility` — AX / desktop structure
 - `cel-context` — context fusion and normalization
-- `cel-cortex` — execution routing, runtime state, adapter dispatch
+- `cel-cortex` — live world/device context + execution: perception fusion,
+  freshness / anomaly tracking, action dispatch, observed effects, execution
+  receipts ("what is true now?")
 - `cel-input` — input primitives and app scripting bridges
 - `cel-cdp` — browser/CDP substrate
 - `cel-signals` / `cel-network` / `cel-display` / `cel-vision` — supporting streams
 - `cel-napi` — native boundary for JS/TS callers
+
+### Context, memory, and briefing crates
+
+These four crates have strict, non-overlapping ownership. Keep the boundaries
+clean — none should absorb another's job.
+
+| Crate | Question it answers | Owns | Does **not** own |
+|---|---|---|---|
+| `cel-cortex` | What is true *now*? | Live device/world context + execution: AX / CDP / vision / audio / signal fusion, freshness, anomalies, action dispatch, observed effects, execution receipts | Durable memory; prompt / brief assembly or budgeting |
+| `cel-memory` | What should *persist* across turns? | The durable memory contract: `MemoryProvider`, chunks, sessions, retrieval profiles, caller scoping, write hooks, summaries, rollups, aging, export | Live perception; prompt / brief assembly |
+| `cel-memory-sqlite` | (a backend) | One concrete backend for `cel-memory`: SQLite / `sqlite-vec` storage, migrations, embeddings, hybrid retrieval, caching | The contract itself (it depends on `cel-memory`); cortex / brief |
+| `cel-brief` | What should the model *see this turn*? | Per-turn LLM briefing assembly: the `Source` trait, contributions, token budgeting, priority pruning, governance / redaction, a provider-agnostic `Brief`, and a receipt of what the model saw / did not see | Discovering live truth itself; storing memory |
+
+Dependency direction: `cel-memory-sqlite → cel-memory`; `cel-brief → cel-memory`
+(optional, behind the `memory` feature) plus a generic perception trait (behind
+the `perception` feature) — **never** `cel-brief → cel-cortex`. A live snapshot
+flows cortex → (adapter / integration) → a `cel-brief` `Source`, never the
+reverse. `cel-cortex` integrates memory and brief only at downstream /
+integration layers, never inside the engine core.
+
+#### Two kinds of receipts
+
+"Receipt" means two different things in this repo; do not conflate them:
+
+- A **cel-cortex execution receipt** proves the *dispatch / observed-execution
+  path* — that CEL routed an action and what it observed as the immediate
+  effect.
+- A **cel-brief receipt** (`BriefReceipt`) proves *what was included, dropped,
+  redacted, and budgeted* for a specific LLM call.
+
+Neither is a completion proof. Completion still requires
+verification / readback / post-state evidence (adapter readback, CDP / AX state,
+screenshot, Cortex diff) — see Design Rule 7 in
+[`adapters-cel-agents.md`](./adapters-cel-agents.md).
 
 ### Adapter surface
 

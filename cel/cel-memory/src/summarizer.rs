@@ -2,19 +2,18 @@
 //!
 //! The summarizer is the seam between the memory subsystem and whichever
 //! LLM client a deployment uses to synthesize end-of-session summaries,
-//! daily rollups, and rule-week rollups (see `cellar-memory-manager.md`
-//! §9). The trait is intentionally tiny — given a list of chunks plus an
+//! daily rollups, and rule-week rollups. The trait is intentionally tiny —
+//! given a list of chunks plus an
 //! optional pre-prompt the caller wants to inject (e.g. "session
 //! summary", "daily rollup for 2026-05-23"), produce a short string
 //! synthesis. The provider is responsible for writing the resulting
 //! `MemoryChunk` and linking its constituents in
 //! `memory_summary_members`; the summarizer itself only generates text.
 //!
-//! Two production implementations live in
-//! [`cel-memory-sqlite`](../../../cel_memory_sqlite/summarizer/index.html):
+//! Two production implementations live in the `cel-summarizer` crate:
 //! `AnthropicSummarizer` (default cloud path, Claude Haiku 4.5) and
 //! `OllamaSummarizer` (local fallback, pinned to
-//! `llama3.2:3b-instruct-q4_K_M` per §1.1 decision 3).
+//! `llama3.2:3b-instruct-q4_K_M`).
 //!
 //! Object-safe: stored as `Arc<dyn Summarizer>` everywhere.
 //!
@@ -70,7 +69,7 @@ pub type SummarizerResult<T> = std::result::Result<T, SummarizerError>;
 /// Provider-agnostic: the field is wire-shape neutral so the same value
 /// flows through `AnthropicSummarizer`, `OllamaSummarizer`, or any
 /// future implementation. The Anthropic/Ollama impls render this into a
-/// system prompt that matches §9.4.
+/// system prompt.
 #[derive(Debug, Clone, Default)]
 pub struct SummaryContext {
     /// Human-readable label for the kind of summary being produced —
@@ -103,7 +102,7 @@ pub trait Summarizer: Send + Sync {
 
     /// Produce a summary string for the given chunks. Implementations
     /// should respect [`SummaryContext::max_words`] when set and
-    /// produce neutral past-tense prose per §9.4.
+    /// produce neutral past-tense prose.
     ///
     /// Implementations MUST return [`SummarizerError::NoInput`] when
     /// `chunks` is empty. The provider relies on this to skip writing
@@ -206,6 +205,7 @@ mod tests {
             metadata: Value::Null,
             importance: 0.5,
             pinned: false,
+            shareable: false,
             superseded_by: None,
             embedding_model: "mock".into(),
             embedding_dim: 0,

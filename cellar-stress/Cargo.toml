@@ -1,0 +1,43 @@
+[package]
+name = "cellar-stress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cellar-stress"
+path = "src/main.rs"
+
+[lib]
+name = "cellar_stress"
+path = "src/lib.rs"
+
+[dependencies]
+# Daemon under test — wired in-process so the harness exercises the real
+# subsystems (IPC handler, gateway, memory provider, event bus).
+cel-cortex-daemon = { path = "../cel-cortex-daemon" }
+cel-act-gateway = { path = "../cel-act-gateway" }
+cel-memory = { path = "../cel/cel-memory" }
+cellar-ipc = { path = "../cellar-ipc" }
+cellar-types = { path = "../cellar-types" }
+
+# CLI + serialisation
+anyhow.workspace = true
+async-trait.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+humantime = "2"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sysinfo = "0.32"
+tempfile = "3"
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+uuid = { workspace = true, features = ["v7", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

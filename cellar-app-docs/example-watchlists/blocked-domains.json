@@ -1,0 +1,17 @@
+{
+  "name": "blocked_domains",
+  "description": "Domains the agent should never navigate to without explicit confirmation. The in_watchlist operator matches against the extracted hostname of the URL, so each subdomain must be listed explicitly (e.g. \"facebook.com\" alone does NOT cover \"www.facebook.com\" — both are listed below). See cellar-app-docs/rule-cookbook.md recipe #6.",
+  "items": [
+    "facebook.com",
+    "www.facebook.com",
+    "instagram.com",
+    "www.instagram.com",
+    "tiktok.com",
+    "www.tiktok.com",
+    "x.com",
+    "www.x.com",
+    "twitter.com",
+    "www.twitter.com"
+  ],
+  "updated_at": "2026-06-01T00:00:00Z"
+}

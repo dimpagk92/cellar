@@ -66,6 +66,16 @@ export class CdpClient {
   private config: CdpClientConfig;
   private _directCdp = false;
   private _recovering = false;
+  /**
+   * Page-level CDP WebSocket URL for the attached page, resolved AFTER
+   * `connect()` returns. Lets external code (the bench runner, the Cortex
+   * bind path) talk to the EXACT page this client created — critical when
+   * the cortex needs to act on the same target the adapter perceives /
+   * screenshots, otherwise the cortex picks Chromium's initial about:blank
+   * via /json/list and the two diverge (ArXiv / Apple / BBC WV FAILs on
+   * 2026-05-26: agent answer was correct, screenshot was the start URL).
+   */
+  private _pageWsUrl: string | null = null;
 
   constructor(config: CdpClientConfig) {
     this.config = config;
@@ -99,6 +109,16 @@ export class CdpClient {
   /** Whether we're in direct CDP mode (no Playwright). */
   get isDirectCdp(): boolean {
     return this._directCdp;
+  }
+
+  /**
+   * Page-level CDP WebSocket URL for the attached page, populated AFTER
+   * `connect()` returns. `null` in direct-CDP mode (caller passed cdpUrl
+   * explicitly — they already have it) or before connect / after disconnect.
+   * Format: `ws://127.0.0.1:PORT/devtools/page/<TARGETID>`.
+   */
+  get pageWsUrl(): string | null {
+    return this._pageWsUrl;
   }
 
   /** Connect to an existing browser or launch a new one. */
@@ -202,6 +222,32 @@ export class CdpClient {
     if (this.config.browser === "chromium" && this._page) {
       const session = await this._page.context().newCDPSession(this._page);
       this._cdp.connectViaSession(session);
+
+      // Resolve page-level WS URL so callers (cortex bind, external tools)
+      // can talk to the SAME target this client created. Without this the
+      // cortex's bind_browser_cdp_url discovery picks the first /json/list
+      // entry — usually Chromium's initial about:blank — and ends up acting
+      // on a different page than the adapter perceives/screenshots.
+      try {
+        // Target.getTargetInfo with no targetId returns info about the
+        // target the session is attached to.
+        const info = await this._cdp.send<{ targetInfo: { targetId: string } }>(
+          "Target.getTargetInfo",
+          {},
+        );
+        const targetId = info?.targetInfo?.targetId;
+        const wsEndpoint = this.config.wsEndpoint ?? this.config.cdpUrl ?? "";
+        const port = (() => {
+          try { return new URL(wsEndpoint).port || ""; } catch { return ""; }
+        })();
+        if (targetId && port) {
+          this._pageWsUrl = `ws://127.0.0.1:${port}/devtools/page/${targetId}`;
+        }
+      } catch {
+        // Best-effort — page-WS-URL resolution is an optimization for cortex
+        // binding; failure here just means cortex falls back to first-target
+        // discovery (legacy behavior).
+      }
     }
   }
 
@@ -230,6 +276,7 @@ export class CdpClient {
     this.context = null;
     this._page = null;
     this._directCdp = false;
+    this._pageWsUrl = null;
   }
 
   /**
@@ -267,6 +314,24 @@ export class CdpClient {
         await this._cdp.disconnect();
         const session = await this._page.context().newCDPSession(this._page);
         this._cdp.connectViaSession(session);
+
+        // Re-resolve page-level WS URL — recovery created a new page target,
+        // so the previous URL is stale. Mirrors the connect() block above.
+        this._pageWsUrl = null;
+        try {
+          const info = await this._cdp.send<{ targetInfo: { targetId: string } }>(
+            "Target.getTargetInfo",
+            {},
+          );
+          const targetId = info?.targetInfo?.targetId;
+          const wsEndpoint = this.config.wsEndpoint ?? this.config.cdpUrl ?? "";
+          const port = (() => {
+            try { return new URL(wsEndpoint).port || ""; } catch { return ""; }
+          })();
+          if (targetId && port) {
+            this._pageWsUrl = `ws://127.0.0.1:${port}/devtools/page/${targetId}`;
+          }
+        } catch { /* best-effort */ }
       }
 
       // Re-inject closed shadow DOM patch

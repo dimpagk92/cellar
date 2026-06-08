@@ -70,10 +70,21 @@ const STEALTH_ARGS = [
 ];
 
 // Default Chrome args we always pass for a sane benchmark / agent profile.
-const BASE_ARGS = [
+//
+// `--no-sandbox` is included whenever we detect we're running as root
+// (UID 0) OR the caller explicitly opted in via CEL_BROWSER_NO_SANDBOX=1.
+// Chromium refuses to launch as root without it, and the Hetzner benchmark
+// server (`root@204.168.232.124:/opt/cellar`) is always root. Without this,
+// every server-side webvoyager / mind2web / browsergym run dies before
+// task 1 with "Running as root without --no-sandbox is not supported".
+// See feedback_cellar_server_benchmarks.md for the full story.
+const BASE_ARGS: string[] = [
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-sync",
+  ...(process.getuid?.() === 0 || process.env.CEL_BROWSER_NO_SANDBOX === "1"
+    ? ["--no-sandbox"]
+    : []),
 ];
 
 interface SingletonState {

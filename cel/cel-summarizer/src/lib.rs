@@ -1,30 +1,21 @@
-//! Production [`Summarizer`] implementations backed by the cellar LLM
-//! router.
+//! LLM-backed [`Summarizer`](cel_memory::Summarizer) implementations for
+//! the Cellar memory subsystem.
 //!
-//! Two impls live here, one per backend the v1 plan calls out
-//! (`cellar-memory-manager.md` §9.3):
+//! Provides [`AnthropicSummarizer`], [`OllamaSummarizer`], and the
+//! [`build_default`] factory function. These are wired into
+//! [`cel_memory_sqlite::SqliteMemoryProvider`] by the daemon at boot via
+//! [`cel_memory_sqlite::SqliteMemoryProvider::with_summarizer`].
 //!
-//! - [`AnthropicSummarizer`] — default cloud path, Claude Haiku 4.5.
-//! - [`OllamaSummarizer`] — local fallback, pinned to
-//!   `llama3.2:3b-instruct-q4_K_M` per §1.1 decision 3.
-//!
-//! Selection lives in [`build_default`], which reads
-//! `CELLAR_MEMORY_SUMMARIZER_PROVIDER` (`anthropic` | `ollama`,
-//! default `anthropic`) and falls back to Ollama when the requested
-//! provider is Anthropic but `ANTHROPIC_API_KEY` is missing. Daemons
-//! wire this at boot and pass the resulting handle into
-//! [`crate::SqliteMemoryProvider::with_summarizer`].
-//!
-//! The transport is [`cellar_llm_router`]'s `LlmProvider`. Both impls
-//! own an `Arc<dyn LlmProvider>` so callers can supply a real client
-//! or a `MockProvider` for tests — but **production code should not
-//! pass a mock**; tests that need to short-circuit the LLM call should
-//! use [`cel_memory::MockSummarizer`] directly.
+//! This crate is private to the Cellar workspace — it depends on
+//! `cellar-llm-router` which is not on crates.io. The three OSS-candidate
+//! crates (`cel-memory`, `cel-memory-sqlite`, `cel-brief`) must not depend
+//! on this crate.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use cel_memory::{
+    offdevice_hook::{OffdeviceCallDescriptor, OffdeviceCallHook, OffdeviceDecision},
     summarizer::{Summarizer, SummarizerError, SummarizerResult, SummaryContext},
     MemoryChunk,
 };
@@ -60,10 +51,19 @@ pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// is trivial. Production callers construct via
 /// [`AnthropicSummarizer::from_env`] or by passing a real
 /// [`AnthropicProvider`].
+///
+/// **Off-device governance:** every `summarize` call is an off-device
+/// network round-trip. When an [`OffdeviceCallHook`] is attached via
+/// [`Self::with_offdevice_hook`], the summarizer consults it before
+/// the network call and surfaces a `Provider`-style error on `Veto`
+/// (the rule matcher can author "never call Anthropic during work
+/// hours" rules; see `cellar-memory-manager.md` §16). Without a hook,
+/// the call always proceeds.
 pub struct AnthropicSummarizer {
     name: String,
     model: String,
     client: Arc<dyn LlmProvider>,
+    offdevice_hook: Option<Arc<dyn OffdeviceCallHook>>,
 }
 
 impl AnthropicSummarizer {
@@ -78,7 +78,18 @@ impl AnthropicSummarizer {
             name,
             model,
             client,
+            offdevice_hook: None,
         }
+    }
+
+    /// Attach an [`OffdeviceCallHook`] consulted before every network
+    /// call. The daemon wires the matcher-driven
+    /// `MatcherOffdeviceHook` here so `Veto` rules on
+    /// `MemoryOffdeviceCallAttempted` events block the call. Builder-style
+    /// so callers can chain on `from_env`.
+    pub fn with_offdevice_hook(mut self, hook: Arc<dyn OffdeviceCallHook>) -> Self {
+        self.offdevice_hook = Some(hook);
+        self
     }
 
     /// Construct from environment. Requires `ANTHROPIC_API_KEY` to be
@@ -110,6 +121,26 @@ impl Summarizer for AnthropicSummarizer {
     ) -> SummarizerResult<String> {
         if chunks.is_empty() {
             return Err(SummarizerError::NoInput);
+        }
+        if let Some(hook) = &self.offdevice_hook {
+            let mut desc = OffdeviceCallDescriptor::new(
+                "summarizer",
+                "anthropic",
+                &self.model,
+                "memory_summarizer",
+            );
+            if let Some(label) = &ctx.kind_label {
+                desc = desc.with_metadata("kind_label", label.clone());
+            }
+            desc = desc.with_metadata("chunk_count", chunks.len() as i64);
+            match hook.before_call(&desc).await {
+                OffdeviceDecision::Allow => {}
+                OffdeviceDecision::Veto { reason } => {
+                    return Err(SummarizerError::Provider(format!(
+                        "off-device call vetoed: {reason}"
+                    )));
+                }
+            }
         }
         let req = build_request(&self.model, chunks, ctx);
         let resp = self
@@ -198,7 +229,7 @@ impl Summarizer for OllamaSummarizer {
 /// 3. Any other value → treat as Anthropic with fallback (forgiving).
 ///
 /// Returns an `Arc<dyn Summarizer>` ready to plug into
-/// [`crate::SqliteMemoryProvider::with_summarizer`].
+/// [`cel_memory_sqlite::SqliteMemoryProvider::with_summarizer`].
 pub fn build_default() -> SummarizerResult<Arc<dyn Summarizer>> {
     let kind = std::env::var(PROVIDER_ENV)
         .ok()
@@ -323,6 +354,7 @@ mod tests {
             metadata: Value::Null,
             importance: 0.5,
             pinned: false,
+            shareable: false,
             superseded_by: None,
             embedding_model: "mock".into(),
             embedding_dim: 0,
@@ -458,5 +490,115 @@ mod tests {
             Some(v) => std::env::set_var(PROVIDER_ENV, v),
             None => std::env::remove_var(PROVIDER_ENV),
         }
+    }
+
+    #[tokio::test]
+    async fn anthropic_summarizer_offdevice_veto_short_circuits_llm() {
+        // Hook returns Veto — the summarizer must surface a Provider
+        // error and the LLM client must never see a request.
+        use cel_memory::ClosureOffdeviceHook;
+        let llm = MockProvider::with_text("should not be called");
+        let hook: Arc<dyn OffdeviceCallHook> =
+            Arc::new(ClosureOffdeviceHook(|_d: &OffdeviceCallDescriptor| {
+                OffdeviceDecision::Veto {
+                    reason: "work hours".into(),
+                }
+            }));
+        let s = AnthropicSummarizer::new(llm.clone(), DEFAULT_ANTHROPIC_MODEL)
+            .with_offdevice_hook(hook);
+        let err = s
+            .summarize(&[chunk("a", "alpha")], &SummaryContext::default())
+            .await
+            .unwrap_err();
+        match err {
+            SummarizerError::Provider(msg) => assert!(
+                msg.contains("off-device call vetoed") && msg.contains("work hours"),
+                "unexpected provider error: {msg}"
+            ),
+            other => panic!("expected Provider, got {other:?}"),
+        }
+        // Critical: the LLM never received the request.
+        assert_eq!(llm.requests().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn anthropic_summarizer_offdevice_allow_proceeds_to_llm() {
+        // Hook returns Allow — the network call proceeds.
+        use cel_memory::ClosureOffdeviceHook;
+        let llm = MockProvider::with_text("synthesised");
+        let hook: Arc<dyn OffdeviceCallHook> =
+            Arc::new(ClosureOffdeviceHook(|_d: &OffdeviceCallDescriptor| {
+                OffdeviceDecision::Allow
+            }));
+        let s = AnthropicSummarizer::new(llm.clone(), DEFAULT_ANTHROPIC_MODEL)
+            .with_offdevice_hook(hook);
+        let out = s
+            .summarize(&[chunk("a", "alpha")], &SummaryContext::default())
+            .await
+            .unwrap();
+        assert_eq!(out, "synthesised");
+        assert_eq!(llm.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn anthropic_summarizer_offdevice_descriptor_carries_metadata() {
+        // The hook sees the provider/model/subsystem + the kind_label
+        // and chunk_count metadata. Necessary for rules that want to
+        // distinguish "session summary" from "daily rollup."
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Option<OffdeviceCallDescriptor>>> = Arc::new(Mutex::new(None));
+        let captured_clone = Arc::clone(&captured);
+        struct CapturingHook(Arc<Mutex<Option<OffdeviceCallDescriptor>>>);
+        #[async_trait]
+        impl OffdeviceCallHook for CapturingHook {
+            async fn before_call(&self, d: &OffdeviceCallDescriptor) -> OffdeviceDecision {
+                *self.0.lock().unwrap() = Some(d.clone());
+                OffdeviceDecision::Allow
+            }
+        }
+        let llm = MockProvider::with_text("ok");
+        let hook: Arc<dyn OffdeviceCallHook> = Arc::new(CapturingHook(captured_clone));
+        let s = AnthropicSummarizer::new(llm, "claude-haiku-4-5").with_offdevice_hook(hook);
+        let _ = s
+            .summarize(
+                &[chunk("a", "alpha"), chunk("b", "beta")],
+                &SummaryContext {
+                    kind_label: Some("day 2026-05-23".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let d = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("hook saw descriptor");
+        assert_eq!(d.kind, "summarizer");
+        assert_eq!(d.provider, "anthropic");
+        assert_eq!(d.model, "claude-haiku-4-5");
+        assert_eq!(d.subsystem, "memory_summarizer");
+        assert_eq!(
+            d.metadata.get("kind_label").and_then(|v| v.as_str()),
+            Some("day 2026-05-23")
+        );
+        assert_eq!(
+            d.metadata.get("chunk_count").and_then(|v| v.as_i64()),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_summarizer_without_hook_skips_governance() {
+        // Backward-compatibility: a summarizer constructed without a
+        // hook makes the call unconditionally.
+        let llm = MockProvider::with_text("free pass");
+        let s = AnthropicSummarizer::new(llm.clone(), DEFAULT_ANTHROPIC_MODEL);
+        let out = s
+            .summarize(&[chunk("a", "alpha")], &SummaryContext::default())
+            .await
+            .unwrap();
+        assert_eq!(out, "free pass");
+        assert_eq!(llm.requests().len(), 1);
     }
 }

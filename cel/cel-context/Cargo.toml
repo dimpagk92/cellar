@@ -10,6 +10,7 @@ cel-display = { workspace = true }
 cel-input = { workspace = true }
 cel-accessibility = { workspace = true }
 cel-vision = { workspace = true }
+cel-ocr = { workspace = true }
 cel-network = { workspace = true }
 cel-signals = { workspace = true }
 async-trait = { workspace = true }

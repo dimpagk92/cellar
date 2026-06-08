@@ -23,6 +23,12 @@ pub enum ContextSource {
     /// `dom:*`-id JS-click dispatch path rather than native macOS
     /// input.
     Cdp,
+    /// From on-device OCR (macOS Vision `VNRecognizeText`). A local,
+    /// deterministic text-recognition fallback for screen regions with no
+    /// accessibility tree (canvas, games, image-only documents) — distinct
+    /// from `Vision` (the slower, non-deterministic VLM) so consumers know the
+    /// element came from pixel OCR, not a model's semantic read.
+    Ocr,
     /// Merged from multiple sources.
     Merged,
 }

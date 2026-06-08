@@ -1,5 +1,5 @@
--- Cellar memory storage schema — initial migration.
--- See /Users/dimitriospagkratis/.claude/plans/cellar-memory-manager.md §6.2.
+-- cel-memory-sqlite storage schema — initial migration.
+-- Defines the persistence tables for the cel_memory::MemoryProvider contract.
 --
 -- This migration assumes the sqlite-vec extension is already loaded into
 -- the connection (the SqliteMemoryProvider does that at open time, before

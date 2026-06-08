@@ -17,7 +17,7 @@ name = "adapter-mail"
 path = "src/main.rs"
 
 [dependencies]
-cel-cortex = { workspace = true }
+cel-adapter-sdk = { workspace = true }
 cel-contracts = { workspace = true }
 cel-context = { workspace = true }
 cel-accessibility = { workspace = true }

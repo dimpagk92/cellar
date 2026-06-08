@@ -39,6 +39,17 @@ pub struct AgentMessageParams {
     pub content: String,
 }
 
+/// Params for `agent.run` — a one-shot goal execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRunParams {
+    /// The natural-language goal for the agent to carry out.
+    pub goal: String,
+    /// Plan only — instruct the agent to describe what it would do without
+    /// dispatching tools. Defaults to false.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
 /// Params for `agent.chat.subscribe`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentChatSubscribeParams {

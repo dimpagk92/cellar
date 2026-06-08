@@ -12,6 +12,8 @@ pub mod confirmation;
 pub mod daemon;
 pub mod events;
 pub mod fires;
+pub mod gateway;
+pub mod memory;
 pub mod rules;
 pub mod settings;
 pub mod stream_filter;

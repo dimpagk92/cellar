@@ -26,7 +26,7 @@ use cel_cortex_daemon::Daemon;
 use cellar_ipc::params::confirmation::{
     ConfirmationDecisionWire, ConfirmationListPendingParams, ConfirmationResolveParams,
 };
-use cellar_ipc::params::events::EventsRecentParams;
+use cellar_ipc::params::events::{EventsPublishParams, EventsRecentParams};
 use cellar_ipc::params::fires::FiresRecentParams;
 use cellar_ipc::params::rules::{
     RuleIdParams, RulesAddParams, RulesCompileParams, RulesGetParams, RulesListParams,
@@ -1012,4 +1012,293 @@ async fn daemon_status_after_rule_add_reflects_count() {
     assert_eq!(status.rules.total, 1);
     assert_eq!(status.rules.enabled, 1);
     assert_eq!(status.watchlists.total, 1);
+}
+
+#[tokio::test]
+async fn events_publish_injects_event_into_daemon_bus() {
+    let bench = Bench::new().await;
+
+    // Subscribe to the raw bus before calling events.publish so we can
+    // verify the event is actually delivered. The ring-filler task is not
+    // running in the test harness, so events.recent would be empty; a direct
+    // bus subscription is the right verification surface here.
+    let mut rx = bench.daemon.event_bus.subscribe();
+
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "url".into(),
+        serde_json::json!("https://blocked.example.com"),
+    );
+
+    let _: OkResult = bench
+        .client
+        .call(
+            "events.publish",
+            EventsPublishParams {
+                kind: "url_changed".into(),
+                source: Some("cortex_cdp".into()),
+                data,
+            },
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+        .await
+        .expect("timed out waiting for published event")
+        .expect("bus closed unexpectedly");
+
+    use cellar_types::EventKind;
+    assert_eq!(event.kind, EventKind::UrlChanged);
+    assert_eq!(
+        event.data.get("url").and_then(|v| v.as_str()),
+        Some("https://blocked.example.com")
+    );
+}
+
+#[tokio::test]
+async fn events_publish_default_source_is_cortex_cdp() {
+    let bench = Bench::new().await;
+    let mut rx = bench.daemon.event_bus.subscribe();
+
+    let _: OkResult = bench
+        .client
+        .call(
+            "events.publish",
+            EventsPublishParams {
+                kind: "url_changed".into(),
+                source: None,
+                data: serde_json::Map::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+        .await
+        .expect("timed out")
+        .expect("bus closed");
+
+    use cellar_types::EventSource;
+    assert_eq!(event.source, EventSource::CortexCdp);
+}
+
+#[tokio::test]
+async fn events_publish_unknown_kind_returns_validation_error() {
+    let bench = Bench::new().await;
+    let err = bench
+        .client
+        .call::<_, OkResult>(
+            "events.publish",
+            EventsPublishParams {
+                kind: "not_a_real_kind_9999".into(),
+                source: None,
+                data: serde_json::Map::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown event kind") || msg.contains("invalid"),
+        "expected validation error, got: {msg}"
+    );
+}
+
+// ───── Scenario 3 (url_change_guard) end-to-end ──────────────────────────
+//
+// Closes the loop the Tauri-side cortex_bridge opens: a `url_changed`
+// event published via the daemon IPC reaches the matcher and fires the
+// `url_change_guard` rule when the URL's hostname is in the
+// `blocked_domains` watchlist. The bridge itself is verified by
+// `events_publish_injects_event_into_daemon_bus` above; this test asserts
+// that the example rule asset at
+// `cellar-app-docs/example-rules/url-change-guard.json` actually behaves
+// as advertised against an end-to-end IPC + matcher loop.
+//
+// Bench::new() does NOT spawn matcher_task — main.rs does that wiring in
+// production, and the bulk of these tests don't need a matcher running.
+// These two tests do, so they spawn one inline against the bench's
+// existing rules_store / memory / cooldown.
+
+/// Build the Scenario 3 url_change_guard rule programmatically so the test
+/// doesn't depend on parsing the example JSON. Mirrors the shape in
+/// `cellar-app-docs/example-rules/url-change-guard.json`.
+fn url_change_guard_rule() -> Rule {
+    Rule {
+        id: "url_change_guard".into(),
+        name: "Pause when the browser navigates to a blocked domain".into(),
+        nl_original:
+            "ask me before the browser ends up on a domain from my blocklist, no matter who navigated there"
+                .into(),
+        kind: RuleKind::Guard,
+        enabled: true,
+        match_expr: Expression::all(vec![
+            Expression::leaf("kind", Operator::Eq, json!("url_changed")),
+            Expression::leaf(
+                "data.url",
+                Operator::InWatchlist,
+                json!("blocked_domains"),
+            ),
+        ]),
+        action: Action {
+            action_type: ActionType::RequireConfirmation,
+            webhook_id: None,
+            timeout_s: Some(120),
+        },
+        // Test cooldown is zero so a second fire on the same bench is observable
+        // when needed. Production rule (example JSON) ships with 60s.
+        cooldown_seconds: 0,
+        created_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn url_change_guard_fires_on_blocked_domain_event_publish() {
+    let bench = Bench::new().await;
+    // Subscribe BEFORE spawning the matcher so the first fire is delivered
+    // (broadcast channels only buffer for active subscribers).
+    let mut fires_rx = bench.daemon.fire_bus.subscribe();
+
+    // The bench wires Daemon but never spawns the matcher consumer task —
+    // events.publish lands on the bus but no rule evaluation happens by
+    // default. Spawn one for this test so the rule actually fires. The
+    // JoinHandle is held for the test's lifetime; dropping the bench drops
+    // the bus, which closes the matcher loop and cleans the task up.
+    let _matcher = cel_cortex_daemon::matcher_task::spawn(
+        &bench.daemon.event_bus,
+        bench.daemon.rules_store.clone(),
+        bench.daemon.rules_store.clone(),
+        bench.daemon.memory.clone(),
+        Some(bench.daemon.cooldown.clone()),
+        None,
+        Some(bench.daemon.fire_bus.clone()),
+        None,
+    );
+
+    // Seed the blocked_domains watchlist. The URL-aware in_watchlist
+    // operator strips the URL down to its hostname before comparing, so
+    // a bare "facebook.com" entry catches "https://www.facebook.com/foo".
+    let _: OkResult = bench
+        .client
+        .call(
+            "watchlists.set",
+            WatchlistsSetParams {
+                name: "blocked_domains".into(),
+                items: vec!["facebook.com".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+    let _: RulesAddResult = bench
+        .client
+        .call(
+            "rules.add",
+            RulesAddParams {
+                rule: url_change_guard_rule(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // Publish a url_changed event for a watchlisted domain — the same
+    // payload shape the Tauri cortex_bridge produces in production. The
+    // URL's hostname is `facebook.com` here, matching the watchlist
+    // entry exactly. `extract_url_hostname` does NOT strip a leading
+    // `www.`, so a URL like `https://www.facebook.com/...` would NOT
+    // match unless `www.facebook.com` is also in the watchlist — see
+    // the second test below for the explicit www. variant.
+    let mut data = serde_json::Map::new();
+    data.insert("url".into(), json!("https://facebook.com/some-page"));
+    let _: OkResult = bench
+        .client
+        .call(
+            "events.publish",
+            EventsPublishParams {
+                kind: "url_changed".into(),
+                source: Some("cortex_cdp".into()),
+                data,
+            },
+        )
+        .await
+        .unwrap();
+
+    let fire = tokio::time::timeout(Duration::from_millis(500), fires_rx.recv())
+        .await
+        .expect("timed out waiting for url_change_guard fire")
+        .expect("fire bus closed unexpectedly");
+
+    assert_eq!(fire.rule_id, "url_change_guard");
+    assert_eq!(fire.event_kind, "url_changed");
+    assert_eq!(fire.event_source, "cortex_cdp");
+    assert_eq!(
+        fire.event_data.get("url").and_then(|v| v.as_str()),
+        Some("https://facebook.com/some-page")
+    );
+}
+
+#[tokio::test]
+async fn url_change_guard_ignores_non_watchlisted_domain() {
+    let bench = Bench::new().await;
+    let mut fires_rx = bench.daemon.fire_bus.subscribe();
+
+    let _matcher = cel_cortex_daemon::matcher_task::spawn(
+        &bench.daemon.event_bus,
+        bench.daemon.rules_store.clone(),
+        bench.daemon.rules_store.clone(),
+        bench.daemon.memory.clone(),
+        Some(bench.daemon.cooldown.clone()),
+        None,
+        Some(bench.daemon.fire_bus.clone()),
+        None,
+    );
+
+    let _: OkResult = bench
+        .client
+        .call(
+            "watchlists.set",
+            WatchlistsSetParams {
+                name: "blocked_domains".into(),
+                items: vec!["facebook.com".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+    let _: RulesAddResult = bench
+        .client
+        .call(
+            "rules.add",
+            RulesAddParams {
+                rule: url_change_guard_rule(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // example.com isn't in the watchlist — the guard must stay quiet.
+    let mut data = serde_json::Map::new();
+    data.insert("url".into(), json!("https://example.com/landing"));
+    let _: OkResult = bench
+        .client
+        .call(
+            "events.publish",
+            EventsPublishParams {
+                kind: "url_changed".into(),
+                source: None,
+                data,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Wait the same window the positive test uses and assert no fire.
+    // Anything longer would slow the suite; 250ms is enough for the matcher
+    // to pump one event through the bus on local CI.
+    let outcome = tokio::time::timeout(Duration::from_millis(250), fires_rx.recv()).await;
+    assert!(
+        outcome.is_err(),
+        "expected no fire for non-watchlisted URL, got: {outcome:?}"
+    );
 }

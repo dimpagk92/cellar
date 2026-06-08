@@ -16,7 +16,7 @@
 //! `MemoryWriteAttempted` event from the chunk's kind, source, caller, and
 //! content prefix, runs the rule matcher over it, and returns the
 //! appropriate decision based on what fired (Veto → Redact; LogOnly → Allow
-//! but record the fire). See `cellar-memory-manager.md` §11.5.
+//! but record the fire).
 //!
 //! Without a hook, providers persist every write — the v1 default for
 //! tests and for daemons that haven't wired the rule matcher path yet.

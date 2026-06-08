@@ -57,10 +57,46 @@ async function runGoalWithRustFallback(
       max_consecutive_failures: config.maxConsecutiveFailures ?? 5,
     });
     emitRF("rust_ok", Date.now() - tRustStart);
+    // The Rust runner can return a "Failed" status without throwing —
+    // most commonly when no CDP client is bound to the cortex (the
+    // canonical-runner planner has no browser to drive, signals Fail
+    // within a few seconds, and returns cleanly). In that case the TS
+    // fallback path — which uses the caller-supplied Playwright
+    // callbacks — IS still capable of running the task. Without this
+    // fallthrough, every webvoyager / mind2web / browsergym run on the
+    // Hetzner server scored 0/5 because the bench server's cortex
+    // never sees the Playwright browser (only the cellar-mcp pipeline
+    // calls `bindBrowserCdpUrl`). Re-issue against the TS runner so
+    // the Playwright callbacks get a turn.
+    // Treat both `Failed` AND `Clarify` as triggers for TS fallback in
+    // the unattended bench-runner context. The Rust planner emits Clarify
+    // when it doesn't have enough information to proceed — most commonly
+    // "no CDP-controlled browser is bound to the cortex" (the bench
+    // pipeline binds the Playwright browser to the cortex AFTER
+    // adapter.connect, but the order is sometimes racy; see
+    // feedback_cellar_server_benchmarks.md gotcha #6). When there's no
+    // human to actually clarify with, treat it the same as Failed and
+    // let the TS planner — which uses the caller-supplied Playwright
+    // callbacks directly and doesn't need a bound cortex — have a turn.
+    // Without this, every Mind2Web task that started with the Rust
+    // planner seeing an empty page fell back at 0 steps and was scored
+    // FAIL even when the Playwright browser was healthy and the TS
+    // planner could have completed the task.
+    const status = (rustResult as { status?: string }).status?.toLowerCase();
+    if (status === "failed" || status === "fail" || status === "clarify") {
+      const reason = (rustResult as { reason?: string }).reason
+        ?? (rustResult as { question?: string }).question
+        ?? "no reason given";
+      console.error(`[cel-run] Rust runner returned ${status} (${reason.slice(0, 120)}). Falling back to TS.`);
+      const tTsStart = Date.now();
+      const r = await runGoal(cel, config, callbacks);
+      emitRF(`ts_fallback_on_${status}`, Date.now() - tTsStart);
+      return r;
+    }
     return rustResult as GoalResult;
   } catch (e) {
     emitRF("rust_fail", Date.now() - tRustStart);
-    console.error(`[cel-run] Rust runner failed: ${e}. Falling back to TS.`);
+    console.error(`[cel-run] Rust runner threw: ${e}. Falling back to TS.`);
     const tTsStart = Date.now();
     const r = await runGoal(cel, config, callbacks);
     emitRF("ts_fallback", Date.now() - tTsStart);

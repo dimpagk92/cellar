@@ -20,6 +20,7 @@ pub mod incognito;
 pub mod simhash;
 
 mod tree;
+pub mod window;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -35,6 +36,53 @@ pub use tree::{
     ElementRole, ElementState, MenuBarItem, NormalizedBounds, SkipReason, StubAccessibility,
     TruncationReason,
 };
+pub use window::{DockOp, DockResult, MenuExtraOp, MenuExtraResult, WindowGeom, WindowOp};
+
+/// Apply a window-management operation (WS2). On macOS this drives the AX
+/// window attributes (position/size/minimized/zoom/raise) and reads geometry
+/// back; other platforms return an error.
+#[cfg(target_os = "macos")]
+pub use macos::{get_window_geom, perform_dock_op, perform_menu_extra_op, perform_window_op};
+
+#[cfg(not(target_os = "macos"))]
+pub fn perform_window_op(
+    _app: Option<&str>,
+    _window_index: usize,
+    _op: &window::WindowOp,
+) -> Result<window::WindowGeom, AccessibilityError> {
+    Err(AccessibilityError::OperationFailed(
+        "window management is macOS-only".into(),
+    ))
+}
+
+/// Read-only window geometry query (WS4). macOS-only; other platforms error.
+#[cfg(not(target_os = "macos"))]
+pub fn get_window_geom(
+    _app: Option<&str>,
+    _window_index: usize,
+) -> Result<window::WindowGeom, AccessibilityError> {
+    Err(AccessibilityError::OperationFailed(
+        "window management is macOS-only".into(),
+    ))
+}
+
+/// Dock control (WS6). macOS-only; other platforms error.
+#[cfg(not(target_os = "macos"))]
+pub fn perform_dock_op(_op: &window::DockOp) -> Result<window::DockResult, AccessibilityError> {
+    Err(AccessibilityError::OperationFailed(
+        "dock control is macOS-only".into(),
+    ))
+}
+
+/// Menu-bar extras (WS7). macOS-only; other platforms error.
+#[cfg(not(target_os = "macos"))]
+pub fn perform_menu_extra_op(
+    _op: &window::MenuExtraOp,
+) -> Result<window::MenuExtraResult, AccessibilityError> {
+    Err(AccessibilityError::OperationFailed(
+        "menu-bar extras are macOS-only".into(),
+    ))
+}
 
 /// Check whether the host process has macOS Accessibility permission granted.
 ///

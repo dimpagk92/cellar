@@ -66,3 +66,14 @@ pub struct AgentMessageResult {
     /// ID assigned to the user's message.
     pub message_id: String,
 }
+
+/// Result of `agent.run` — a completed one-shot goal turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRunResult {
+    /// The ephemeral session the turn ran in (inspectable via `agent.sessions.get`).
+    pub session_id: String,
+    /// The agent's final text response.
+    pub response: String,
+    /// How many tool calls (actions) the agent dispatched during the turn.
+    pub tool_calls: u64,
+}

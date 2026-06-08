@@ -204,6 +204,35 @@ impl IpcConfirmationBroker {
             .collect()
     }
 
+    /// Enqueue a pending confirmation that was triggered by an event-bus rule
+    /// match (not the gateway intercept path). Non-blocking: the confirmation
+    /// is registered and published on the bus so `confirmation.list_pending`
+    /// and `confirmation.subscribe` clients see it, but nothing awaits its
+    /// resolution. When the user resolves it the decision is logged; there is
+    /// no blocked action to unblock.
+    ///
+    /// Used by the matcher task when `ActionType::RequireConfirmation` fires
+    /// on an ambient event (e.g. `url_changed` from the Tauri Cortex bridge).
+    pub fn enqueue_confirmation(&self, pending: PendingConfirmation) {
+        // The `_rx` side is intentionally dropped — nothing awaits on it.
+        // When `resolve()` calls `entry.tx.send(…)` it gets
+        // `is_err() == true` and logs a debug trace, which is correct
+        // behaviour for this fire-and-forget path.
+        let (tx, _rx) = oneshot::channel();
+        {
+            let mut map = self.pending.lock().expect("confirmation registry poisoned");
+            map.insert(
+                pending.id.clone(),
+                PendingEntry {
+                    confirmation: pending.clone(),
+                    tx,
+                    remembered_as: None,
+                },
+            );
+        }
+        self.bus.publish(pending);
+    }
+
     /// Bus reference (for forwarder spawn in the IPC handler).
     pub fn bus(&self) -> &ConfirmationBus {
         &self.bus

@@ -3,6 +3,8 @@
 pub mod agent;
 pub mod confirmation;
 pub mod daemon;
+pub mod gateway;
+pub mod memory;
 pub mod ok;
 pub mod rules;
 pub mod subscribe;

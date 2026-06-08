@@ -8,9 +8,9 @@
 //! and re-embed; no-ops for `update_importance` and `supersede` since v1 does
 //! not score importance.
 //!
-//! Lexical retrieval only — substring + recency. The full Memory & Context
-//! Manager replaces this with hybrid (vector + FTS + recency) retrieval per
-//! `cellar-memory-manager.md` §8.
+//! Lexical retrieval only — substring + recency. A full storage backend
+//! (e.g. the `cel-memory-sqlite` crate) replaces this with hybrid
+//! (vector + FTS + recency) retrieval.
 //!
 //! The persistence layer here is `Arc<Mutex<State>>`. The daemon will eventually
 //! back this with a `search_knowledge`-style SQLite table; in this crate's tests
@@ -138,13 +138,19 @@ impl MemoryProvider for BasicMemoryProvider {
                         return false;
                     }
                 }
-                // CallerScope::Own — restrict to caller's own chunks. The v1
-                // stub honors `Own` but does not yet implement the
-                // `shareable` flag; `OwnPlusShared` therefore behaves like
-                // `Own` in v1, and `Global` permits all chunks.
+                // CallerScope enforcement. `Own` restricts to the caller's
+                // own chunks. `OwnPlusShared` permits the caller's own
+                // chunks *and* any chunk tagged `shareable=true` (the
+                // Phase 4 multi-agent surface).
+                // `Global` permits everything.
                 match query.caller_scope {
-                    crate::query::CallerScope::Own | crate::query::CallerScope::OwnPlusShared => {
+                    crate::query::CallerScope::Own => {
                         if c.caller_id != query.caller_id {
+                            return false;
+                        }
+                    }
+                    crate::query::CallerScope::OwnPlusShared => {
+                        if c.caller_id != query.caller_id && !c.shareable {
                             return false;
                         }
                     }
@@ -243,6 +249,7 @@ impl MemoryProvider for BasicMemoryProvider {
                         metadata: serde_json::json!({"redacted": true, "reason": reason}),
                         importance: 0.0,
                         pinned: false,
+                        shareable: false,
                         superseded_by: None,
                         embedding_model: "none".into(),
                         embedding_dim: 0,
@@ -264,6 +271,7 @@ impl MemoryProvider for BasicMemoryProvider {
             metadata: new_chunk.metadata,
             importance,
             pinned: new_chunk.pinned,
+            shareable: new_chunk.shareable,
             superseded_by: None,
             embedding_model: "none".into(),
             embedding_dim: 0,
@@ -671,6 +679,48 @@ mod tests {
         query.caller_scope = CallerScope::Global;
         let hits = m.retrieve(query).await.unwrap();
         assert_eq!(hits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retrieve_own_plus_shared_surfaces_shareable_across_callers() {
+        let m = BasicMemoryProvider::new();
+        // Two callers, two chunks: one shareable from "mcp:cursor",
+        // one private from "mcp:cursor". A third caller asks with
+        // OwnPlusShared scope; only the shareable one surfaces.
+        let mut shared = nc("mcp:cursor", "user prefers dry-run mode");
+        shared.shareable = true;
+        m.write(shared).await.unwrap();
+        m.write(nc("mcp:cursor", "user said hi to cursor"))
+            .await
+            .unwrap();
+        m.write(nc("mcp:codex", "user said hi to codex"))
+            .await
+            .unwrap();
+        let mut query = q("embedded", "user");
+        query.caller_scope = CallerScope::OwnPlusShared;
+        let hits = m.retrieve(query).await.unwrap();
+        // Only the shareable chunk is visible to the embedded caller.
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].content.contains("dry-run"));
+        assert!(hits[0].shareable);
+    }
+
+    #[tokio::test]
+    async fn retrieve_own_plus_shared_includes_own_unshared() {
+        let m = BasicMemoryProvider::new();
+        // The caller's own chunks are always visible under OwnPlusShared
+        // regardless of the shareable flag.
+        m.write(nc("embedded", "embedded private note"))
+            .await
+            .unwrap();
+        m.write(nc("mcp:cursor", "cursor private note"))
+            .await
+            .unwrap();
+        let mut query = q("embedded", "note");
+        query.caller_scope = CallerScope::OwnPlusShared;
+        let hits = m.retrieve(query).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].caller_id, "embedded");
     }
 
     #[tokio::test]

@@ -101,6 +101,33 @@ fn default_effect_timeout_ms() -> u64 {
     2_000
 }
 
+/// How a native-input action delivers its event relative to app focus.
+///
+/// `Foreground` is the historical CEL behavior: the dispatcher brings the
+/// target app to the front (`activate_app` / `ensure_target_app_focus`) and
+/// then posts a session-wide CGEvent at whatever is frontmost. Robust, but
+/// it steals the user's focus and is the root cause of the focus-sensitive
+/// `hybrid`-suite constraint.
+///
+/// `Background` posts the event directly to the target process via
+/// `CGEventPostToPid` without activating it (see `cel_input::background`),
+/// so the user's active window keeps focus. Not every macOS app honors
+/// background-delivered events, so the dispatcher falls back to `Foreground`
+/// when no target PID resolves or the background post is rejected.
+///
+/// Defaults to `Foreground` so existing plans and serialized payloads are
+/// unchanged. WS1 of the Peekaboo-parity plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum FocusMode {
+    /// Activate the target app, then post input. Steals focus. Default.
+    #[default]
+    Foreground,
+    /// Post input to the target PID without activating it. Non-focus-stealing.
+    Background,
+}
+
 /// The action the planner wants to execute.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -234,6 +261,23 @@ pub enum PlannedAction {
     /// Activate (bring to front) a macOS application by name.
     /// Uses `open -a` under the hood — the most reliable app switching method.
     ActivateApp {
+        app_name: String,
+    },
+    /// Launch (start) a macOS application by name. Unlike `activate_app`, this
+    /// is about *starting* the app; with `background` it launches without
+    /// stealing focus (`open -g`). Verified by polling until the process
+    /// appears.
+    LaunchApp {
+        app_name: String,
+        /// Launch without bringing the app to the front. Defaults to false.
+        #[serde(default)]
+        background: bool,
+    },
+    /// Quit a macOS application by name, gracefully (AppleScript `quit`, like
+    /// ⌘Q). Never force-kills — an app showing an unsaved-changes dialog stays
+    /// running and the action reports failure. Verified by polling until the
+    /// process is gone.
+    QuitApp {
         app_name: String,
     },
     /// Select text by dragging from one coordinate to another.
@@ -376,6 +420,70 @@ pub enum PlannedAction {
         #[serde(alias = "refs", alias = "cells", alias = "addresses")]
         cell_refs: Vec<String>,
     },
+    /// Native window management (WS2) — move/resize/minimize/maximize/focus a
+    /// macOS window resolved by `app` + `window_index`. The cortex routes this
+    /// to `cel_accessibility::perform_window_op` and reads geometry back into
+    /// the receipt. `op` is one of: `"move"`, `"resize"`, `"set_bounds"`,
+    /// `"minimize"`, `"unminimize"`, `"maximize"`, `"focus"`. A `preset`
+    /// (WS2.3 tiling, e.g. `"left_half"`) overrides `op` + geometry when set.
+    Window {
+        op: String,
+        /// Target app name. `None` = the frontmost app.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app: Option<String>,
+        /// Window index (0 = the app's frontmost window).
+        #[serde(default)]
+        window_index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f64>,
+        /// Optional tiling preset (WS2.3). When set, overrides `op` + geometry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
+        /// Optional target display index (WS4). When set, presets/placement
+        /// target that display; otherwise the window's current display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<usize>,
+    },
+    /// Native dialog / sheet driver (WS5) — list, click a button by title, set
+    /// a text field, or dismiss the frontmost macOS Open/Save/Print sheet or
+    /// alert. The cortex resolves the dialog's controls via the accessibility
+    /// tree. `op` is one of: `"list"`, `"click"`, `"set_field"`, `"dismiss"`.
+    Dialog {
+        op: String,
+        /// Button title to click (for `op = "click"`); case-insensitive substring.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        button: Option<String>,
+        /// Value to set (for `op = "set_field"`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        /// Which visible text field to set (0-based; default 0).
+        #[serde(default)]
+        field_index: usize,
+    },
+    /// Native Dock control (WS6) — list items, launch / right-click an item by
+    /// title, or toggle auto-hide. `op` is one of: `"list"`, `"launch"`,
+    /// `"right_click"`, `"hide"`, `"show"`.
+    Dock {
+        op: String,
+        /// Dock item title (for `launch` / `right_click`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Native menu-bar extras (WS7) — list system status items (Wi-Fi,
+    /// Bluetooth, Control Center, …) or click one by title. `op` is `"list"`
+    /// or `"click"`.
+    MenuExtra {
+        op: String,
+        /// Status-item title to click (for `op = "click"`), case-insensitive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
 }
 
 /// One cell write inside a [`PlannedAction::WriteCells`] batch.
@@ -442,13 +550,23 @@ impl PlannedAction {
             | Self::Done { .. }
             | Self::Fail { .. }
             | Self::ActivateApp { .. }
+            | Self::LaunchApp { .. }
+            | Self::QuitApp { .. }
             | Self::Select { .. }
             | Self::CdpEval { .. }
             | Self::Navigate { .. }
             | Self::NotebookWrites { .. }
             | Self::WriteCells { .. }
             | Self::ReadCells { .. }
-            | Self::ExtractWithFallback { .. } => vec![],
+            | Self::ExtractWithFallback { .. }
+            // Window ops target by app + window index, not an element id.
+            | Self::Window { .. }
+            // Dialog ops resolve their controls internally, not by element id.
+            | Self::Dialog { .. }
+            // Dock ops target by item title, not an element id.
+            | Self::Dock { .. }
+            // Menu extras resolve by title, not by element id.
+            | Self::MenuExtra { .. } => vec![],
         }
     }
 }

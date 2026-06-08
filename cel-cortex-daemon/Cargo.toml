@@ -11,8 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 cel-act-gateway = { path = "../cel-act-gateway" }
+cel-brief = { path = "../cel/cel-brief", features = ["memory"] }
 cel-memory = { path = "../cel/cel-memory" }
 cel-memory-sqlite = { path = "../cel/cel-memory-sqlite" }
+cel-summarizer = { path = "../cel/cel-summarizer" }
 cel-signals = { path = "../cel/cel-signals" }
 cellar-ipc = { path = "../cellar-ipc" }
 cellar-llm-router = { path = "../cellar-llm-router" }
@@ -35,5 +37,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 chrono = { workspace = true, features = ["serde"] }
+rusqlite = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

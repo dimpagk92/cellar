@@ -179,13 +179,49 @@ pub enum StreamPayload {
 /// A subscription frame. Sent as a JSON-RPC notification with method name
 /// matching the originating subscription (e.g., `"events.frame"`,
 /// `"agent.chat.frame"`); the params are this struct.
+///
+/// `trace_id` (RFC §9) is the correlation token from the originating
+/// `*.subscribe` request — the Tauri client can use it to thread frames
+/// back to the UI action that opened the subscription. The server stamps
+/// it on every frame produced for that subscription. Older daemons that
+/// haven't been upgraded omit the field; consumers must treat it as
+/// optional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamFrame {
     /// Which subscription this frame belongs to.
     pub subscription_id: SubscriptionId,
+    /// Correlation token from the originating subscribe request. Optional
+    /// for backward compatibility with daemons that pre-date RFC §9.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
     /// The typed payload.
     #[serde(flatten)]
     pub payload: StreamPayload,
+}
+
+impl StreamFrame {
+    /// Construct a frame without a `trace_id` (legacy callsites).
+    pub fn new(subscription_id: SubscriptionId, payload: StreamPayload) -> Self {
+        Self {
+            subscription_id,
+            trace_id: None,
+            payload,
+        }
+    }
+
+    /// Construct a frame stamped with the originating subscribe request's
+    /// `trace_id`.
+    pub fn with_trace(
+        subscription_id: SubscriptionId,
+        trace_id: impl Into<String>,
+        payload: StreamPayload,
+    ) -> Self {
+        Self {
+            subscription_id,
+            trace_id: Some(trace_id.into()),
+            payload,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,12 +245,12 @@ mod tests {
 
     #[test]
     fn frame_round_trip_event() {
-        let frame = StreamFrame {
-            subscription_id: SubscriptionId("sub_xyz".into()),
-            payload: StreamPayload::Event {
+        let frame = StreamFrame::new(
+            SubscriptionId("sub_xyz".into()),
+            StreamPayload::Event {
                 event: json!({"kind": "file_deleted"}),
             },
-        };
+        );
         let wire = serde_json::to_string(&frame).unwrap();
         let back: StreamFrame = serde_json::from_str(&wire).unwrap();
         assert_eq!(frame, back);
@@ -222,16 +258,44 @@ mod tests {
 
     #[test]
     fn frame_round_trip_token() {
-        let frame = StreamFrame {
-            subscription_id: SubscriptionId("sub_chat".into()),
-            payload: StreamPayload::Token {
+        let frame = StreamFrame::new(
+            SubscriptionId("sub_chat".into()),
+            StreamPayload::Token {
                 request_id: "req_1".into(),
                 message_id: "msg_2".into(),
                 delta: "Hello".into(),
             },
-        };
+        );
         let wire = serde_json::to_string(&frame).unwrap();
         let back: StreamFrame = serde_json::from_str(&wire).unwrap();
         assert_eq!(frame, back);
+    }
+
+    #[test]
+    fn frame_with_trace_id_round_trips() {
+        let frame = StreamFrame::with_trace(
+            SubscriptionId("sub_xyz".into()),
+            "trace-sub-1",
+            StreamPayload::Event {
+                event: json!({"kind": "file_deleted"}),
+            },
+        );
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert!(wire.contains("\"trace_id\":\"trace-sub-1\""));
+        let back: StreamFrame = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.trace_id.as_deref(), Some("trace-sub-1"));
+        assert_eq!(frame, back);
+    }
+
+    #[test]
+    fn frame_without_trace_id_skips_field_on_wire() {
+        let frame = StreamFrame::new(
+            SubscriptionId("sub_xyz".into()),
+            StreamPayload::Event {
+                event: json!({"kind": "x"}),
+            },
+        );
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert!(!wire.contains("trace_id"), "wire was: {wire}");
     }
 }

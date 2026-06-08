@@ -1,13 +1,13 @@
-//! The [`MemoryProvider`] trait — the locked contract.
+//! The [`MemoryProvider`] trait — the durable cross-turn memory contract.
 //!
-//! Every Cellar daemon caller — the embedded agent runtime, the NL rule
-//! compiler, the `cel_act` gateway, the rule matcher post-fire hook, the
-//! Activity tab, the Memory tab, the MCP `cel_remember` / `cel_recall` /
-//! `cel_forget` handlers — depends on this trait. v1 ships
-//! [`crate::BasicMemoryProvider`] behind it; the full Memory & Context Manager
-//! ([`cellar-memory-manager.md`]) drops in later without caller churn.
-//!
-//! [`cellar-memory-manager.md`]: file:///Users/dimitriospagkratis/.claude/plans/cellar-memory-manager.md
+//! This is the single trait every memory backend implements and every caller
+//! depends on. In Cellar that means the embedded agent runtime, the NL rule
+//! compiler, the `cel_act` gateway, the rule-matcher post-fire hook, the
+//! Activity / Memory tabs, and the MCP `cel_remember` / `cel_recall` /
+//! `cel_forget` handlers — but the trait itself is runtime-agnostic.
+//! [`crate::BasicMemoryProvider`] is the in-crate reference backend; a full
+//! storage backend (e.g. the `cel-memory-sqlite` crate) drops in later behind
+//! the same surface without caller churn.
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -24,10 +24,10 @@ use crate::ops::EvictionReason;
 
 /// The full memory provider surface.
 ///
-/// All methods are async. All return `Result<T, MemoryError>`. v1 backs this
-/// with [`crate::BasicMemoryProvider`] (some methods return
-/// [`crate::MemoryError::NotImplemented`]); the full Memory & Context Manager
-/// subsystem implements every method.
+/// All methods are async. All return `Result<T, MemoryError>`. The in-crate
+/// [`crate::BasicMemoryProvider`] backs the read/write/session/export surface
+/// (some methods return [`crate::MemoryError::NotImplemented`]); a full storage
+/// backend (e.g. the `cel-memory-sqlite` crate) implements every method.
 #[async_trait]
 pub trait MemoryProvider: Send + Sync {
     // ─────────────── Reads ───────────────
@@ -116,11 +116,39 @@ pub trait MemoryProvider: Send + Sync {
 
     /// Produce one or more `Rollup` chunks for the named day. v1 stub returns
     /// [`crate::MemoryError::NotImplemented`].
+    ///
+    /// Skips the day if a rollup already exists for it (idempotent;
+    /// cron sweeper can safely re-run). Use [`Self::rollup_day_forced`]
+    /// to force re-summarization.
     async fn rollup_day(&self, date: NaiveDate) -> Result<Vec<MemoryChunk>>;
+
+    /// Force-produce one or more `Rollup` chunks for the named day even
+    /// if a prior rollup exists. Default impl delegates to
+    /// [`Self::rollup_day`] for backward compatibility; the SQLite
+    /// provider overrides to actually honour the force flag.
+    async fn rollup_day_forced(&self, date: NaiveDate) -> Result<Vec<MemoryChunk>> {
+        self.rollup_day(date).await
+    }
 
     /// Produce a `Rollup` chunk for the named rule across the named week.
     /// v1 stub returns [`crate::MemoryError::NotImplemented`].
+    ///
+    /// Skips the (rule, week) pair if a rollup already exists for it
+    /// (idempotent). Use [`Self::rollup_rule_week_forced`] to force
+    /// re-summarization.
     async fn rollup_rule_week(&self, rule_id: &str, week_start: NaiveDate) -> Result<MemoryChunk>;
+
+    /// Force-produce a `Rollup` chunk for the named rule + week even if
+    /// a prior rollup exists. Default impl delegates to
+    /// [`Self::rollup_rule_week`] for backward compatibility; the SQLite
+    /// provider overrides to honour the force flag.
+    async fn rollup_rule_week_forced(
+        &self,
+        rule_id: &str,
+        week_start: NaiveDate,
+    ) -> Result<MemoryChunk> {
+        self.rollup_rule_week(rule_id, week_start).await
+    }
 
     // ─────────────── Maintenance ───────────────
 

@@ -24,7 +24,7 @@
 //! `confidence`. Each implementation's `adapter.json` layers runtime-specific
 //! overrides (entrypoint, runtime, element_types, refresh_ms, lifecycle).
 //! `default_browser_manifest` embeds both layers via `include_str!` and
-//! merges through `cel_cortex::merge_manifest_layers` so this in-Rust
+//! merges through `cel_adapter_sdk::merge_manifest_layers` so this in-Rust
 //! manifest can't drift from what cortex's `discover_adapters` sees on disk.
 //!
 //! # When does it activate?
@@ -47,18 +47,23 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cel_cdp::CdpClient;
-use cel_context::ContextElement;
-use cel_cortex::{
+use cel_adapter_sdk::{
     merge_manifest_layers, ActionResult, AdapterDriver, AdapterError, AdapterManifest,
 };
+use cel_cdp::CdpClient;
+use cel_context::ContextElement;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tracing::debug;
 
 mod element_mapper;
+pub mod overlay_detector;
 
 pub use element_mapper::{dom_element_to_context_element, sanitize_id_part};
+pub use overlay_detector::{
+    detect_overlay, dismiss_overlay, tag_blocked_elements, BlockingOverlay, DismissOverlayOptions,
+    DismissResult,
+};
 
 /// Native Rust browser adapter.
 ///
@@ -76,11 +81,63 @@ pub struct BrowserAdapter {
     /// would silently swap perception out from under the runner.
     pinned: bool,
     connected: bool,
+    /// Per-tick counter so `get_context` only runs the overlay-detection
+    /// JS every Nth call. Detection costs ~5–20ms per CDP round-trip,
+    /// which we'd rather not pay on every 100ms cortex tick. Wrapped
+    /// in a `Mutex` because `get_context` takes `&self`.
+    overlay_tick_counter: Mutex<u64>,
+    /// `true` (default) ⇒ when `get_context` detects an overlay AND the
+    /// auto-dismiss tick fires, call `dismiss_overlay` privacy-preservingly
+    /// (reject > close > accept > nuclear-hide). Disable via
+    /// `with_auto_dismiss_overlays(false)` when the task is to interact
+    /// with the banner itself (rare).
+    auto_dismiss_overlays: bool,
+    /// Detection cadence: run the detection script every Nth tick of
+    /// `get_context`. Defaults to 3 (~300ms at default tick) — fast
+    /// enough that the planner doesn't burn a turn on a banner, slow
+    /// enough that the CDP eval cost doesn't dominate.
+    overlay_detect_every: u64,
 }
 
 impl Default for BrowserAdapter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Default auto-dismiss policy.
+///
+/// `lazy=true` is the [`BrowserAdapter::new`] (ambient / MCP) path; `lazy=false`
+/// is [`BrowserAdapter::with_cdp_client`] (eval harness / benchmarks).
+///
+/// `CEL_AUTO_DISMISS_OVERLAYS` (truthy `1|true|yes|on`, falsy `0|false|no|off`)
+/// overrides both paths. When unset:
+/// - **lazy** → `false`. Customer-facing MCP runs (Claude Code, Cursor) keep
+///   banners visible by default — the user is usually reasoning about consent,
+///   not asking the agent to bypass it.
+/// - **pinned** → `true`. Benchmarks (WebVoyager / Mind2Web / cellar-mcp) need
+///   the banner out of the way to measure the agent on the underlying task.
+///
+/// Callers that disagree with this heuristic should pass an explicit value via
+/// [`BrowserAdapter::with_auto_dismiss_overlays`] at construction.
+fn default_auto_dismiss(lazy: bool) -> bool {
+    default_auto_dismiss_from(lazy, std::env::var("CEL_AUTO_DISMISS_OVERLAYS").ok())
+}
+
+/// Pure helper for [`default_auto_dismiss`] — accepts the env value
+/// explicitly so unit tests can pin the resolution table without mutating
+/// process-wide state (cargo runs `#[test]`s in parallel within one
+/// process, so racy env mutation is a real footgun here).
+fn default_auto_dismiss_from(lazy: bool, env: Option<String>) -> bool {
+    let trimmed = env.as_deref().map(str::trim);
+    let lowered = trimmed.map(|s| s.to_ascii_lowercase());
+    match lowered.as_deref() {
+        Some("1" | "true" | "yes" | "on") => true,
+        Some("0" | "false" | "no" | "off") => false,
+        // Empty string and unknown values fall back to the lazy-vs-pinned
+        // heuristic — a typo like `CEL_AUTO_DISMISS_OVERLAYS=maybe` should
+        // NOT silently flip the default in either direction.
+        _ => !lazy,
     }
 }
 
@@ -90,12 +147,21 @@ impl BrowserAdapter {
     /// caches the result so subsequent ticks don't re-pay discovery
     /// cost. Right for ambient embedders (MCP server) where browsers
     /// come and go during a session.
+    ///
+    /// Auto-dismiss defaults OFF in this path so customer-facing MCP runs
+    /// (Claude Code, Cursor) don't silently click through cookie banners
+    /// the user might be reasoning about. Override via the
+    /// `CEL_AUTO_DISMISS_OVERLAYS=1` env var or
+    /// [`BrowserAdapter::with_auto_dismiss_overlays`].
     pub fn new() -> Self {
         Self {
             manifest: default_browser_manifest(),
             cdp_client: Mutex::new(None),
             pinned: false,
             connected: false,
+            overlay_tick_counter: Mutex::new(0),
+            auto_dismiss_overlays: default_auto_dismiss(true),
+            overlay_detect_every: 3,
         }
     }
 
@@ -107,13 +173,51 @@ impl BrowserAdapter {
     /// client and never tries ambient discovery — preventing the
     /// adapter from drifting onto whatever browser the user happens
     /// to have open.
+    ///
+    /// Auto-dismiss defaults ON in this path so benchmark + eval runs don't
+    /// burn vision calls reading cookie banners. Override via
+    /// `CEL_AUTO_DISMISS_OVERLAYS=0` or
+    /// [`BrowserAdapter::with_auto_dismiss_overlays`].
     pub fn with_cdp_client(client: Arc<CdpClient>) -> Self {
         Self {
             manifest: default_browser_manifest(),
             cdp_client: Mutex::new(Some(client)),
             pinned: true,
             connected: false,
+            overlay_tick_counter: Mutex::new(0),
+            auto_dismiss_overlays: default_auto_dismiss(false),
+            overlay_detect_every: 3,
         }
+    }
+
+    /// Toggle auto-dismiss of cookie / consent / modal overlays detected
+    /// during `get_context`. The construction-time default depends on
+    /// constructor: [`BrowserAdapter::new`] defaults OFF (customer MCP),
+    /// [`BrowserAdapter::with_cdp_client`] defaults ON (benchmarks).
+    /// Both defaults can be overridden via the `CEL_AUTO_DISMISS_OVERLAYS`
+    /// env var (truthy → ON, falsy → OFF).
+    ///
+    /// Call this builder to set the value explicitly — it overrides both
+    /// the constructor default and the env var. Use `true` to force
+    /// auto-dismiss on (e.g. in a benchmark runner explicitly opting in);
+    /// use `false` when interacting WITH the banner IS the goal ("Click
+    /// 'Accept all cookies' on this consent dialog"). Per-tick override
+    /// is also available via the `dismiss_overlay` / `preserve_overlay`
+    /// adapter actions in `cel_act`.
+    #[must_use]
+    pub fn with_auto_dismiss_overlays(mut self, enabled: bool) -> Self {
+        self.auto_dismiss_overlays = enabled;
+        self
+    }
+
+    /// Override the overlay-detection cadence. Defaults to every 3rd tick.
+    /// Pass `1` to detect on every tick (expensive, ~5–20ms CDP eval per
+    /// call) or a higher number to throttle further. Effective range is
+    /// `1..=255`; anything outside is clamped.
+    #[must_use]
+    pub fn with_overlay_detect_every(mut self, every: u64) -> Self {
+        self.overlay_detect_every = every.clamp(1, 255);
+        self
     }
 
     /// Bind a CDP client post-construction.
@@ -136,7 +240,7 @@ impl BrowserAdapter {
 /// `context.truth_surface`, `context.confidence`, and `verification.truth_surface`
 /// across the TS adapter (`adapters/browser/`) and this Rust adapter.
 ///
-/// `cel_cortex::load_manifest` resolves the same file at runtime via the
+/// `cel_adapter_sdk::load_manifest` resolves the same file at runtime via the
 /// `manifest_extends` pointer in `adapter.json` — embedding the bytes here
 /// keeps the in-Rust manifest agreeing with what diagnostics see on disk
 /// without forcing the crate to do file I/O at construction time.
@@ -228,41 +332,182 @@ impl AdapterDriver for BrowserAdapter {
         // tick loop tolerates the miss and tries again next cycle —
         // browser tabs close, navigate, or hang transiently and that
         // shouldn't cascade into adapter-error state.
-        match cel_cdp::extract_page_content(&client).await {
-            Ok(page) => Ok(page
+        let mut elements: Vec<ContextElement> = match cel_cdp::extract_page_content(&client).await {
+            Ok(page) => page
                 .interactive_elements
                 .iter()
                 .enumerate()
                 .map(|(idx, dom)| dom_element_to_context_element(dom, idx))
-                .collect()),
+                .collect(),
             Err(err) => {
                 debug!("browser adapter: extract_page_content failed: {err}");
-                Ok(Vec::new())
+                return Ok(Vec::new());
+            }
+        };
+
+        // Overlay handling — runs every `overlay_detect_every` ticks.
+        // We bump the counter UP FRONT so a `dismiss_overlay` attempt
+        // doesn't trigger the next tick to immediately re-run (giving
+        // the page time to settle is the whole point of the cadence).
+        let should_check_overlay = {
+            let mut counter = self.overlay_tick_counter.lock().await;
+            *counter = counter.wrapping_add(1);
+            self.overlay_detect_every > 0 && *counter % self.overlay_detect_every == 0
+        };
+        if should_check_overlay {
+            if let Some(overlay) = overlay_detector::detect_overlay(&client).await {
+                debug!(
+                    "browser adapter: detected overlay type={} cmp={:?} confidence={:.2}",
+                    overlay.overlay_type, overlay.cmp_platform, overlay.confidence
+                );
+                // Tag elements that the overlay covers BEFORE attempting
+                // dismissal — so even if dismiss fails this turn, the
+                // planner sees which elements are obscured and won't
+                // burn a step clicking through the banner.
+                overlay_detector::tag_blocked_elements(&mut elements, &overlay);
+                if self.auto_dismiss_overlays {
+                    let result = overlay_detector::dismiss_overlay(
+                        &client,
+                        &overlay_detector::DismissOverlayOptions::default(),
+                    )
+                    .await;
+                    if result.success {
+                        // INFO not DEBUG — we want this visible in benchmark
+                        // logs so we can verify the overlay detector is
+                        // actually firing on real sites (2026-05-25 smoke
+                        // raised this as an open question).
+                        tracing::info!(
+                            "browser adapter: auto-dismissed overlay type={} cmp={:?} method={:?} detail={:?}",
+                            overlay.overlay_type, overlay.cmp_platform, result.method, result.detail
+                        );
+                        // Stamp the receipt on perception so the planner
+                        // sees what was done this tick rather than
+                        // wondering where the banner went.
+                        if let Some(first) = elements.first_mut() {
+                            first
+                                .properties
+                                .insert("_overlay_dismissed".into(), "true".into());
+                            if let Some(method) = result.method {
+                                first
+                                    .properties
+                                    .insert("_overlay_dismiss_method".into(), method);
+                            }
+                            if let Some(detail) = result.detail {
+                                first
+                                    .properties
+                                    .insert("_overlay_dismiss_detail".into(), detail);
+                            }
+                        }
+                    } else {
+                        debug!(
+                            "browser adapter: overlay detected but dismiss failed: {:?}",
+                            result.detail
+                        );
+                    }
+                }
             }
         }
+
+        Ok(elements)
     }
 
     async fn execute(&self, action: &str, _params: Value) -> Result<ActionResult, AdapterError> {
         // Browser actions (cdp_eval, set_value, click) flow through the
         // canonical runner's CDP dispatch path — the runner already
         // routes `dom:*` element_ids through `cortex::build_click_js`
-        // and friends. The adapter intentionally exposes no actions of
-        // its own to avoid two parallel dispatch paths going stale at
-        // different rates.
+        // and friends. The adapter intentionally exposes no DOM actions
+        // of its own to avoid two parallel dispatch paths going stale
+        // at different rates.
         //
-        // The one canonical action that *would* fit here is `navigate`
-        // (since this adapter owns the browser CDP surface), but it's
-        // intentionally left to the cortex's `dispatch_navigate`
-        // fallback path — that path runs cel_cdp::Page.navigate plus a
-        // readyState poll plus the shared `CEL_DISMISS_OVERLAYS_JS`
-        // script, all of which would otherwise have to be reimplemented
-        // here. Adding `navigate` to this adapter's manifest would
-        // collide with the TS `adapters/browser/` peer (which is what
-        // dispatch_navigate prefers when both are active) — keep
-        // perception-only here.
-        Err(AdapterError::ExecutionFailed(format!(
-            "browser adapter does not expose direct actions — use canonical runner CDP dispatch (action requested: {action:?})"
-        )))
+        // EXCEPTION: overlay management. The detection + dismissal
+        // pipeline lives in this crate (`overlay_detector.rs`), so the
+        // adapter is the right owner for the explicit
+        // `dismiss_overlay` / `preserve_overlay` actions. The planner
+        // dispatches them via `cel_act adapter_action: { adapter:
+        // "browser", action: "dismiss_overlay" }` when it sees an
+        // `_overlay_present=true` element and wants to deal with it
+        // out-of-band of `get_context`'s tick-based auto-dismiss
+        // (e.g., to force an early dismissal on the first turn instead
+        // of waiting for tick N).
+        //
+        // The one canonical action that *would* also fit here is
+        // `navigate` (since this adapter owns the browser CDP surface),
+        // but it's intentionally left to the cortex's
+        // `dispatch_navigate` fallback path — that path runs
+        // cel_cdp::Page.navigate plus a readyState poll plus the shared
+        // `CEL_DISMISS_OVERLAYS_JS` script, all of which would
+        // otherwise have to be reimplemented here. Adding `navigate`
+        // to this adapter's manifest would collide with the TS
+        // `adapters/browser/` peer (which is what dispatch_navigate
+        // prefers when both are active) — keep navigation in the cortex.
+        match action {
+            "dismiss_overlay" => {
+                let client = {
+                    let guard = self.cdp_client.lock().await;
+                    match guard.as_ref() {
+                        Some(c) => Arc::clone(c),
+                        None => {
+                            return Err(AdapterError::ExecutionFailed(
+                                "dismiss_overlay: no CDP client bound — call bind_browser_cdp_url first".into(),
+                            ));
+                        }
+                    }
+                };
+                let result = overlay_detector::dismiss_overlay(
+                    &client,
+                    &overlay_detector::DismissOverlayOptions::default(),
+                )
+                .await;
+                // Carry the structured result via `data` — `ActionResult`
+                // has only success/error/data slots and the planner reads
+                // `data` for evidence in receipts. We also mirror the
+                // human-readable summary onto `error` when failed so it
+                // shows up in the planner's plain-text history.
+                let payload = serde_json::json!({
+                    "success": result.success,
+                    "method": result.method,
+                    "detail": result.detail,
+                });
+                Ok(if result.success {
+                    ActionResult {
+                        success: true,
+                        error: None,
+                        data: Some(payload),
+                    }
+                } else {
+                    let summary = format!(
+                        "overlay dismiss failed: method={:?} detail={:?}",
+                        result.method, result.detail
+                    );
+                    ActionResult {
+                        success: false,
+                        error: Some(summary),
+                        data: Some(payload),
+                    }
+                })
+            }
+            "preserve_overlay" => {
+                // No-op confirmation action. The planner calls this to
+                // signal "leave the banner alone this turn" — useful
+                // for tasks where interacting with the banner IS the
+                // goal. The adapter doesn't toggle its tick-based
+                // auto-dismiss from this (config flag on construction
+                // is the right place for that); instead the action
+                // exists as a planner-facing affirmation that the next
+                // turn's perception will still show the overlay.
+                Ok(ActionResult {
+                    success: true,
+                    error: None,
+                    data: Some(serde_json::json!({
+                        "preserved": true,
+                        "note": "tick auto-dismiss still governs subsequent ticks; pass with_auto_dismiss_overlays(false) at construction to disable entirely",
+                    })),
+                })
+            }
+            _ => Err(AdapterError::ExecutionFailed(format!(
+                "browser adapter does not expose action {action:?} — use canonical runner CDP dispatch for click/set_value/cdp_eval, or pass 'dismiss_overlay' | 'preserve_overlay' for overlay management"
+            ))),
+        }
     }
 
     async fn probe(&self) -> bool {
@@ -337,7 +582,7 @@ mod tests {
     fn manifest_alias_points_at_typescript_peer() {
         // The TS peer at `adapters/browser/` and this Rust adapter form
         // one logical adapter via bidirectional manifest_alias. Diagnostics
-        // (`cel_cortex::group_paired_manifests`) only pair them when both
+        // (`cel_adapter_sdk::group_paired_manifests`) only pair them when both
         // sides agree; if this constant drifts away from "browser" the
         // pair silently splits in two and dashboards stop showing the
         // unification. Now that the value lives in adapter.json (Cut B),
@@ -475,5 +720,65 @@ mod tests {
         // ElementState wrapper conventionally inert when CDP doesn't
         // emit per-element focus.
         let _: &ElementState = &el.state;
+    }
+
+    // ───── Auto-dismiss env-gate resolution table ──────────────────────
+    //
+    // The lazy/pinned asymmetry exists because the same crate ships to two
+    // very different audiences:
+    //   - lazy (BrowserAdapter::new) → MCP server → customer-facing
+    //   - pinned (with_cdp_client)   → eval / benchmark harness
+    // Pinning the resolution here so a future refactor of the env-string
+    // table can't silently flip either default for the wrong audience.
+
+    #[test]
+    fn auto_dismiss_unset_defaults_off_in_lazy_on_in_pinned() {
+        assert!(!default_auto_dismiss_from(true, None));
+        assert!(default_auto_dismiss_from(false, None));
+    }
+
+    #[test]
+    fn auto_dismiss_truthy_env_forces_on_in_both_paths() {
+        for v in [
+            "1", "true", "TRUE", "True", "yes", "YES", "on", "On", "  true  ",
+        ] {
+            assert!(
+                default_auto_dismiss_from(true, Some(v.into())),
+                "expected lazy to be ON for env={v:?}",
+            );
+            assert!(
+                default_auto_dismiss_from(false, Some(v.into())),
+                "expected pinned to be ON for env={v:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn auto_dismiss_falsy_env_forces_off_in_both_paths() {
+        for v in [
+            "0", "false", "FALSE", "False", "no", "NO", "off", "Off", "  0  ",
+        ] {
+            assert!(
+                !default_auto_dismiss_from(true, Some(v.into())),
+                "expected lazy to be OFF for env={v:?}",
+            );
+            assert!(
+                !default_auto_dismiss_from(false, Some(v.into())),
+                "expected pinned to be OFF for env={v:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn auto_dismiss_unknown_env_value_falls_through_to_lazy_heuristic() {
+        // Typos and unknown strings should NOT silently flip behaviour —
+        // they fall back to the lazy-vs-pinned default. This keeps a stray
+        // `CEL_AUTO_DISMISS_OVERLAYS=maybe` from surprising customer MCP
+        // runs with auto-dismiss on (or vice-versa for benchmarks).
+        assert!(!default_auto_dismiss_from(true, Some("maybe".into())));
+        assert!(default_auto_dismiss_from(false, Some("maybe".into())));
+        // Empty string is the same as unset for our purposes.
+        assert!(!default_auto_dismiss_from(true, Some(String::new())));
+        assert!(default_auto_dismiss_from(false, Some(String::new())));
     }
 }

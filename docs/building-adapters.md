@@ -124,7 +124,7 @@ Here's a skeleton for a note-taking app adapter:
 ```rust
 // adapters/my-notes/src/lib.rs
 
-use cel_cortex::adapter::{AdapterDriver, AdapterError, ActionResult, AdapterManifest};
+use cel_adapter_sdk::{AdapterDriver, AdapterError, ActionResult, AdapterManifest};
 use cel_context::{ContextElement, ContextSource, Bounds, ElementState};
 
 pub struct MyNotesAdapter {
@@ -216,10 +216,20 @@ name = "adapter-my-notes"
 version = "0.1.0"
 
 [dependencies]
-adapter-common = { path = "../adapter-common" }
+# The thin adapter SDK — the AdapterDriver trait + manifest/result types.
+# This does NOT pull in the cel-cortex engine.
+cel-adapter-sdk = { path = "../../cel/cel-adapter-sdk" }
 cel-context = { path = "../../cel/cel-context" }
+async-trait = "0.1"
 serde_json = "1"
 ```
+
+> **Which trait?** Implement `cel_adapter_sdk::AdapterDriver` — that is the
+> live contract every first-party adapter uses. You may still see a second,
+> simpler `adapter_common::Adapter` trait in the tree: it predates the SDK and
+> survives only for four legacy Windows-finance adapters (excel, sap-gui,
+> bloomberg, metatrader) plus the NAPI registry path. Do not target it for new
+> work — it will be retired into `cel-adapter-sdk`.
 
 ## Using Adapters in Workflows
 
@@ -248,6 +258,167 @@ Via MCP, use `cel_act` with the adapter-backed action surface exposed by CEL.
   "params": { "title": "Meeting Notes" }
 }
 ```
+
+## Process Adapters in Any Language (Python example)
+
+You don't have to write Rust. A **process adapter** is any executable that
+speaks CEL's line-delimited JSON protocol over stdin/stdout. Cortex spawns it
+as a child process, writes one JSON request per line to its stdin, and reads
+one JSON response per line from its stdout. This is how Python, Node, Go, or a
+shell script can be a first-class adapter.
+
+### The wire protocol
+
+- **Transport:** newline-delimited JSON (one compact JSON object per line) over
+  stdin (requests in) and stdout (responses out). Write a `\n` after each
+  response and **flush**. Exit when stdin reaches EOF (the parent kills you on
+  shutdown).
+- **stderr** is yours for logging — Cortex ignores it. Never write log lines to
+  stdout; that corrupts the protocol.
+
+Every request is `{ "method": "<name>", ... }`. Responses are method-specific:
+
+| Request | Extra request fields | Success response |
+| --- | --- | --- |
+| `{"method":"activate"}` | — | `{"ok":true}` |
+| `{"method":"deactivate"}` | — | `{"ok":true}` |
+| `{"method":"bootstrap"}` | — | `{"ok":true}` |
+| `{"method":"get_context"}` | — | `{"elements":[ <ContextElement>, … ]}` |
+| `{"method":"snapshot"}` | — | `{"elements":[ … ]}` (fall back to get_context) |
+| `{"method":"execute"}` | `"action":"<name>"`, `"params":{…}` | `{"success":true,"data":{…}?}` |
+| `{"method":"verify_action"}` | `"action"`, `"params"`, `"result"` | `{"success":true}` or an ActionResult |
+
+On failure: the `ok`-shaped methods return `{"ok":false,"error":"…"}`; the
+`elements`-shaped methods return `{"elements":[],"error":"…"}`; `execute`
+returns `{"success":false,"error":"…"}`. An unknown method returns
+`{"success":false,"error":"unknown method: …"}`.
+
+> Note: there is **no `probe` method** in the process protocol. Cortex probes a
+> process adapter by liveness (is the child still running?), not by calling you.
+> `requires_frontmost` + your `app_patterns` decide when you're activated.
+
+### A `ContextElement`
+
+`get_context` / `snapshot` return elements in CEL's native shape (snake_case
+JSON). Minimum useful element:
+
+```json
+{
+  "id": "mynotes:title",
+  "element_type": "input",
+  "label": "Note Title",
+  "value": "My First Note",
+  "bounds": { "x": 100, "y": 50, "width": 400, "height": 30 },
+  "actions": ["click", "set_value"],
+  "confidence": 0.97,
+  "source": "native_api"
+}
+```
+
+Convention: `id` is `{adapter_name}:{stable_native_id}`. Always include `bounds`
+when you can — without them, agents can't click the element by reference and
+fall back to vision. Use `confidence` 0.95–0.98 for native-API truth.
+
+### The Python adapter
+
+```python
+#!/usr/bin/env python3
+# adapters/mynotes/adapter.py — a CEL process adapter in ~40 lines.
+import sys, json
+
+def handle(req: dict) -> dict:
+    method = req.get("method")
+    if method in ("activate", "deactivate", "bootstrap"):
+        return {"ok": True}                       # connect/disconnect your API here
+    if method in ("get_context", "snapshot"):
+        return {"elements": [{
+            "id": "mynotes:title",
+            "element_type": "input",
+            "label": "Note Title",
+            "value": read_title_from_app(),        # your native read
+            "bounds": {"x": 100, "y": 50, "width": 400, "height": 30},
+            "actions": ["set_value"],
+            "confidence": 0.97,
+            "source": "native_api",
+        }]}
+    if method == "execute":
+        if req.get("action") == "set_title":
+            set_title_in_app(req.get("params", {}).get("title", ""))
+            return {"success": True}
+        return {"success": False, "error": f"unknown action: {req.get('action')}"}
+    if method == "verify_action":
+        return {"success": True}                   # no extra verification opinion
+    return {"success": False, "error": f"unknown method: {method}"}
+
+def main():
+    for line in sys.stdin:                          # one request per line
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            resp = handle(json.loads(line))
+        except Exception as e:                      # never crash the loop
+            resp = {"success": False, "error": f"adapter error: {e}"}
+        sys.stdout.write(json.dumps(resp) + "\n")
+        sys.stdout.flush()                          # MUST flush every line
+
+if __name__ == "__main__":
+    main()
+```
+
+Its manifest tells Cortex how to launch it:
+
+```json
+// adapters/mynotes/adapter.json
+{
+  "name": "mynotes",
+  "display_name": "My Notes",
+  "app_patterns": ["(?i)my notes"],
+  "platform": ["macos"],
+  "runtime": "process",
+  "entrypoint": "adapter.py",
+  "context": { "element_types": ["input"], "truth_surface": "native_api" },
+  "actions": {
+    "set_title": { "params": { "title": "string" }, "description": "Set the note title", "mutates_state": true }
+  }
+}
+```
+
+Drop the folder under `adapters/` (or `~/.cellar/adapters/`) and Cortex's
+`discover_adapters` scan picks it up — no recompile, no code change in the
+engine. Make `adapter.py` executable, or set `entrypoint` to how it should be
+launched.
+
+## Troubleshooting
+
+**My adapter never activates / its elements don't appear.**
+- Check `app_patterns`: they're regexes matched against the frontmost app
+  name. Test yours (`(?i)` makes it case-insensitive). If `requires_frontmost`
+  is true (the default), the target app must actually be frontmost.
+- Confirm discovery found it: the manifest must be `adapter.json` at the
+  folder root, `runtime` must be `"process"`, and the folder must be under a
+  scanned dir (`adapters/` or `~/.cellar/adapters/`).
+- `get_context` must return `{"elements":[…]}` — returning a bare array, or an
+  object without the `elements` key, yields zero elements.
+
+**The child process crashes or exits immediately.**
+- You almost certainly wrote a log line to **stdout**. Logs go to **stderr**;
+  stdout is protocol-only. One stray `print()` corrupts the stream.
+- Forgot to flush: without `sys.stdout.flush()` after each response, the parent
+  blocks waiting for output and the call times out.
+- An unhandled exception killed your read loop. Wrap `handle()` in try/except
+  and return `{"success": false, "error": …}` instead of throwing.
+
+**The first action times out.**
+- A slow native API (AppleScript on an iCloud-synced app, COM cold-start) can
+  exceed the default response window. Raise `lifecycle.response_timeout_ms` in
+  the manifest (e.g. Reminders uses several seconds).
+
+**`cel_act` says the adapter or action is unknown.**
+- The `adapter` arg must equal the manifest `name` exactly; the `action_name`
+  must be a key under the manifest's `actions`. Declared-but-unimplemented
+  actions return `{"success": false, "error": "unknown action: …"}` from your
+  `execute`.
 
 ## Existing Adapters
 

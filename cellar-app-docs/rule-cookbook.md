@@ -116,6 +116,35 @@ require confirmation before the agent navigates to facebook/x/tiktok.
 Pattern is `regex_match` so you can extend with more domains by
 editing the JSON or composing per-domain rules.
 
+### 6. Guard observed browser navigation against a watchlist
+
+[`url-change-guard.json`](example-rules/url-change-guard.json) — require
+confirmation when the browser **lands on** a domain in the
+`blocked_domains` watchlist, no matter who navigated there (agent tool
+call, user click, redirect, or extension). Pairs with the
+`events.publish` IPC the Tauri app uses to bridge CDP `url_changed`
+events from the Cortex into the daemon, so this rule fires on real
+navigations rather than just on agent intent.
+
+Populate the watchlist (an example seed lives at
+[`example-watchlists/blocked-domains.json`](example-watchlists/blocked-domains.json)):
+
+```sh
+cellar watchlists set blocked_domains \
+  facebook.com www.facebook.com \
+  instagram.com www.instagram.com \
+  tiktok.com www.tiktok.com \
+  x.com www.x.com \
+  twitter.com www.twitter.com
+```
+
+The `in_watchlist` operator strips the URL down to its hostname before
+comparing — `https://www.facebook.com/foo` becomes `www.facebook.com`.
+**Each subdomain must be listed explicitly**; an entry of `facebook.com`
+alone does NOT cover `www.facebook.com`. Add both variants when you want
+to catch either. Cooldown of 60s keeps tab-switching across the same
+blocked domain from re-prompting.
+
 ## Authoring with the NL compiler
 
 If you've configured an LLM provider, you can author rules in English:

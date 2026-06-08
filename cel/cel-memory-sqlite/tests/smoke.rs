@@ -307,6 +307,53 @@ async fn retrieve_caller_scope_isolates_results() {
 }
 
 #[tokio::test]
+async fn retrieve_own_plus_shared_surfaces_shareable_cross_caller() {
+    // Phase 4 contract: when caller A queries with OwnPlusShared scope,
+    // caller B's chunks tagged `shareable=true` appear in A's results;
+    // caller B's private chunks do not. A's own chunks (shareable or
+    // not) are always visible.
+    let embedder = Arc::new(MockEmbedder::new());
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap();
+
+    let mut shared_chunk = nc("mcp:cursor", "user prefers dry-run mode globally");
+    shared_chunk.shareable = true;
+    provider.write(shared_chunk).await.unwrap();
+
+    provider
+        .write(nc("mcp:cursor", "cursor private session log entry"))
+        .await
+        .unwrap();
+    provider
+        .write(nc("embedded", "embedded private note about user"))
+        .await
+        .unwrap();
+
+    let mut q = retrieve_q("embedded", "user");
+    q.caller_scope = cel_memory::CallerScope::OwnPlusShared;
+    let hits = provider.retrieve(q).await.unwrap();
+    let callers: std::collections::HashSet<_> = hits.iter().map(|c| c.caller_id.clone()).collect();
+    // Both the embedded own chunk AND the cursor shareable chunk show up.
+    assert!(callers.contains("embedded"));
+    assert!(callers.contains("mcp:cursor"));
+    // The non-shareable cursor chunk must NOT show up.
+    assert!(
+        !hits
+            .iter()
+            .any(|c| c.caller_id == "mcp:cursor" && !c.shareable),
+        "cursor's private chunk leaked into OwnPlusShared retrieval"
+    );
+    // Round-trip the shareable flag through the SQL store.
+    let from_cursor: Vec<_> = hits
+        .iter()
+        .filter(|c| c.caller_id == "mcp:cursor")
+        .collect();
+    assert_eq!(from_cursor.len(), 1);
+    assert!(from_cursor[0].shareable);
+}
+
+#[tokio::test]
 async fn retrieve_kind_filter() {
     let embedder = Arc::new(MockEmbedder::new());
     let provider = SqliteMemoryProvider::open_in_memory(embedder)
@@ -860,7 +907,7 @@ async fn summarize_session_writes_summary_and_links_members() {
     assert_eq!(summary.session_id.as_deref(), Some(session.id.as_str()));
     assert_eq!(summary.caller_id, "embedded");
     assert_eq!(summary.content, "the user closed the chat after Q4 review");
-    // Importance defaulted via the §10.2 heuristic: JobSummary bumps
+    // Importance defaulted via the importance heuristic: JobSummary bumps
     // baseline 0.5 by +0.2, no other signals → 0.7.
     assert!(
         (summary.importance - 0.7).abs() < 1e-5,
@@ -906,7 +953,7 @@ async fn summarize_session_writes_summary_and_links_members() {
     );
 
     // 5. The mock summarizer received the right chunks + context. The
-    //    member feed is ordered oldest-first per the plan §9.4.
+    //    member feed is ordered oldest-first.
     let calls = summarizer.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(
@@ -1031,4 +1078,331 @@ async fn export_with_predicate_and_logs_round_trips() {
     assert!(bundle.chunks[0].content.contains("beta"));
     assert_eq!(bundle.evictions.len(), 1);
     assert_eq!(bundle.evictions[0].chunk_id, chunk.id);
+}
+
+// ───── Phase 3: rollup_day / rollup_rule_week ─────
+
+/// Backdate a chunk's `created_at` directly via SQL. Used to plant
+/// chunks "yesterday" or "last week" for rollup tests — there's no
+/// public API to set `created_at` after the fact, by design.
+async fn backdate(
+    provider: &SqliteMemoryProvider,
+    chunk_id: &str,
+    dt: chrono::DateTime<chrono::Utc>,
+) {
+    use rusqlite::params;
+    let conn = provider.conn_for_test();
+    let guard = conn.lock().await;
+    guard
+        .execute(
+            "UPDATE memory_chunks SET created_at = ? WHERE id = ?",
+            params![dt.timestamp_millis(), chunk_id],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn rollup_day_without_summarizer_returns_not_implemented() {
+    let embedder = Arc::new(MockEmbedder::new());
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap();
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 5, 22).unwrap();
+    let err = provider.rollup_day(date).await.unwrap_err();
+    assert!(matches!(err, MemoryError::NotImplemented(_)));
+}
+
+#[tokio::test]
+async fn rollup_day_writes_one_rollup_and_links_members() {
+    use chrono::TimeZone;
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("a day of activity");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+
+    // Two chunks placed on 2026-05-22 (UTC), one on a different day to
+    // prove the date filter actually filters.
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 5, 22).unwrap();
+    let ts = chrono::Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap();
+    let other_ts = chrono::Utc.with_ymd_and_hms(2026, 5, 21, 12, 0, 0).unwrap();
+    let a = provider
+        .write(nc("embedded", "morning chat"))
+        .await
+        .unwrap();
+    let b = provider
+        .write(nc("embedded", "afternoon chat"))
+        .await
+        .unwrap();
+    let c = provider
+        .write(nc("embedded", "yesterday's chat"))
+        .await
+        .unwrap();
+    backdate(&provider, &a.id, ts).await;
+    backdate(&provider, &b.id, ts).await;
+    backdate(&provider, &c.id, other_ts).await;
+
+    let rollups = provider.rollup_day(day).await.unwrap();
+    assert_eq!(rollups.len(), 1);
+    let r = &rollups[0];
+    assert_eq!(r.kind, ChunkKind::Rollup);
+    assert_eq!(r.caller_id, "system");
+    assert_eq!(r.content, "a day of activity");
+    assert_eq!(r.metadata["rollup_kind"], "day");
+    assert_eq!(r.metadata["rollup_date"], day.to_string());
+    assert_eq!(r.metadata["member_count"], 2);
+
+    // The link table has rows for a and b but not c.
+    let linked_ids = {
+        let conn = provider.conn_for_test();
+        let guard = conn.lock().await;
+        let mut stmt = guard
+            .prepare(
+                "SELECT member_id FROM memory_summary_members
+                     WHERE rollup_id = ? ORDER BY member_id ASC",
+            )
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map(rusqlite::params![&r.id], |x| x.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|x| x.ok())
+            .collect();
+        rows
+    };
+    let mut want = vec![a.id.clone(), b.id.clone()];
+    want.sort();
+    assert_eq!(linked_ids, want);
+
+    // Mock summarizer received the right chunks in oldest-first order.
+    let calls = summarizer.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].chunk_ids.len(), 2);
+    assert_eq!(calls[0].kind_label.as_deref(), Some("day 2026-05-22"));
+}
+
+#[tokio::test]
+async fn rollup_day_skip_if_existing_unless_forced() {
+    use chrono::TimeZone;
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("first synthesis");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 5, 22).unwrap();
+    let ts = chrono::Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap();
+    let a = provider
+        .write(nc("embedded", "morning chat"))
+        .await
+        .unwrap();
+    backdate(&provider, &a.id, ts).await;
+
+    let first = provider.rollup_day(day).await.unwrap();
+    assert_eq!(first.len(), 1);
+    let calls_after_first = summarizer.call_count();
+    assert_eq!(calls_after_first, 1);
+
+    // Second call with force=false short-circuits: returns empty,
+    // summarizer not called again.
+    let second = provider.rollup_day(day).await.unwrap();
+    assert!(second.is_empty());
+    assert_eq!(summarizer.call_count(), 1);
+
+    // Forced call always re-summarises.
+    let third = provider.rollup_day_forced(day).await.unwrap();
+    assert_eq!(third.len(), 1);
+    assert_ne!(third[0].id, first[0].id);
+    assert_eq!(summarizer.call_count(), 2);
+}
+
+#[tokio::test]
+async fn rollup_day_empty_day_is_noop_not_error() {
+    // No chunks on the target date — the sweeper must treat this as
+    // success, not error. Returns Ok(vec![]).
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("never called");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let out = provider.rollup_day(day).await.unwrap();
+    assert!(out.is_empty());
+    assert_eq!(summarizer.call_count(), 0);
+}
+
+#[tokio::test]
+async fn rollup_rule_week_groups_fires_by_rule() {
+    use chrono::TimeZone;
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("rule fired 3 times this week");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+
+    let week_start = chrono::NaiveDate::from_ymd_opt(2026, 5, 18).unwrap(); // Mon
+    let ts1 = chrono::Utc.with_ymd_and_hms(2026, 5, 18, 9, 0, 0).unwrap();
+    let ts2 = chrono::Utc
+        .with_ymd_and_hms(2026, 5, 19, 10, 30, 0)
+        .unwrap();
+    let ts3 = chrono::Utc.with_ymd_and_hms(2026, 5, 22, 14, 0, 0).unwrap();
+    let last_week = chrono::Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap();
+
+    let make_fire = |content: &str, rule_id: &str| cel_memory::NewMemoryChunk {
+        kind: ChunkKind::Fire,
+        source: cel_memory::ChunkSource::Matcher,
+        session_id: None,
+        project_root: None,
+        caller_id: "matcher".into(),
+        content: content.into(),
+        metadata: serde_json::json!({"rule_id": rule_id}),
+        importance: None,
+        shareable: false,
+        pinned: false,
+    };
+
+    let a = provider
+        .write(make_fire("fire one", "redact_pii"))
+        .await
+        .unwrap();
+    let b = provider
+        .write(make_fire("fire two", "redact_pii"))
+        .await
+        .unwrap();
+    let c = provider
+        .write(make_fire("fire three", "redact_pii"))
+        .await
+        .unwrap();
+    let other_rule = provider
+        .write(make_fire("noise fire", "different_rule"))
+        .await
+        .unwrap();
+    let last_week_fire = provider
+        .write(make_fire("ancient fire", "redact_pii"))
+        .await
+        .unwrap();
+    backdate(&provider, &a.id, ts1).await;
+    backdate(&provider, &b.id, ts2).await;
+    backdate(&provider, &c.id, ts3).await;
+    backdate(&provider, &other_rule.id, ts2).await;
+    backdate(&provider, &last_week_fire.id, last_week).await;
+
+    let rollup = provider
+        .rollup_rule_week("redact_pii", week_start)
+        .await
+        .unwrap();
+    assert_eq!(rollup.kind, ChunkKind::Rollup);
+    assert_eq!(rollup.metadata["rollup_kind"], "rule_week");
+    assert_eq!(rollup.metadata["rollup_rule_id"], "redact_pii");
+    assert_eq!(rollup.metadata["member_count"], 3);
+
+    // The summarizer received exactly the three rule fires in
+    // oldest-first order.
+    let calls = summarizer.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].chunk_ids,
+        vec![a.id.clone(), b.id.clone(), c.id.clone()]
+    );
+}
+
+#[tokio::test]
+async fn rollup_rule_week_no_fires_returns_not_found() {
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("never");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+    let week_start = chrono::NaiveDate::from_ymd_opt(2026, 5, 18).unwrap();
+    let err = provider
+        .rollup_rule_week("nonexistent_rule", week_start)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::NotFound(_)));
+    assert_eq!(summarizer.call_count(), 0);
+}
+
+#[tokio::test]
+async fn rollup_rule_week_skip_existing_unless_forced() {
+    use chrono::TimeZone;
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("synthesis");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+    let week_start = chrono::NaiveDate::from_ymd_opt(2026, 5, 18).unwrap();
+    let ts = chrono::Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap();
+    let fire = provider
+        .write(cel_memory::NewMemoryChunk {
+            kind: ChunkKind::Fire,
+            source: cel_memory::ChunkSource::Matcher,
+            session_id: None,
+            project_root: None,
+            caller_id: "matcher".into(),
+            content: "only fire".into(),
+            metadata: serde_json::json!({"rule_id": "rule_x"}),
+            importance: None,
+            shareable: false,
+            pinned: false,
+        })
+        .await
+        .unwrap();
+    backdate(&provider, &fire.id, ts).await;
+
+    let first = provider
+        .rollup_rule_week("rule_x", week_start)
+        .await
+        .unwrap();
+    assert_eq!(summarizer.call_count(), 1);
+
+    // Non-forced re-run: InvalidArgument (rollup already exists).
+    let err = provider
+        .rollup_rule_week("rule_x", week_start)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::InvalidArgument(_)));
+    assert_eq!(summarizer.call_count(), 1);
+
+    // Forced re-run mints a fresh rollup.
+    let third = provider
+        .rollup_rule_week_forced("rule_x", week_start)
+        .await
+        .unwrap();
+    assert_ne!(third.id, first.id);
+    assert_eq!(summarizer.call_count(), 2);
+}
+
+#[tokio::test]
+async fn rollup_day_excludes_existing_rollup_chunks_from_input() {
+    // The fetch_day_chunks helper must filter out kind='rollup' so a
+    // forced re-run doesn't summarise its own prior summary. Without
+    // this, member_count would creep up by 1 every time you forced.
+    use chrono::TimeZone;
+    let embedder = Arc::new(MockEmbedder::new());
+    let summarizer = cel_memory::MockSummarizer::new("synthesis");
+    let provider = SqliteMemoryProvider::open_in_memory(embedder)
+        .await
+        .unwrap()
+        .with_summarizer(summarizer.clone());
+
+    let day = chrono::NaiveDate::from_ymd_opt(2026, 5, 22).unwrap();
+    let ts = chrono::Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap();
+    let a = provider.write(nc("embedded", "msg")).await.unwrap();
+    backdate(&provider, &a.id, ts).await;
+
+    let first = provider.rollup_day(day).await.unwrap();
+    assert_eq!(first[0].metadata["member_count"], 1);
+    // Backdate the rollup itself onto the same day.
+    backdate(&provider, &first[0].id, ts).await;
+
+    let forced = provider.rollup_day_forced(day).await.unwrap();
+    assert_eq!(
+        forced[0].metadata["member_count"], 1,
+        "forced re-run should still see only the original chunk, not the prior rollup"
+    );
 }

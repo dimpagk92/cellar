@@ -25,6 +25,11 @@ pub struct DaemonStatusResult {
     pub memory_mb: f64,
     /// Recent CPU utilisation as a percentage (best-effort).
     pub cpu_pct: f64,
+    /// Memory corpus counts (chunks + sessions + storage bytes).
+    /// Optional so older daemons that don't populate it deserialise
+    /// cleanly; clients should treat the absence as "unknown".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryCorpusStats>,
 }
 
 /// Rule count breakdown.
@@ -41,4 +46,30 @@ pub struct RuleStats {
 pub struct WatchlistStats {
     /// Total watchlists.
     pub total: u64,
+}
+
+/// Memory-corpus snapshot embedded in [`DaemonStatusResult::memory`].
+///
+/// Surfaces the same data the Memory tab header strip shows: total chunks,
+/// tier breakdown (session vs. long-term), session counts, and a rough
+/// storage-bytes estimate. Pulled from
+/// `cel_memory::MemoryProvider::stats()` at the moment `daemon.status` is
+/// called — cheap enough that we don't bother caching.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MemoryCorpusStats {
+    /// Total persisted chunks across all tiers + callers.
+    pub total_chunks: u64,
+    /// Chunks in the Session tier (raw rows, not yet rolled up).
+    pub session_chunks: u64,
+    /// Chunks in the LongTerm tier (rollups + pinned).
+    pub long_term_chunks: u64,
+    /// Total sessions ever opened.
+    pub total_sessions: u64,
+    /// Sessions currently in `Open` state.
+    pub open_sessions: u64,
+    /// Approximate database size in bytes.
+    pub db_bytes: u64,
+    /// Embedding model id (`mock-384`, `bge-small-en-v1.5`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
 }

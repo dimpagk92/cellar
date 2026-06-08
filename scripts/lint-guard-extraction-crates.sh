@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # lint-guard-extraction-crates.sh
 #
-# Workstream B from plans/cellar-oss-extraction-prep.md §B.
-#
 # Asserts that each OSS-extraction-candidate crate's non-dev `dependencies`
 # set is a subset of an explicit allowlist. This is the "no reverse deps
 # back into Cellar" guarantee — without it, a single careless `use cel_…`
 # import lands in src/ and the extraction stops being a mechanical move.
 #
-# Allowlist matrix (must match plan §B):
+# It also encodes the cel-cortex / cel-memory / cel-memory-sqlite / cel-brief
+# ownership split directly (see the "ownership invariants" block below):
+#   - no candidate crate may depend on cel-cortex or cel-brief
+#   - cel-brief may depend on cel-memory ONLY as an optional (feature-gated) dep
+#
+# Allowlist matrix:
 #
 #   cel-memory:         async-trait, chrono, serde, serde_json, thiserror,
 #                       tokio, uuid, tracing
@@ -16,11 +19,12 @@
 #   cel-memory-sqlite:  cel-memory (the only `cel-*` dep allowed),
 #                       async-trait, chrono, rusqlite, serde, serde_json,
 #                       sqlite-vec, thiserror, tokio, uuid, zerocopy,
-#                       fastembed (optional), tracing, reqwest
+#                       fastembed (optional), tracing
 #
-#   cel-brief:          cel-memory (the only `cel-*` dep allowed),
-#                       async-trait, serde, serde_json, thiserror, tokio,
-#                       tracing, tiktoken-rs
+#   cel-brief:          cel-memory (the only `cel-*` dep allowed, and only
+#                       behind the `memory` feature),
+#                       async-trait, futures-util, serde, serde_json,
+#                       thiserror, tokio, tracing, tiktoken-rs
 #
 # Exits non-zero on the first violation, listing the offending dep + crate.
 # This script reads `cargo metadata` JSON, so it catches both direct
@@ -35,28 +39,19 @@ cd "$REPO_ROOT"
 
 # Allowlist per crate (function-based for bash 3.2 compatibility — macOS
 # ships bash 3.2 by default and `declare -A` requires bash 4+).
-# Keep in sync with plans/cellar-oss-extraction-prep.md §B.
 allowed_for() {
   case "$1" in
     cel-memory)
       echo "async-trait chrono serde serde_json thiserror tokio uuid tracing"
       ;;
     cel-memory-sqlite)
-      # TODO(extraction): cellar-llm-router is a Cellar-internal crate added
-      # by the Phase 3 summarizer (commits 56f1b7a → 8f3e68f → b03be21).
-      # Before extracting cel-memory-sqlite, do ONE of:
-      #   1. Rename cellar-llm-router → cel-llm-router and extract it as a
-      #      4th candidate crate alongside.
-      #   2. Split AnthropicSummarizer + OllamaSummarizer impls into a new
-      #      `cel-memory-summarizers` crate that depends on cellar-llm-router;
-      #      cel-memory-sqlite then drops back to extraction-clean.
-      #   3. Have the impls call providers via reqwest directly without the
-      #      router abstraction (loses retry/auth/model-selection plumbing).
-      # See cellar-oss-extraction-prep.md §11 follow-ups.
-      echo "cel-memory async-trait chrono rusqlite serde serde_json sqlite-vec thiserror tokio uuid zerocopy fastembed tracing reqwest cellar-llm-router"
+      # The summarizer is injected via the `cel_memory::Summarizer` trait, so
+      # the concrete LLM-client impl lives in a downstream crate — this crate
+      # no longer pulls a router or reqwest. The only `cel-*` dep is cel-memory.
+      echo "cel-memory async-trait chrono rusqlite serde serde_json sqlite-vec thiserror tokio uuid zerocopy fastembed tracing"
       ;;
     cel-brief)
-      echo "cel-memory async-trait serde serde_json thiserror tokio tracing tiktoken-rs"
+      echo "cel-memory async-trait futures-util serde serde_json thiserror tokio tracing tiktoken-rs"
       ;;
     *)
       echo ""
@@ -107,10 +102,59 @@ for crate in "${CRATES[@]}"; do
   done
 done
 
+# ─── Ownership invariants (explicit, beyond the allowlist) ──────────────────
+# Encode the cel-cortex / cel-memory / cel-memory-sqlite / cel-brief ownership
+# split directly so a future allowlist edit can't silently re-admit a
+# live-perception or brief-assembly dependency:
+#   - no candidate may depend on cel-cortex (live world/device context) or
+#     cel-brief (per-turn LLM brief assembly)
+#   - cel-brief may depend on cel-memory ONLY as an optional (feature-gated) dep
+echo "==> ownership invariants"
+for crate in "${CRATES[@]}"; do
+  meta=$(cargo metadata --format-version 1 --no-deps \
+    --manifest-path "cel/$crate/Cargo.toml")
+  for forbidden in cel-cortex cel-brief; do
+    [ "$crate" = "$forbidden" ] && continue
+    if echo "$meta" \
+      | jq -e --arg n "$crate" --arg f "$forbidden" '
+          .packages[]
+          | select(.name == $n)
+          | .dependencies[]
+          | select(.kind != "dev")
+          | select(.name == $f)
+        ' >/dev/null; then
+      echo "  VIOLATION: $crate depends on $forbidden (ownership boundary)" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+  done
+done
+
+# cel-brief's cel-memory dep must be optional (pulled only by the `memory`
+# feature). An unconditional dep would make cel-memory part of cel-brief's
+# default graph — a boundary regression.
+brief_mem_optional=$(
+  cargo metadata --format-version 1 --no-deps \
+    --manifest-path "cel/cel-brief/Cargo.toml" \
+  | jq -r '
+      .packages[]
+      | select(.name == "cel-brief")
+      | .dependencies[]
+      | select(.name == "cel-memory")
+      | .optional
+    '
+)
+if [ "$brief_mem_optional" = "true" ]; then
+  echo "  ok  cel-brief -> cel-memory is optional (feature-gated)"
+else
+  echo "  VIOLATION: cel-brief's cel-memory dep must be optional (feature-gated)," >&2
+  echo "             got optional=${brief_mem_optional:-<absent>}" >&2
+  VIOLATIONS=$((VIOLATIONS + 1))
+fi
+
 if [ "$VIOLATIONS" -gt 0 ]; then
   echo >&2
-  echo "lint-guard: $VIOLATIONS violation(s). Update the allowlist in" >&2
-  echo "  scripts/lint-guard-extraction-crates.sh AND plans/cellar-oss-extraction-prep.md §B" >&2
+  echo "lint-guard: $VIOLATIONS violation(s). Update the allowlist / ownership" >&2
+  echo "  invariants in scripts/lint-guard-extraction-crates.sh" >&2
   echo "OR remove the offending dep from the crate." >&2
   exit 1
 fi

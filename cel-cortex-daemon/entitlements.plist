@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for cel-cortex-daemon.
+
+  The daemon binary is bundled inside Cellar.app at
+  Contents/Resources/cel-cortex-daemon, then copied at first launch
+  to ~/.cellar/bin/cel-cortex-daemon and managed by the LaunchAgent
+  at ~/Library/LaunchAgents/com.cellar.daemon.plist (Docker-style
+  lifecycle — see cellar-app-v1.md §14).
+
+  The daemon must be signed with hardened runtime + these entitlements
+  BEFORE it is bundled into Cellar.app. The app-level signature does
+  not transitively cover nested binaries; each binary needs its own
+  signature against the same Developer ID.
+
+  Differences from app/src-tauri/entitlements.plist:
+    - No `allow-jit` (no WKWebView, no JS runtime).
+    - No `allow-unsigned-executable-memory` (Rust-only, AOT-compiled).
+    - Apple Events still required: the daemon hosts the embedded
+      agent + cel_act gateway, which dispatches actions through the
+      AppleScript-backed adapters (calendar, mail, messages, notes,
+      reminders).
+    - Library validation must stay disabled because the daemon loads
+      adapter ProcessDriver binaries built by the same workspace.
+
+  Accessibility (used by cel-accessibility for AX tree reads in the
+  cortex tick loop) is a TCC grant, not an entitlement. The user
+  grants it once from System Settings → Privacy & Security →
+  Accessibility. Re-signing with a different identity invalidates
+  the grant.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

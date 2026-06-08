@@ -158,11 +158,30 @@ pub fn dom_element_to_context_element(dom: &DomElement, index: usize) -> Context
 /// strings (text) shift when the page updates, so they're a worse base
 /// for cross-turn referenceability.
 fn pick_id_part(dom: &DomElement, index: usize) -> String {
+    // CEL tag is the in-walk counter that the CDP walker stamps onto the
+    // DOM as `data-cel-tag="<n>"`. When no HTML id / name is present this
+    // is the ONLY 1:1 anchor between perception and dispatch — eliminates
+    // the perception-slug ↔ raw-innerText mismatch that caused no-match
+    // failures on Apple, allrecipes etc.
+    //
+    // Format: `t<n>` (the 't' prefix lets dispatch detect it and look up
+    // via `[data-cel-tag="<n>"]` selector). Falls through to the existing
+    // label-based fallbacks for backwards compat with snapshots / fixtures
+    // that may not stamp tags.
+    let cel_tag = dom.backend_node_id.filter(|&n| n > 0);
     if let Some(s) = dom.dom_id.as_deref().filter(|s| !s.trim().is_empty()) {
         return sanitize_id_part(s);
     }
     if let Some(s) = dom.dom_name.as_deref().filter(|s| !s.trim().is_empty()) {
         return sanitize_id_part(s);
+    }
+    // PREFER cel_tag over slug-of-text/aria-label/testid. Tag is exact;
+    // the slugs are best-effort heuristics that break on common patterns
+    // (label has spaces, raw innerText doesn't have dashes, etc.). Slugs
+    // remain available IN PROPERTIES for the planner to read as descriptive
+    // hints but they're no longer the dispatch anchor.
+    if let Some(n) = cel_tag {
+        return format!("t{n}");
     }
     // `data-testid` slots in BEFORE `aria_label` and `text` because it is
     // author-stamped specifically as a stable identifier — most resistant to

@@ -36,11 +36,13 @@ pub mod fire_bus;
 pub mod fsevents;
 pub mod ipc;
 pub mod matcher_task;
+pub mod memory_offdevice_governance;
 pub mod memory_write_governance;
 pub mod process_poller;
 pub mod recent;
 pub mod signals_poller;
 pub mod subscriptions;
+pub mod sweeper;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -231,8 +233,8 @@ impl Daemon {
             }
         }
         let rules_store = SqliteRulesStore::open(path)?;
-        let compiler = try_build_nl_compiler();
         let memory: Arc<dyn MemoryProvider> = Arc::new(BasicMemoryProvider::new());
+        let compiler = try_build_nl_compiler(Some(&memory));
         Ok(Self::wire_with_store_compiler_and_memory(
             rules_store,
             compiler,
@@ -256,7 +258,7 @@ impl Daemon {
             }
         }
         let rules_store = SqliteRulesStore::open(path)?;
-        let compiler = try_build_nl_compiler();
+        let compiler = try_build_nl_compiler(Some(&memory));
         Ok(Self::wire_with_store_compiler_and_memory(
             rules_store,
             compiler,
@@ -273,7 +275,7 @@ impl Daemon {
         rules_store: Arc<SqliteRulesStore>,
         memory: Arc<dyn MemoryProvider>,
     ) -> Self {
-        let compiler = try_build_nl_compiler();
+        let compiler = try_build_nl_compiler(Some(&memory));
         Self::wire_with_store_compiler_and_memory(rules_store, compiler, memory)
     }
 
@@ -398,7 +400,8 @@ impl Daemon {
             )
             .with_confirmation(confirmation_broker.clone(), confirmation_bus.clone())
             .with_agent(memory.clone(), agent_runtime.clone(), chat_bus.clone())
-            .with_webhook_registry(webhook_registry.clone()),
+            .with_webhook_registry(webhook_registry.clone())
+            .with_gateway(gateway.clone() as Arc<dyn AgentGateway>),
         );
 
         Self {
@@ -549,7 +552,7 @@ fn try_build_agent_runtime(
 /// or `CELLAR_NL_COMPILER_PROVIDER` + `CELLAR_NL_COMPILER_MODEL` for a
 /// per-subsystem override (e.g., cheap small model for compiles, full
 /// model for the embedded agent).
-fn try_build_nl_compiler() -> Option<Arc<Compiler>> {
+fn try_build_nl_compiler(memory: Option<&Arc<dyn MemoryProvider>>) -> Option<Arc<Compiler>> {
     let router = match Router::from_env(&["nl_compiler"]) {
         Ok(r) => r,
         Err(e) => {
@@ -569,14 +572,20 @@ fn try_build_nl_compiler() -> Option<Arc<Compiler>> {
             return None;
         }
     };
-    tracing::info!(
-        model = %handle.model,
-        "NL rule compiler ready (rules.compile enabled)"
-    );
-    Some(Arc::new(Compiler::new(
-        handle.provider.clone(),
-        handle.model.clone(),
-    )))
+    let mut compiler = Compiler::new(handle.provider.clone(), handle.model.clone());
+    if let Some(memory) = memory {
+        compiler = compiler.with_memory(Arc::clone(memory));
+        tracing::info!(
+            model = %handle.model,
+            "NL rule compiler ready (rules.compile enabled, precedent retrieval wired)"
+        );
+    } else {
+        tracing::info!(
+            model = %handle.model,
+            "NL rule compiler ready (rules.compile enabled, no memory — precedent retrieval disabled)"
+        );
+    }
+    Some(Arc::new(compiler))
 }
 
 #[cfg(test)]

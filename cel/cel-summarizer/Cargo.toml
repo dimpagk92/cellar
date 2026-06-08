@@ -1,0 +1,21 @@
+[package]
+name = "cel-summarizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLM-backed Summarizer impls (Anthropic + Ollama) for cel-memory. Private Cellar crate — not published to crates.io."
+# No keywords/categories — this crate is private (never published to crates.io directly)
+
+[dependencies]
+async-trait = "0.1"
+cel-memory = { path = "../cel-memory" }
+cellar-llm-router = { path = "../../cellar-llm-router" }
+chrono = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

@@ -1,17 +1,18 @@
-//! `SqliteMemoryProvider` — the v1 Phase 0 backing storage.
+//! `SqliteMemoryProvider` — the SQLite + vector backing storage.
 //!
-//! This implementation is the foundation the full Memory & Context Manager
-//! subsystem (`cellar-memory-manager.md` Phase 1+) fills in. Phase 0 ships:
+//! Implements the full [`cel_memory::MemoryProvider`] surface:
 //!
-//! - Real `open` that loads sqlite-vec, runs migrations, holds the connection.
-//! - Real `write` / `get` / `stats` / `purge_all`.
-//! - `Err(NotImplemented)` for retrieval, summarization, rollups, re-embed,
-//!   maintenance methods — these need the hybrid retrieval pipeline and
-//!   the summarizer LLM client which are Phase 1+ work.
+//! - `open` loads sqlite-vec, runs migrations, holds the connection.
+//! - `write` / `get` / `stats` / `purge_all` plus session lifecycle.
+//! - Hybrid (vector + FTS + recency) `retrieve`, fronted by a TTL+LRU cache.
+//! - `summarize_session` / `rollup_day` / `rollup_rule_week` via an injected
+//!   [`cel_memory::Summarizer`] (these return `Err(NotImplemented)` only when
+//!   no summarizer is attached).
+//! - `run_aging_sweep` and `export`.
+//! - `re_embed_all` is the one method still returning `Err(NotImplemented)`.
 //!
-//! The provider is `Send + Sync` and behind an `Arc<dyn MemoryProvider>` —
-//! identical surface to [`BasicMemoryProvider`] so the daemon's
-//! `wire_subsystems()` swap is one line.
+//! The provider is `Send + Sync` and lives behind an `Arc<dyn MemoryProvider>` —
+//! the same surface as [`BasicMemoryProvider`], so swapping it in is one line.
 //!
 //! [`BasicMemoryProvider`]: cel_memory::BasicMemoryProvider
 
@@ -54,10 +55,9 @@ pub struct SqliteMemoryProvider {
     /// chunk is dropped and a redaction record is logged.
     write_hook: Option<Arc<dyn cel_memory::MemoryWriteHook>>,
     /// Optional summarizer used by [`MemoryProvider::summarize_session`]
-    /// (Phase 3). When unset, the provider falls through to
-    /// [`MemoryError::NotImplemented`] — preserving the v1 contract for
-    /// daemons that don't enable summarization. The daemon's default is
-    /// [`crate::build_default_summarizer`].
+    /// and the rollup methods. When unset, those methods fall through to
+    /// [`MemoryError::NotImplemented`] — preserving the contract for daemons
+    /// that don't enable summarization. Attach one via [`Self::with_summarizer`].
     summarizer: Option<Arc<dyn cel_memory::Summarizer>>,
     /// Small TTL+LRU cache for [`MemoryProvider::retrieve`] results. See
     /// `crate::cache` for the contract.
@@ -112,9 +112,9 @@ impl SqliteMemoryProvider {
     }
 
     /// Attach a [`Summarizer`](cel_memory::Summarizer) used by
-    /// [`MemoryProvider::summarize_session`] (and, once shipped,
-    /// `rollup_day` / `rollup_rule_week`). Daemons typically pass the
-    /// result of [`crate::build_default_summarizer`]; tests pass a
+    /// [`MemoryProvider::summarize_session`], `rollup_day`, and
+    /// `rollup_rule_week`. Daemons pass a concrete summarizer (a downstream
+    /// [`cel_memory::Summarizer`] impl); tests pass a
     /// [`cel_memory::MockSummarizer`].
     ///
     /// Calling [`MemoryProvider::summarize_session`] without first
@@ -184,7 +184,7 @@ impl SqliteMemoryProvider {
                 .prepare(
                     "SELECT id, created_at, kind, tier, source, session_id,
                                 project_root, caller_id, content, metadata,
-                                importance, pinned, superseded_by,
+                                importance, pinned, shareable, superseded_by,
                                 embedding_model, embedding_dim
                          FROM memory_chunks
                          WHERE session_id = ?
@@ -203,6 +203,354 @@ impl SqliteMemoryProvider {
         })
         .await
         .map_err(|e| MemoryError::Internal(format!("join: {e}")))?
+    }
+
+    /// Fetch every chunk whose `created_at` falls within the UTC date
+    /// `date` (00:00:00 inclusive → next day 00:00:00 exclusive). Excludes
+    /// `Rollup` chunks so re-running the daily rollup doesn't snowball.
+    /// Ordered oldest-first so the summarizer sees the day as it
+    /// unfolded.
+    async fn fetch_day_chunks(&self, date: NaiveDate) -> MemoryResult<Vec<MemoryChunk>> {
+        let start = date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| MemoryError::InvalidArgument(format!("invalid date: {date}")))?
+            .and_utc()
+            .timestamp_millis();
+        let end = date
+            .succ_opt()
+            .ok_or_else(|| MemoryError::InvalidArgument(format!("date overflow: {date}")))?
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| MemoryError::InvalidArgument(format!("invalid date: {date}")))?
+            .and_utc()
+            .timestamp_millis();
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> Result<Vec<MemoryChunk>, MemoryError> {
+            let guard = conn.blocking_lock();
+            let mut stmt = guard
+                .prepare(
+                    "SELECT id, created_at, kind, tier, source, session_id,
+                                project_root, caller_id, content, metadata,
+                                importance, pinned, superseded_by,
+                                embedding_model, embedding_dim
+                         FROM memory_chunks
+                         WHERE created_at >= ?
+                           AND created_at < ?
+                           AND kind != 'rollup'
+                         ORDER BY created_at ASC",
+                )
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![start, end], row_to_chunk)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| MemoryError::Storage(e.to_string()))?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| MemoryError::Internal(format!("join: {e}")))?
+    }
+
+    /// Fetch every `Fire` chunk for `rule_id` whose `created_at` falls
+    /// within the ISO week starting at `week_start` (a Monday, by
+    /// convention; this code does not enforce that — it just sums the
+    /// 7-day window). The rule id is stored on the chunk's
+    /// `metadata.rule_id` field, written by the matcher consumer task.
+    /// Excludes prior `Rollup` chunks to avoid snowball.
+    async fn fetch_rule_week_chunks(
+        &self,
+        rule_id: &str,
+        week_start: NaiveDate,
+    ) -> MemoryResult<Vec<MemoryChunk>> {
+        let start = week_start
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| MemoryError::InvalidArgument(format!("invalid date: {week_start}")))?
+            .and_utc()
+            .timestamp_millis();
+        let end_date = week_start
+            .checked_add_days(chrono::Days::new(7))
+            .ok_or_else(|| MemoryError::InvalidArgument(format!("week overflow: {week_start}")))?;
+        let end = end_date
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| MemoryError::InvalidArgument(format!("invalid date: {end_date}")))?
+            .and_utc()
+            .timestamp_millis();
+        let conn = Arc::clone(&self.conn);
+        let rid = rule_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<MemoryChunk>, MemoryError> {
+            let guard = conn.blocking_lock();
+            let mut stmt = guard
+                .prepare(
+                    "SELECT id, created_at, kind, tier, source, session_id,
+                                project_root, caller_id, content, metadata,
+                                importance, pinned, superseded_by,
+                                embedding_model, embedding_dim
+                         FROM memory_chunks
+                         WHERE kind = 'fire'
+                           AND created_at >= ?
+                           AND created_at < ?
+                           AND json_extract(metadata, '$.rule_id') = ?
+                         ORDER BY created_at ASC",
+                )
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![start, end, rid], row_to_chunk)
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r.map_err(|e| MemoryError::Storage(e.to_string()))?);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| MemoryError::Internal(format!("join: {e}")))?
+    }
+
+    /// True if a `Rollup` chunk already exists for `date` (matched via
+    /// `metadata.rollup_date = '<YYYY-MM-DD>'`). Used to short-circuit
+    /// the day-rollup cron pass when force=false.
+    async fn day_rollup_exists(&self, date: NaiveDate) -> MemoryResult<bool> {
+        let date_s = date.to_string();
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> Result<bool, MemoryError> {
+            let guard = conn.blocking_lock();
+            let count: i64 = guard
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_chunks
+                         WHERE kind = 'rollup'
+                           AND json_extract(metadata, '$.rollup_date') = ?",
+                    params![date_s],
+                    |r| r.get(0),
+                )
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            Ok(count > 0)
+        })
+        .await
+        .map_err(|e| MemoryError::Internal(format!("join: {e}")))?
+    }
+
+    /// True if a `Rollup` chunk already exists for (`rule_id`,
+    /// `week_start`). Matched via `metadata.rollup_rule_id` +
+    /// `metadata.rollup_week_start`.
+    async fn rule_week_rollup_exists(
+        &self,
+        rule_id: &str,
+        week_start: NaiveDate,
+    ) -> MemoryResult<bool> {
+        let week_s = week_start.to_string();
+        let rid = rule_id.to_string();
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> Result<bool, MemoryError> {
+            let guard = conn.blocking_lock();
+            let count: i64 = guard
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_chunks
+                         WHERE kind = 'rollup'
+                           AND json_extract(metadata, '$.rollup_rule_id') = ?
+                           AND json_extract(metadata, '$.rollup_week_start') = ?",
+                    params![rid, week_s],
+                    |r| r.get(0),
+                )
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            Ok(count > 0)
+        })
+        .await
+        .map_err(|e| MemoryError::Internal(format!("join: {e}")))?
+    }
+
+    /// Insert one row per (rollup_id, member_id) into
+    /// `memory_summary_members`. INSERT OR IGNORE so a re-run is
+    /// idempotent on the link table.
+    async fn link_rollup_members(
+        &self,
+        rollup_id: &str,
+        member_ids: &[String],
+    ) -> MemoryResult<()> {
+        let rid = rollup_id.to_string();
+        let members: Vec<String> = member_ids.to_vec();
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || -> Result<(), MemoryError> {
+            let mut guard = conn.blocking_lock();
+            let tx = guard
+                .transaction()
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            for mid in &members {
+                tx.execute(
+                    "INSERT OR IGNORE INTO memory_summary_members(rollup_id, member_id)
+                         VALUES (?, ?)",
+                    params![rid, mid],
+                )
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            }
+            tx.commit()
+                .map_err(|e| MemoryError::Storage(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| MemoryError::Internal(format!("join: {e}")))?
+    }
+
+    /// Shared implementation behind both [`MemoryProvider::rollup_day`]
+    /// and [`MemoryProvider::rollup_day_forced`].
+    ///
+    /// Groups the day's chunks (UTC) and produces a single `Rollup` chunk
+    /// per call. When `force=false`, a no-op `Ok(vec![])` is returned if
+    /// a rollup already exists for `date`. When `force=true`, a fresh
+    /// rollup is always produced.
+    ///
+    /// Returns the summary as a `NotImplemented` error if no summarizer
+    /// has been attached (preserving the v1 contract for daemons that
+    /// opt out of summarization). Returns `Ok(vec![])` if the day has no
+    /// non-rollup chunks — there's nothing to summarise and the cron
+    /// sweeper should treat this as a successful no-op.
+    async fn rollup_day_inner(
+        &self,
+        date: NaiveDate,
+        force: bool,
+    ) -> MemoryResult<Vec<MemoryChunk>> {
+        let summarizer = self.summarizer.clone().ok_or(MemoryError::NotImplemented(
+            "SqliteMemoryProvider::rollup_day — no summarizer attached \
+             (call `with_summarizer` first)",
+        ))?;
+
+        if !force && self.day_rollup_exists(date).await? {
+            tracing::debug!(date = %date, "rollup_day: existing rollup found, skipping");
+            return Ok(Vec::new());
+        }
+
+        let members = self.fetch_day_chunks(date).await?;
+        if members.is_empty() {
+            tracing::debug!(date = %date, "rollup_day: no chunks to summarise, no-op");
+            return Ok(Vec::new());
+        }
+        let member_ids: Vec<String> = members.iter().map(|c| c.id.clone()).collect();
+
+        let kind_label = format!("day {date}");
+        let ctx = cel_memory::SummaryContext {
+            kind_label: Some(kind_label.clone()),
+            note: Some(format!(
+                "Daily rollup for {date} ({} chunks)",
+                members.len()
+            )),
+            max_words: None,
+        };
+        let summary_text = summarizer
+            .summarize(&members, &ctx)
+            .await
+            .map_err(|e| match e {
+                cel_memory::SummarizerError::NoInput => MemoryError::InvalidArgument(
+                    "summarizer received no input despite day having chunks".into(),
+                ),
+                other => MemoryError::Provider(format!(
+                    "summarizer {} failed: {other}",
+                    summarizer.name()
+                )),
+            })?;
+
+        // Pick a representative caller_id for the rollup. We use "system"
+        // because daily rollups span every caller; the rollup is daemon-
+        // synthesised, not attributable to one upstream client.
+        let new_chunk = NewMemoryChunk {
+            kind: ChunkKind::Rollup,
+            source: ChunkSource::System,
+            session_id: None,
+            project_root: None,
+            caller_id: "system".to_string(),
+            content: summary_text,
+            metadata: serde_json::json!({
+                "rollup_kind": "day",
+                "rollup_date": date.to_string(),
+                "member_count": member_ids.len(),
+                "summarizer": summarizer.name(),
+            }),
+            importance: None,
+            shareable: false,
+            pinned: false,
+        };
+        let written = self.write(new_chunk).await?;
+        self.link_rollup_members(&written.id, &member_ids).await?;
+        Ok(vec![written])
+    }
+
+    /// Shared implementation behind both
+    /// [`MemoryProvider::rollup_rule_week`] and
+    /// [`MemoryProvider::rollup_rule_week_forced`].
+    ///
+    /// Groups all `Fire` chunks for `rule_id` in the 7-day window
+    /// starting at `week_start` and produces one `Rollup` chunk. When
+    /// `force=false`, returns `Err(InvalidArgument)` if a rollup exists
+    /// (caller can decide whether to surface or suppress). Returns
+    /// `Err(NotFound)` if no fires exist in the window — the cron sweeper
+    /// should treat this as expected and skip the call.
+    async fn rollup_rule_week_inner(
+        &self,
+        rule_id: &str,
+        week_start: NaiveDate,
+        force: bool,
+    ) -> MemoryResult<MemoryChunk> {
+        let summarizer = self.summarizer.clone().ok_or(MemoryError::NotImplemented(
+            "SqliteMemoryProvider::rollup_rule_week — no summarizer attached \
+             (call `with_summarizer` first)",
+        ))?;
+
+        if !force && self.rule_week_rollup_exists(rule_id, week_start).await? {
+            return Err(MemoryError::InvalidArgument(format!(
+                "rollup already exists for rule {rule_id} week {week_start}"
+            )));
+        }
+
+        let members = self.fetch_rule_week_chunks(rule_id, week_start).await?;
+        if members.is_empty() {
+            return Err(MemoryError::NotFound(format!(
+                "no fires for rule {rule_id} in week of {week_start}"
+            )));
+        }
+        let member_ids: Vec<String> = members.iter().map(|c| c.id.clone()).collect();
+
+        let kind_label = format!("week of {week_start} for rule {rule_id}");
+        let ctx = cel_memory::SummaryContext {
+            kind_label: Some(kind_label.clone()),
+            note: Some(format!(
+                "Weekly rollup for rule {rule_id} ({} fires)",
+                members.len()
+            )),
+            max_words: None,
+        };
+        let summary_text = summarizer
+            .summarize(&members, &ctx)
+            .await
+            .map_err(|e| match e {
+                cel_memory::SummarizerError::NoInput => MemoryError::InvalidArgument(
+                    "summarizer received no input despite rule-week having chunks".into(),
+                ),
+                other => MemoryError::Provider(format!(
+                    "summarizer {} failed: {other}",
+                    summarizer.name()
+                )),
+            })?;
+
+        let new_chunk = NewMemoryChunk {
+            kind: ChunkKind::Rollup,
+            source: ChunkSource::System,
+            session_id: None,
+            project_root: None,
+            caller_id: "system".to_string(),
+            content: summary_text,
+            metadata: serde_json::json!({
+                "rollup_kind": "rule_week",
+                "rollup_rule_id": rule_id,
+                "rollup_week_start": week_start.to_string(),
+                "member_count": member_ids.len(),
+                "summarizer": summarizer.name(),
+            }),
+            importance: None,
+            shareable: false,
+            pinned: false,
+        };
+        let written = self.write(new_chunk).await?;
+        self.link_rollup_members(&written.id, &member_ids).await?;
+        Ok(written)
     }
 }
 
@@ -321,6 +669,10 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryChunk> {
     let metadata_str: String = row.get("metadata")?;
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_str).unwrap_or(serde_json::Value::Null);
+    // shareable column is `INTEGER NOT NULL DEFAULT 0` in 001_initial.sql.
+    // Read tolerantly (missing column → false) so a hand-rolled SELECT that
+    // forgets to include `shareable` doesn't fail the whole row decode.
+    let shareable = row.get::<_, i64>("shareable").unwrap_or(0) != 0;
     Ok(MemoryChunk {
         id: row.get("id")?,
         created_at: ms_to_dt(row.get::<_, i64>("created_at")?),
@@ -334,6 +686,7 @@ fn row_to_chunk(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryChunk> {
         metadata,
         importance: row.get::<_, f64>("importance")? as f32,
         pinned: row.get::<_, i64>("pinned")? != 0,
+        shareable,
         superseded_by: row.get("superseded_by")?,
         embedding_model: row.get("embedding_model")?,
         embedding_dim: row.get::<_, i64>("embedding_dim")? as u32,
@@ -345,7 +698,8 @@ impl MemoryProvider for SqliteMemoryProvider {
     // ───────────── Reads ─────────────
 
     async fn retrieve(&self, query: MemoryQuery) -> MemoryResult<Vec<MemoryChunk>> {
-        // Hybrid retrieval per `cellar-memory-manager.md` §8:
+        // Hybrid retrieval — reciprocal-rank fusion of vector + FTS, decayed
+        // by recency:
         //   score = w_vec*rrf(rank_vec) + w_fts*rrf(rank_fts)
         //         + w_rec*exp(-Δt/half_life)
         //
@@ -530,7 +884,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                 let select_sql = format!(
                     "SELECT id, created_at, kind, tier, source, session_id,
                         project_root, caller_id, content, metadata,
-                        importance, pinned, superseded_by,
+                        importance, pinned, shareable, superseded_by,
                         embedding_model, embedding_dim
                  FROM memory_chunks WHERE id IN ({placeholders})"
                 );
@@ -590,7 +944,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                     .prepare(
                         "SELECT id, created_at, kind, tier, source, session_id,
                                 project_root, caller_id, content, metadata,
-                                importance, pinned, superseded_by,
+                                importance, pinned, shareable, superseded_by,
                                 embedding_model, embedding_dim
                          FROM memory_chunks WHERE id = ?",
                     )
@@ -747,6 +1101,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                         metadata: serde_json::json!({"redacted": true, "reason": reason}),
                         importance: 0.0,
                         pinned: false,
+                        shareable: false,
                         superseded_by: None,
                         embedding_model: "none".into(),
                         embedding_dim: 0,
@@ -791,6 +1146,7 @@ impl MemoryProvider for SqliteMemoryProvider {
             metadata: new_chunk.metadata.clone(),
             importance,
             pinned: new_chunk.pinned,
+            shareable: new_chunk.shareable,
             superseded_by: None,
             embedding_model: embedder_name.clone(),
             embedding_dim: embedder_dim as u32,
@@ -940,6 +1296,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                 metadata: nc.metadata,
                 importance,
                 pinned: nc.pinned,
+                shareable: nc.shareable,
                 superseded_by: None,
                 embedding_model: embedder_name.clone(),
                 embedding_dim: embedder_dim as u32,
@@ -1356,9 +1713,9 @@ impl MemoryProvider for SqliteMemoryProvider {
             .await?
             .ok_or_else(|| MemoryError::NotFound(format!("session {session_id}")))?;
 
-        // 2. Pull the constituent chunks in chronological order. The
-        //    Memory Manager plan §9.4 specifies oldest-first feed so
-        //    the model can read the conversation as it unfolded.
+        // 2. Pull the constituent chunks in chronological order —
+        //    oldest-first feed so the model can read the conversation
+        //    as it unfolded.
         let members = self.fetch_session_chunks(session_id).await?;
         if members.is_empty() {
             // No chunks to summarize — the model would hallucinate, and
@@ -1395,7 +1752,7 @@ impl MemoryProvider for SqliteMemoryProvider {
             })?;
 
         // 4. Persist the summary as a fresh JobSummary chunk via the
-        //    public write path so importance scoring (§10.2) and the
+        //    public write path so importance scoring and the
         //    embedding pipeline both stay consistent with every other
         //    write. We use the session's caller_id so the summary
         //    inherits scope, and stamp metadata with the member ids
@@ -1412,7 +1769,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                 "member_count": member_ids.len(),
                 "summarizer": summarizer.name(),
             }),
-            // Honor the §10.2 default (+0.2 for JobSummary off baseline)
+            // Honor the importance default (+0.2 for JobSummary off baseline)
             // by leaving `importance: None` — the importance scorer
             // applied inside `write` will land on 0.7.
             importance: None,
@@ -1470,19 +1827,29 @@ impl MemoryProvider for SqliteMemoryProvider {
         Ok(written)
     }
 
-    async fn rollup_day(&self, _date: NaiveDate) -> MemoryResult<Vec<MemoryChunk>> {
-        Err(MemoryError::NotImplemented(
-            "SqliteMemoryProvider::rollup_day — Phase 3 (next slice)",
-        ))
+    async fn rollup_day(&self, date: NaiveDate) -> MemoryResult<Vec<MemoryChunk>> {
+        self.rollup_day_inner(date, false).await
     }
+
+    async fn rollup_day_forced(&self, date: NaiveDate) -> MemoryResult<Vec<MemoryChunk>> {
+        self.rollup_day_inner(date, true).await
+    }
+
     async fn rollup_rule_week(
         &self,
-        _rule_id: &str,
-        _week_start: NaiveDate,
+        rule_id: &str,
+        week_start: NaiveDate,
     ) -> MemoryResult<MemoryChunk> {
-        Err(MemoryError::NotImplemented(
-            "SqliteMemoryProvider::rollup_rule_week — Phase 3 (next slice)",
-        ))
+        self.rollup_rule_week_inner(rule_id, week_start, false)
+            .await
+    }
+
+    async fn rollup_rule_week_forced(
+        &self,
+        rule_id: &str,
+        week_start: NaiveDate,
+    ) -> MemoryResult<MemoryChunk> {
+        self.rollup_rule_week_inner(rule_id, week_start, true).await
     }
 
     // ───────────── Maintenance ─────────────
@@ -1490,9 +1857,8 @@ impl MemoryProvider for SqliteMemoryProvider {
     async fn run_aging_sweep(&self) -> MemoryResult<AgingReport> {
         // v1 sweep: delete non-pinned non-correction chunks older than
         // the retention horizon. Matches BasicMemoryProvider's heuristic
-        // (30 days) so the locked trait surface is consistent across
-        // providers. Phase 3+ replaces this with the importance-aware
-        // policy from cellar-memory-manager.md §10.
+        // (30 days) so the trait surface stays consistent across providers.
+        // A future revision can replace this with an importance-aware policy.
         const RETENTION_DAYS: i64 = 30;
         let cutoff_ms =
             (chrono::Utc::now() - chrono::Duration::days(RETENTION_DAYS)).timestamp_millis();
@@ -1566,7 +1932,7 @@ impl MemoryProvider for SqliteMemoryProvider {
             let select_sql = format!(
                 "SELECT id, created_at, kind, tier, source, session_id,
                         project_root, caller_id, content, metadata,
-                        importance, pinned, superseded_by,
+                        importance, pinned, shareable, superseded_by,
                         embedding_model, embedding_dim
                  FROM memory_chunks WHERE {} ORDER BY created_at DESC",
                 where_clause
@@ -1751,9 +2117,8 @@ impl MemoryProvider for SqliteMemoryProvider {
     }
 }
 
-/// Per-profile retrieval weights. Tuned defaults from
-/// `cellar-memory-manager.md` §8.2; not exposed via the trait yet so
-/// callers configure profiles via the `RetrievalProfile` enum only.
+/// Per-profile retrieval weights. Tuned defaults, not exposed via the trait
+/// yet, so callers configure profiles via the `RetrievalProfile` enum only.
 /// Returns `(w_vec, w_fts, w_rec, half_life_seconds)`.
 fn retrieval_weights(profile: cel_memory::RetrievalProfile) -> (f32, f32, f32, f32) {
     use cel_memory::RetrievalProfile::*;
@@ -1828,11 +2193,19 @@ fn chunk_matches_query(c: &MemoryChunk, q: &MemoryQuery) -> bool {
             return false;
         }
     }
-    // Caller scope. `OwnPlusShared` collapses to `Own` until the
-    // shareable column drives a real cross-caller surface (Phase 4).
+    // Caller scope. `Own` restricts to the caller's own chunks.
+    // `OwnPlusShared` (Phase 4) permits the caller's own chunks *plus* any
+    // chunk tagged `shareable=true` from another caller. `Global` permits
+    // everything — granted only to privileged surfaces (Memory tab,
+    // audit timeline).
     match q.caller_scope {
-        cel_memory::CallerScope::Own | cel_memory::CallerScope::OwnPlusShared => {
+        cel_memory::CallerScope::Own => {
             if c.caller_id != q.caller_id {
+                return false;
+            }
+        }
+        cel_memory::CallerScope::OwnPlusShared => {
+            if c.caller_id != q.caller_id && !c.shareable {
                 return false;
             }
         }

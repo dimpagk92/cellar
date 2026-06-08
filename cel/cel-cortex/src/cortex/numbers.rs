@@ -4,7 +4,9 @@
 //! `write_cells` dispatch, dismissing the open / template dialogs via
 //! accessibility and System Events.
 
+#[cfg(target_os = "macos")]
 use super::focus::activate_app_with_verification;
+#[cfg(target_os = "macos")]
 use super::*;
 
 #[cfg(target_os = "macos")]

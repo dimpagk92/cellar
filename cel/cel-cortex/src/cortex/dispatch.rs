@@ -14,6 +14,7 @@ use super::cdp::{
 use super::focus::{
     activate_app_with_verification, resolve_ax_by_label, try_ax_action, try_set_value,
 };
+#[cfg(target_os = "macos")]
 use super::numbers::{
     bootstrap_numbers_document, dismiss_numbers_dialog_if_present,
     should_attempt_numbers_document_bootstrap,

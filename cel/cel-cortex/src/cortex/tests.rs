@@ -4,6 +4,7 @@ use super::cdp::{
     build_extract_expression, build_set_value_js, cdp_value_to_string, key_to_cdp_event,
     parse_extracted, DOM_SNAPSHOT_BODY_JS, DOM_SNAPSHOT_JS,
 };
+#[cfg(target_os = "macos")]
 use super::numbers::should_attempt_numbers_document_bootstrap;
 use super::targets::normalise_url;
 use super::tick::{

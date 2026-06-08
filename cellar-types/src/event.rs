@@ -333,7 +333,10 @@ mod tests {
             (EventKind::WindowMinimized, "window_minimized"),
             (EventKind::SheetOpened, "sheet_opened"),
             (EventKind::ValueChanged, "value_changed"),
-            (EventKind::NetworkConnectionOpened, "network_connection_opened"),
+            (
+                EventKind::NetworkConnectionOpened,
+                "network_connection_opened",
+            ),
             (EventKind::AudioTranscript, "audio_transcript"),
             (EventKind::KeyboardInput, "keyboard_input"),
             (EventKind::PointerMoved, "pointer_moved"),
@@ -372,11 +375,14 @@ mod tests {
 
     #[test]
     fn network_event_round_trips_with_payload() {
-        let e = Event::now(EventSource::CortexNetwork, EventKind::NetworkConnectionOpened)
-            .with_data("remote_addr", "93.184.216.34")
-            .with_data("remote_port", 443u16)
-            .with_data("service", "https")
-            .with_data("process_name", "Google Chrome");
+        let e = Event::now(
+            EventSource::CortexNetwork,
+            EventKind::NetworkConnectionOpened,
+        )
+        .with_data("remote_addr", "93.184.216.34")
+        .with_data("remote_port", 443u16)
+        .with_data("service", "https")
+        .with_data("process_name", "Google Chrome");
         let s = serde_json::to_string(&e).unwrap();
         let back: Event = serde_json::from_str(&s).unwrap();
         assert_eq!(e, back);

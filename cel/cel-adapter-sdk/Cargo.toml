@@ -1,0 +1,23 @@
+[package]
+name = "cel-adapter-sdk"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "CEL adapter SDK — the AdapterDriver trait, manifest types, and adapter discovery/registration helpers. The surface third-party adapters implement, decoupled from the cortex engine so authors don't pull in the whole perception runtime."
+
+[dependencies]
+# Low-level shared crates only — NONE of these depend back on cel-cortex, so
+# this SDK can sit below the engine without a dependency cycle. That is the
+# whole point: adapters depend on the SDK, the engine depends on the SDK, and
+# adapters no longer depend on the 5000+ LOC engine just to get the trait.
+cel-context = { workspace = true }
+cel-contracts = { workspace = true }
+cel-cdp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

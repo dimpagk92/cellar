@@ -51,6 +51,14 @@ impl From<&str> for RequestId {
 ///
 /// Notifications are one-way client → server messages (`system.pong`) or
 /// server → client messages (subscription frames, `system.ping`).
+///
+/// The `trace_id` field is an opt-in correlation token (RFC §9). When a
+/// client supplies one, the server propagates it through every log line
+/// emitted while serving the request, echoes it in the response, and
+/// stamps it on every subscription frame produced by that request. When
+/// the client omits it, the server mints a fresh UUID v7 so every request
+/// has a trace_id available for correlation in the daemon's structured
+/// logs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JsonRpcRequest {
     /// Always `"2.0"`.
@@ -63,6 +71,12 @@ pub struct JsonRpcRequest {
     /// Method-specific params. Always an object per RFC §3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
+    /// Optional client-supplied correlation token. Echoed in the response
+    /// envelope and stamped on every subscription frame produced by this
+    /// request. Backwards compatible — older clients omit the field and
+    /// the daemon mints one server-side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl JsonRpcRequest {
@@ -73,6 +87,23 @@ impl JsonRpcRequest {
             id: Some(id.into()),
             method: method.into(),
             params: Some(params),
+            trace_id: None,
+        }
+    }
+
+    /// Construct a new request with an explicit `trace_id`.
+    pub fn new_with_trace(
+        id: impl Into<RequestId>,
+        method: impl Into<String>,
+        params: Value,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id: Some(id.into()),
+            method: method.into(),
+            params: Some(params),
+            trace_id: Some(trace_id.into()),
         }
     }
 
@@ -83,6 +114,24 @@ impl JsonRpcRequest {
             id: None,
             method: method.into(),
             params: Some(params),
+            trace_id: None,
+        }
+    }
+
+    /// Construct a notification with an explicit `trace_id` (used by
+    /// subscription frame forwarders so frames carry the originating
+    /// subscribe request's trace_id).
+    pub fn notification_with_trace(
+        method: impl Into<String>,
+        params: Value,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id: None,
+            method: method.into(),
+            params: Some(params),
+            trace_id: Some(trace_id.into()),
         }
     }
 
@@ -94,6 +143,11 @@ impl JsonRpcRequest {
 }
 
 /// A JSON-RPC 2.0 response. Either carries `result` or `error`, never both.
+///
+/// The optional `trace_id` echoes whatever the server propagated for the
+/// request (either the client-supplied value or the server-minted one).
+/// Clients can use it to correlate the response with the daemon-side
+/// structured-log lines emitted during the call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JsonRpcResponse {
     /// Always `"2.0"`.
@@ -106,6 +160,11 @@ pub struct JsonRpcResponse {
     /// Error object. Mutually exclusive with `result`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
+    /// Per-request correlation token. Echoes the request's `trace_id`
+    /// (when supplied by the client) or a server-minted one when the
+    /// client omitted it. See [`JsonRpcRequest::trace_id`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl JsonRpcResponse {
@@ -116,6 +175,19 @@ impl JsonRpcResponse {
             id: Some(id),
             result: Some(result),
             error: None,
+            trace_id: None,
+        }
+    }
+
+    /// Construct a success response with a `trace_id` echoed back to the
+    /// caller.
+    pub fn ok_with_trace(id: RequestId, result: Value, trace_id: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id: Some(id),
+            result: Some(result),
+            error: None,
+            trace_id: Some(trace_id.into()),
         }
     }
 
@@ -126,6 +198,22 @@ impl JsonRpcResponse {
             id,
             result: None,
             error: Some(error),
+            trace_id: None,
+        }
+    }
+
+    /// Construct an error response carrying a `trace_id`.
+    pub fn err_with_trace(
+        id: Option<RequestId>,
+        error: JsonRpcError,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: None,
+            error: Some(error),
+            trace_id: Some(trace_id.into()),
         }
     }
 
@@ -139,6 +227,24 @@ impl JsonRpcResponse {
                 message: err.to_string(),
                 data: err.data(),
             },
+        )
+    }
+
+    /// Construct an error response from an [`IpcError`] carrying a
+    /// `trace_id`.
+    pub fn from_ipc_error_with_trace(
+        id: Option<RequestId>,
+        err: &IpcError,
+        trace_id: impl Into<String>,
+    ) -> Self {
+        Self::err_with_trace(
+            id,
+            JsonRpcError {
+                code: err.code(),
+                message: err.to_string(),
+                data: err.data(),
+            },
+            trace_id,
         )
     }
 }
@@ -206,5 +312,60 @@ mod tests {
         let e = resp.error.unwrap();
         assert_eq!(e.code, -32004);
         assert_eq!(e.data.unwrap()["rule_id"], "rule_x");
+    }
+
+    #[test]
+    fn trace_id_round_trips_through_request() {
+        // A request with `trace_id` should serialize the field and a
+        // wire-decoded copy should compare equal.
+        let req = JsonRpcRequest::new_with_trace(1_i64, "rules.list", json!({}), "trace-abc-123");
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(wire.contains("\"trace_id\":\"trace-abc-123\""));
+        let back: JsonRpcRequest = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.trace_id.as_deref(), Some("trace-abc-123"));
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn request_without_trace_id_skips_field_on_wire() {
+        // Backward compat: legacy clients that don't set trace_id must
+        // produce wire bytes without the field at all.
+        let req = JsonRpcRequest::new(1_i64, "rules.list", json!({}));
+        assert!(req.trace_id.is_none());
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(!wire.contains("trace_id"), "wire was: {wire}");
+        // And a wire payload missing the field must deserialize cleanly
+        // with `trace_id == None`.
+        let legacy_wire = r#"{"jsonrpc":"2.0","id":1,"method":"rules.list","params":{}}"#;
+        let parsed: JsonRpcRequest = serde_json::from_str(legacy_wire).unwrap();
+        assert!(parsed.trace_id.is_none());
+    }
+
+    #[test]
+    fn trace_id_round_trips_through_response() {
+        let resp = JsonRpcResponse::ok_with_trace(
+            RequestId::Num(1),
+            json!({"status": "ok"}),
+            "trace-resp-1",
+        );
+        let wire = serde_json::to_string(&resp).unwrap();
+        assert!(wire.contains("\"trace_id\":\"trace-resp-1\""));
+        let back: JsonRpcResponse = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.trace_id.as_deref(), Some("trace-resp-1"));
+    }
+
+    #[test]
+    fn trace_id_round_trips_through_error_response() {
+        let err = IpcError::RuleNotFound("rule_x".into());
+        let resp = JsonRpcResponse::from_ipc_error_with_trace(
+            Some(RequestId::Num(7)),
+            &err,
+            "trace-err-1",
+        );
+        assert_eq!(resp.trace_id.as_deref(), Some("trace-err-1"));
+        let wire = serde_json::to_string(&resp).unwrap();
+        let back: JsonRpcResponse = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.trace_id.as_deref(), Some("trace-err-1"));
+        assert_eq!(back.error.as_ref().unwrap().code, -32004);
     }
 }

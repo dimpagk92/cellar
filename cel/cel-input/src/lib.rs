@@ -5,13 +5,24 @@
 
 #[cfg(target_os = "macos")]
 pub mod applescript;
+/// Background (non-focus-stealing) input — posts CGEvents to a target PID
+/// without activating the app. See [`background`]. WS1.
+pub mod background;
+pub mod capture;
+pub mod clipboard;
 mod enigo_input;
 mod inject;
+/// Macro recording + replay — capture a timed input sequence and play it back
+/// through an [`InputController`]. The replay half of [`capture`].
+pub mod recording;
 
 #[cfg(target_os = "macos")]
 pub use applescript::{read_numbers_cells, write_numbers_cells, CellWrite};
+pub use capture::{create_input_capture, CapturedInput, InputCapture, StubInputCapture};
+pub use clipboard::paste_with_restore;
 pub use enigo_input::EnigoInput;
 pub use inject::{GestureEvent, InputController, InputError, InputEvent, MouseButton};
+pub use recording::{record, replay, RecordedEvent, RecordedInput, Recording, ReplayStats};
 
 /// Create a platform-appropriate input controller.
 pub fn create_controller() -> Result<Box<dyn InputController>, InputError> {

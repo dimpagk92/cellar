@@ -2,7 +2,7 @@
 
 SQLite + [`sqlite-vec`](https://github.com/asg017/sqlite-vec) implementation of [`cel-memory`](../cel-memory)'s `MemoryProvider` trait. Local-first, single-file, embedded vector + FTS retrieval.
 
-**Status:** v0.1 — Phase 1 (persistence + writes) complete; Phase 2 (hybrid retrieval) in progress. Roadmap in the [Cellar Memory & Context Manager plan](https://github.com/dimpagk92/cellar/blob/main/plans/cellar-memory-manager.md).
+**Status:** v0.1 — implements the full `MemoryProvider` surface: writes, sessions, hybrid (vector + FTS + recency) retrieval fronted by a TTL+LRU cache, summarization and daily/rule-week rollups (via an injected summarizer), aging sweeps, export, and stats. `re_embed_all` is the one method still unimplemented.
 
 ## What's in this crate
 
@@ -16,7 +16,7 @@ SQLite + [`sqlite-vec`](https://github.com/asg017/sqlite-vec) implementation of 
 
 - **Single SQLite file.** One file to back up, encrypt, ship to compliance. No separate vector daemon, no second process to manage.
 - **Brute-force vector scan up to ~1M chunks per user.** `sqlite-vec` is fast on Apple Silicon (5–30 ms at typical personal-memory scale). HNSW is a drop-in upgrade when `sqlite-vec` ships it.
-- **Hybrid retrieval** (Phase 2): vector + FTS + recency, weighted per `RetrievalProfile`.
+- **Hybrid retrieval**: vector + FTS + recency, weighted per `RetrievalProfile`, fused with reciprocal-rank fusion and fronted by a short-TTL LRU cache.
 - **Governance-first.** Every write consults the optional `MemoryWriteHook` from `cel-memory` — a rule engine can redact or veto.
 
 ## Example

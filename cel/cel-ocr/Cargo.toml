@@ -1,0 +1,39 @@
+[package]
+name = "cel-ocr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CEL OCR — local, on-device text recognition via the macOS Vision framework"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }
+
+# Vision is an Objective-C-only framework, so the real implementation needs
+# objc2. It is a *public, stable* system framework (unlike the private SkyLight
+# APIs behind cel-spaces) — available on every macOS — so it is on by default
+# here and gated only by target_os. Non-macOS targets get the stub and never
+# pull objc2.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSData",
+    "NSArray",
+    "NSString",
+    "NSDictionary",
+    "NSError",
+    "NSValue",
+    "NSGeometry",
+] }
+objc2-vision = { version = "0.3", features = [
+    "VNRequest",
+    "VNRequestHandler",
+    "VNRecognizeTextRequest",
+    "VNObservation",
+    "VNTypes",
+] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

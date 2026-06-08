@@ -117,6 +117,24 @@ cellar activity fires
 The fire is also visible to the matcher's memory audit trail via
 `memory.recent` (when wired) and any open `fires.subscribe` stream.
 
+## Add a rule that watches the browser
+
+For a rule that pairs a watchlist with browser navigation, see
+[`url-change-guard.json`](example-rules/url-change-guard.json) — it
+matches `url_changed` events (forwarded from the Tauri Cortex via
+`events.publish`) against the `blocked_domains` watchlist and asks
+for confirmation before letting the agent stay on a flagged page.
+A seed watchlist lives at
+[`example-watchlists/blocked-domains.json`](example-watchlists/blocked-domains.json);
+the cookbook covers the `www.`-prefix gotcha in recipe #6.
+
+```sh
+cellar rules add cellar-app-docs/example-rules/url-change-guard.json
+cellar watchlists set blocked_domains \
+  facebook.com www.facebook.com \
+  instagram.com www.instagram.com
+```
+
 ## LLM configuration
 
 `rules.compile` (natural-language → typed `Rule`) and `agent.message`

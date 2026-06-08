@@ -3,16 +3,24 @@
 //!
 //! Every memory write produces a synthetic [`EventKind::MemoryWriteAttempted`]
 //! event. The matcher runs over the current rule snapshot; if any matched
-//! rule has `action.type == Veto`, the write is redacted (the chunk
-//! never lands in storage; a `<redacted: …>` marker is returned to the
-//! caller instead). Other action types are ignored — `redact_memory` is
-//! the only governance mode v1 supports on memory writes.
+//! rule has `action.type == Veto` **or** `action.type == RedactMemory`, the
+//! write is redacted (the chunk never lands in storage; a `<redacted: …>`
+//! marker is returned to the caller instead). Other action types are
+//! ignored — those two variants are the only governance modes v1 supports
+//! on memory writes.
+//!
+//! `RedactMemory` is the named-action sugar layer over `Veto`: both produce
+//! the same `WriteDecision::Redact` here, but `RedactMemory` is what the NL
+//! compiler emits when the user's phrasing implies "don't persist memory
+//! about X" (e.g. *"never persist chunks mentioning bank.example.com"*).
+//! Users authoring rules via the JSON path can still use `Veto` directly
+//! and get identical behaviour.
 //!
 //! This is the daemon-side glue that delivers the trust-and-execution
 //! thesis for memory writes: rules can govern what gets persisted with
 //! the same schema and matcher that govern `cel_act` calls.
 //!
-//! See `cellar-memory-manager.md` §11.5.
+//! See `cellar-memory-manager.md` §10.5 / §11.5.
 
 use std::sync::Arc;
 
@@ -61,15 +69,24 @@ where
         let rules: Vec<Rule> = self.rules.snapshot();
         let matches = Matcher::evaluate(&event, &rules, self.watchlists.as_ref());
 
-        // First Veto wins. The matcher returns rules in declaration order;
-        // we honor that for deterministic redaction reasons.
+        // First Veto / RedactMemory wins. The matcher returns rules in
+        // declaration order; we honor that for deterministic redaction
+        // reasons. Both action types map to the same `WriteDecision::Redact`:
+        // `RedactMemory` is the named-action sugar the NL compiler emits;
+        // `Veto` is the original variant a hand-authored JSON rule uses.
+        // Keeping both paths live here means user-facing language and
+        // hand-rolled rules behave identically.
         for m in &matches {
-            if matches!(m.rule.action.action_type, ActionType::Veto) {
+            if matches!(
+                m.rule.action.action_type,
+                ActionType::Veto | ActionType::RedactMemory
+            ) {
                 tracing::info!(
                     rule_id = %m.rule.id,
                     rule_name = %m.rule.name,
                     caller = %chunk.caller_id,
                     kind = ?chunk.kind,
+                    action = ?m.rule.action.action_type,
                     "memory write redacted by rule"
                 );
                 return Ok(WriteDecision::Redact {
@@ -257,6 +274,53 @@ mod tests {
         );
         let d = hook.before_write(&chunk("embedded", "x")).await.unwrap();
         assert_eq!(d, WriteDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn redact_memory_action_redacts_like_veto() {
+        // The named-action sugar. Same behaviour as Veto, but emitted by the
+        // NL compiler when the user phrases the intent as
+        // "never persist chunks mentioning <substring>". A rule on a chunk
+        // containing the matched substring suppresses persistence.
+        let rule = Rule {
+            id: "rule_no_bank".into(),
+            name: "no_bank_memory".into(),
+            nl_original: "never persist chunks mentioning bank.example.com".into(),
+            kind: RuleKind::Audit,
+            enabled: true,
+            match_expr: Expression::leaf(
+                "data.content_preview",
+                Operator::Contains,
+                json!("bank.example.com"),
+            ),
+            action: Action {
+                action_type: ActionType::RedactMemory,
+                webhook_id: None,
+                timeout_s: None,
+            },
+            cooldown_seconds: 0,
+            created_at: Utc::now(),
+        };
+        let hook = MatcherWriteHook::new(
+            Arc::new(StaticRules(vec![rule])),
+            Arc::new(InMemoryWatchlists::default()),
+        );
+        let innocent = hook
+            .before_write(&chunk("embedded", "discussing the weather"))
+            .await
+            .unwrap();
+        assert_eq!(innocent, WriteDecision::Allow);
+        let suspicious = hook
+            .before_write(&chunk(
+                "embedded",
+                "I just logged into bank.example.com and saw…",
+            ))
+            .await
+            .unwrap();
+        match suspicious {
+            WriteDecision::Redact { reason } => assert_eq!(reason, "no_bank_memory"),
+            other => panic!("expected Redact, got {other:?}"),
+        }
     }
 
     #[tokio::test]

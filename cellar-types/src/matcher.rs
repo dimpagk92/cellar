@@ -133,7 +133,18 @@ fn evaluate_leaf<W: WatchlistLookup>(leaf: &Leaf, event: &Event, watchlists: &W)
                 Some(s) => s,
                 None => return false,
             };
-            watchlists.contains(list_name, item)
+            // Exact match first.
+            if watchlists.contains(list_name, item) {
+                return true;
+            }
+            // URL-aware hostname match: if the value looks like a full URL,
+            // also test the extracted hostname so rules like
+            // `data.url in_watchlist url-blocklist` work with entries like
+            // "twitter.com" against "https://twitter.com/home".
+            if let Some(hostname) = extract_url_hostname(item) {
+                return watchlists.contains(list_name, hostname);
+            }
+            false
         }
         Operator::NotInWatchlist => {
             let list_name = match leaf.value.as_str() {
@@ -144,8 +155,32 @@ fn evaluate_leaf<W: WatchlistLookup>(leaf: &Leaf, event: &Event, watchlists: &W)
                 Some(s) => s,
                 None => return true,
             };
-            !watchlists.contains(list_name, item)
+            if watchlists.contains(list_name, item) {
+                return false;
+            }
+            if let Some(hostname) = extract_url_hostname(item) {
+                return !watchlists.contains(list_name, hostname);
+            }
+            true
         }
+    }
+}
+
+/// Extract the hostname (without port) from a URL string.
+/// Returns `Some("twitter.com")` for `"https://twitter.com/home"`.
+/// Returns `None` for non-URL strings.
+fn extract_url_hostname(value: &str) -> Option<&str> {
+    // Strip scheme.
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))?;
+    // Hostname ends at the first '/', '?', '#', or ':' (port separator).
+    let end = rest.find(['/', '?', '#', ':']).unwrap_or(rest.len());
+    let host = &rest[..end];
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
     }
 }
 

@@ -210,14 +210,34 @@ fn push_with_backpressure(
 }
 
 /// Build a `subscription.gap` frame for `subscription_id` describing
-/// `gap`.
-fn gap_frame(subscription_id: SubscriptionId, gap: GapEmit) -> StreamFrame {
-    StreamFrame {
-        subscription_id,
-        payload: StreamPayload::Gap {
-            dropped: gap.dropped,
-            since: gap.since,
-        },
+/// `gap`. The frame inherits the sink's `trace_id` so the gap notification
+/// is correlated with the originating subscribe request (RFC §9).
+fn gap_frame(
+    subscription_id: SubscriptionId,
+    trace_id: Option<String>,
+    gap: GapEmit,
+) -> StreamFrame {
+    let payload = StreamPayload::Gap {
+        dropped: gap.dropped,
+        since: gap.since,
+    };
+    match trace_id {
+        Some(t) => StreamFrame::with_trace(subscription_id, t, payload),
+        None => StreamFrame::new(subscription_id, payload),
+    }
+}
+
+/// Build a `StreamFrame` that inherits `trace_id` from the sink so every
+/// emitted frame carries the originating subscribe request's correlation
+/// token.
+fn make_frame(
+    subscription_id: SubscriptionId,
+    sink_trace_id: Option<&str>,
+    payload: StreamPayload,
+) -> StreamFrame {
+    match sink_trace_id {
+        Some(t) => StreamFrame::with_trace(subscription_id, t.to_string(), payload),
+        None => StreamFrame::new(subscription_id, payload),
     }
 }
 
@@ -333,6 +353,7 @@ pub fn spawn_events_forwarder(
 ) -> SubscriptionId {
     let id = SubscriptionId::new();
     let id_for_task = id.clone();
+    let trace_id = sink.trace_id().map(str::to_string);
     let mut rx = bus.subscribe();
     let task = tokio::spawn(async move {
         let gap_state = GapState::new();
@@ -340,12 +361,13 @@ pub fn spawn_events_forwarder(
             match rx.recv().await {
                 Ok(event) => {
                     if filter_event(&filter, &event) {
-                        let frame = StreamFrame {
-                            subscription_id: id_for_task.clone(),
-                            payload: StreamPayload::Event {
+                        let frame = make_frame(
+                            id_for_task.clone(),
+                            trace_id.as_deref(),
+                            StreamPayload::Event {
                                 event: event_to_value(&event),
                             },
-                        };
+                        );
                         match push_with_backpressure(
                             &sink,
                             &gap_state,
@@ -354,7 +376,7 @@ pub fn spawn_events_forwarder(
                         ) {
                             SendOutcome::Sent { catch_up_gap } => {
                                 if let Some(gap) = catch_up_gap {
-                                    let gf = gap_frame(id_for_task.clone(), gap);
+                                    let gf = gap_frame(id_for_task.clone(), trace_id.clone(), gap);
                                     // Best-effort: if the wire also can't accept the
                                     // gap frame the next push will roll the counter
                                     // back into drop-mode.
@@ -364,6 +386,7 @@ pub fn spawn_events_forwarder(
                             SendOutcome::Dropped => {
                                 tracing::trace!(
                                     subscription_id = %id_for_task,
+                                    trace_id = trace_id.as_deref().unwrap_or(""),
                                     dropped_so_far = gap_state.dropped_count(),
                                     "events.subscribe dropped frame (slow client)"
                                 );
@@ -371,6 +394,7 @@ pub fn spawn_events_forwarder(
                             SendOutcome::Closed => {
                                 tracing::debug!(
                                     subscription_id = %id_for_task,
+                                    trace_id = trace_id.as_deref().unwrap_or(""),
                                     "events.subscribe sink closed; forwarder exiting"
                                 );
                                 break;
@@ -384,21 +408,24 @@ pub fn spawn_events_forwarder(
                 Err(RecvError::Lagged(dropped)) => {
                     tracing::warn!(
                         subscription_id = %id_for_task,
+                        trace_id = trace_id.as_deref().unwrap_or(""),
                         dropped,
                         "events.subscribe lagged behind bus"
                     );
-                    let gap = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: StreamPayload::Gap {
+                    let gap = make_frame(
+                        id_for_task.clone(),
+                        trace_id.as_deref(),
+                        StreamPayload::Gap {
                             dropped,
                             since: chrono::Utc::now(),
                         },
-                    };
+                    );
                     let _ = sink.try_send(gap);
                 }
                 Err(RecvError::Closed) => {
                     tracing::debug!(
                         subscription_id = %id_for_task,
+                        trace_id = trace_id.as_deref().unwrap_or(""),
                         "events bus closed; forwarder exiting"
                     );
                     break;
@@ -419,6 +446,7 @@ pub fn spawn_fires_forwarder(
 ) -> SubscriptionId {
     let id = SubscriptionId::new();
     let id_for_task = id.clone();
+    let trace_id = sink.trace_id().map(str::to_string);
     let mut rx = bus.subscribe();
     let task = tokio::spawn(async move {
         let gap_state = GapState::new();
@@ -426,12 +454,13 @@ pub fn spawn_fires_forwarder(
             match rx.recv().await {
                 Ok(fire) => {
                     if fire_matches(&fire, &filter) {
-                        let frame = StreamFrame {
-                            subscription_id: id_for_task.clone(),
-                            payload: StreamPayload::Fire {
+                        let frame = make_frame(
+                            id_for_task.clone(),
+                            trace_id.as_deref(),
+                            StreamPayload::Fire {
                                 entry: fire_to_value(&fire),
                             },
-                        };
+                        );
                         match push_with_backpressure(
                             &sink,
                             &gap_state,
@@ -440,13 +469,14 @@ pub fn spawn_fires_forwarder(
                         ) {
                             SendOutcome::Sent { catch_up_gap } => {
                                 if let Some(gap) = catch_up_gap {
-                                    let gf = gap_frame(id_for_task.clone(), gap);
+                                    let gf = gap_frame(id_for_task.clone(), trace_id.clone(), gap);
                                     let _ = sink.try_send(gf);
                                 }
                             }
                             SendOutcome::Dropped => {
                                 tracing::trace!(
                                     subscription_id = %id_for_task,
+                                    trace_id = trace_id.as_deref().unwrap_or(""),
                                     dropped_so_far = gap_state.dropped_count(),
                                     "fires.subscribe dropped frame (slow client)"
                                 );
@@ -459,13 +489,14 @@ pub fn spawn_fires_forwarder(
                     }
                 }
                 Err(RecvError::Lagged(dropped)) => {
-                    let gap = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: StreamPayload::Gap {
+                    let gap = make_frame(
+                        id_for_task.clone(),
+                        trace_id.as_deref(),
+                        StreamPayload::Gap {
                             dropped,
                             since: chrono::Utc::now(),
                         },
-                    };
+                    );
                     let _ = sink.try_send(gap);
                 }
                 Err(RecvError::Closed) => break,
@@ -495,6 +526,7 @@ pub fn spawn_agent_actions_forwarder(
 ) -> SubscriptionId {
     let id = SubscriptionId::new();
     let id_for_task = id.clone();
+    let trace_id = sink.trace_id().map(str::to_string);
     let mut rx = bus.subscribe();
     let task = tokio::spawn(async move {
         let gap_state = GapState::new();
@@ -502,23 +534,25 @@ pub fn spawn_agent_actions_forwarder(
             match rx.recv().await {
                 Ok(frame) => {
                     if agent_action_matches(&frame, &filter) {
-                        let sf = StreamFrame {
-                            subscription_id: id_for_task.clone(),
-                            payload: StreamPayload::AgentAction {
+                        let sf = make_frame(
+                            id_for_task.clone(),
+                            trace_id.as_deref(),
+                            StreamPayload::AgentAction {
                                 action: frame.action,
                             },
-                        };
+                        );
                         match push_with_backpressure(&sink, &gap_state, ForwarderKind::Standard, sf)
                         {
                             SendOutcome::Sent { catch_up_gap } => {
                                 if let Some(gap) = catch_up_gap {
-                                    let gf = gap_frame(id_for_task.clone(), gap);
+                                    let gf = gap_frame(id_for_task.clone(), trace_id.clone(), gap);
                                     let _ = sink.try_send(gf);
                                 }
                             }
                             SendOutcome::Dropped => {
                                 tracing::trace!(
                                     subscription_id = %id_for_task,
+                                    trace_id = trace_id.as_deref().unwrap_or(""),
                                     dropped_so_far = gap_state.dropped_count(),
                                     "agent_actions.subscribe dropped frame (slow client)"
                                 );
@@ -531,13 +565,14 @@ pub fn spawn_agent_actions_forwarder(
                     }
                 }
                 Err(RecvError::Lagged(dropped)) => {
-                    let gap = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: StreamPayload::Gap {
+                    let gap = make_frame(
+                        id_for_task.clone(),
+                        trace_id.as_deref(),
+                        StreamPayload::Gap {
                             dropped,
                             since: chrono::Utc::now(),
                         },
-                    };
+                    );
                     let _ = sink.try_send(gap);
                 }
                 Err(RecvError::Closed) => break,
@@ -562,6 +597,7 @@ pub fn spawn_agent_chat_forwarder(
 ) -> SubscriptionId {
     let id = SubscriptionId::new();
     let id_for_task = id.clone();
+    let trace_id = sink.trace_id().map(str::to_string);
     let mut rx = bus.subscribe();
     let task = tokio::spawn(async move {
         // Gap state still here for completeness — `Sent` paths read it,
@@ -573,10 +609,8 @@ pub fn spawn_agent_chat_forwarder(
                     if frame.session_id != session_id {
                         continue;
                     }
-                    let stream_frame = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: frame.payload,
-                    };
+                    let stream_frame =
+                        make_frame(id_for_task.clone(), trace_id.as_deref(), frame.payload);
                     match push_with_backpressure(
                         &sink,
                         &gap_state,
@@ -593,6 +627,7 @@ pub fn spawn_agent_chat_forwarder(
                         SendOutcome::CriticalOverflow => {
                             tracing::warn!(
                                 subscription_id = %id_for_task,
+                                trace_id = trace_id.as_deref().unwrap_or(""),
                                 "agent.chat.subscribe per-connection buffer full — \
                                  dropping connection to force reconnect (RFC §6)"
                             );
@@ -609,13 +644,14 @@ pub fn spawn_agent_chat_forwarder(
                     // for critical subscriptions — this is a different
                     // failure mode (broadcast bus overflow upstream of
                     // the per-connection mpsc) and clients can recover.
-                    let gap = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: StreamPayload::Gap {
+                    let gap = make_frame(
+                        id_for_task.clone(),
+                        trace_id.as_deref(),
+                        StreamPayload::Gap {
                             dropped,
                             since: chrono::Utc::now(),
                         },
-                    };
+                    );
                     let _ = sink.try_send(gap);
                 }
                 Err(RecvError::Closed) => break,
@@ -638,18 +674,20 @@ pub fn spawn_confirmation_forwarder(
 ) -> SubscriptionId {
     let id = SubscriptionId::new();
     let id_for_task = id.clone();
+    let trace_id = sink.trace_id().map(str::to_string);
     let mut rx = bus.subscribe();
     let task = tokio::spawn(async move {
         let gap_state = GapState::new();
         loop {
             match rx.recv().await {
                 Ok(pending) => {
-                    let frame = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: StreamPayload::Confirmation {
+                    let frame = make_frame(
+                        id_for_task.clone(),
+                        trace_id.as_deref(),
+                        StreamPayload::Confirmation {
                             confirmation: pending,
                         },
-                    };
+                    );
                     match push_with_backpressure(&sink, &gap_state, ForwarderKind::Critical, frame)
                     {
                         SendOutcome::Sent { .. } => {}
@@ -657,6 +695,7 @@ pub fn spawn_confirmation_forwarder(
                         SendOutcome::CriticalOverflow => {
                             tracing::warn!(
                                 subscription_id = %id_for_task,
+                                trace_id = trace_id.as_deref().unwrap_or(""),
                                 "confirmation.subscribe per-connection buffer full — \
                                  dropping connection to force reconnect (RFC §6)"
                             );
@@ -669,13 +708,14 @@ pub fn spawn_confirmation_forwarder(
                     }
                 }
                 Err(RecvError::Lagged(dropped)) => {
-                    let gap = StreamFrame {
-                        subscription_id: id_for_task.clone(),
-                        payload: StreamPayload::Gap {
+                    let gap = make_frame(
+                        id_for_task.clone(),
+                        trace_id.as_deref(),
+                        StreamPayload::Gap {
                             dropped,
                             since: chrono::Utc::now(),
                         },
-                    };
+                    );
                     let _ = sink.try_send(gap);
                 }
                 Err(RecvError::Closed) => break,
@@ -915,10 +955,20 @@ mod tests {
         // then assert prune drops exactly that one entry.
         let reg = Arc::new(SubscriptionRegistry::new());
         let bus = EventBus::new();
-        let (s_dead, rx_dead) = sink(8);
-        let (s_live, _rx_live) = sink(8);
-        let dead_id = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s_dead);
-        let live_id = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s_live);
+        let (tx_dead, rx_dead) = tokio::sync::mpsc::channel(8);
+        let (tx_live, _rx_live) = tokio::sync::mpsc::channel(8);
+        let dead_id = spawn_events_forwarder(
+            &reg,
+            &bus,
+            StreamFilter::default(),
+            FrameSink::for_tests(tx_dead),
+        );
+        let live_id = spawn_events_forwarder(
+            &reg,
+            &bus,
+            StreamFilter::default(),
+            FrameSink::for_tests(tx_live),
+        );
         assert_eq!(reg.len(), 2);
 
         // Drop the dead receiver and publish — the forwarder's send fails
@@ -946,8 +996,13 @@ mod tests {
         let reg = Arc::new(SubscriptionRegistry::new());
         let bus = EventBus::new();
         // First subscription with a receiver we drop immediately to kill it.
-        let (s1, rx1) = sink(8);
-        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s1);
+        let (tx1, rx1) = tokio::sync::mpsc::channel(8);
+        spawn_events_forwarder(
+            &reg,
+            &bus,
+            StreamFilter::default(),
+            FrameSink::for_tests(tx1),
+        );
         drop(rx1);
         bus.publish(Event::now(EventSource::Fsevents, EventKind::FileCreated));
         for _ in 0..10 {
@@ -955,8 +1010,13 @@ mod tests {
         }
         // Now register a new subscription. The dead entry should get
         // pruned implicitly.
-        let (s2, _rx2) = sink(8);
-        let _id2 = spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s2);
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(8);
+        let _id2 = spawn_events_forwarder(
+            &reg,
+            &bus,
+            StreamFilter::default(),
+            FrameSink::for_tests(tx2),
+        );
         assert_eq!(
             reg.len(),
             1,
@@ -968,10 +1028,20 @@ mod tests {
     async fn abort_all_clears_registry_via_drop() {
         let reg = Arc::new(SubscriptionRegistry::new());
         let bus = EventBus::new();
-        let (s1, _rx1) = sink(8);
-        let (s2, _rx2) = sink(8);
-        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s1);
-        spawn_events_forwarder(&reg, &bus, StreamFilter::default(), s2);
+        let (tx1, _rx1) = tokio::sync::mpsc::channel(8);
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(8);
+        spawn_events_forwarder(
+            &reg,
+            &bus,
+            StreamFilter::default(),
+            FrameSink::for_tests(tx1),
+        );
+        spawn_events_forwarder(
+            &reg,
+            &bus,
+            StreamFilter::default(),
+            FrameSink::for_tests(tx2),
+        );
         assert_eq!(reg.len(), 2);
         reg.abort_all();
         assert!(reg.is_empty());

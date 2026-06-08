@@ -253,6 +253,21 @@ mod tests {
     }
 
     #[test]
+    fn test_crop_offset_region_extracts_correct_pixels() {
+        // WS18 region capture core: cropping an OFFSET sub-rectangle must
+        // return exactly those source pixels, not the top-left ones. Row 0 of
+        // the test frame is red, green, blue, white; a 2x1 crop at x=1 must
+        // yield [green, blue].
+        let frame = make_test_frame();
+        let cropped = crop_frame(&frame, 1, 0, 2, 1).unwrap();
+        assert_eq!(cropped.width, 2);
+        assert_eq!(cropped.height, 1);
+        assert_eq!(cropped.data.len(), 2 * 4);
+        assert_eq!(&cropped.data[0..4], &[0, 255, 0, 255]); // source (1,0) green
+        assert_eq!(&cropped.data[4..8], &[0, 0, 255, 255]); // source (2,0) blue
+    }
+
+    #[test]
     fn test_pixel_color() {
         let frame = make_test_frame();
         let c = pixel_color(&frame, 0, 0).unwrap();

@@ -13,9 +13,13 @@ const actionTypes = [
   "key_combo",
   "scroll",
   "drag",
+  "mouse_down",
+  "mouse_up",
   "ax_action",
   "set_value",
   "activate_app",
+  "launch_app",
+  "quit_app",
   "cdp_eval",
   "navigate",
   "write_cells",
@@ -23,6 +27,10 @@ const actionTypes = [
   "focus_lock",
   "focus_release",
   "adapter_action",
+  "window",
+  "dialog",
+  "dock",
+  "menu_extra",
 ] as const;
 
 /**
@@ -56,12 +64,21 @@ const targetAppDescription =
   "the action is sent to whichever app is frontmost at the instant of the " +
   "event (legacy behavior).";
 
+const focusModeDescription =
+  "How to deliver this focus-sensitive action. 'foreground' (default) brings " +
+  "target_app frontmost then posts input. 'background' posts the event directly to " +
+  "target_app's process via CGEventPostToPid WITHOUT activating it, so the user's " +
+  "active window keeps focus. Requires target_app (or an active focus_lock) to resolve " +
+  "the target PID; falls back to foreground if no PID resolves. Not every app honors " +
+  "background-delivered events.";
+
 /**
- * Optional target_app field. Spread into every action variant whose dispatch
- * path is focus-sensitive (CGEventPost-based).
+ * Optional target_app + focus_mode fields. Spread into every action variant
+ * whose dispatch path is focus-sensitive (CGEventPost-based).
  */
 const targetAppField = {
   target_app: z.string().optional().describe(targetAppDescription),
+  focus_mode: z.enum(["foreground", "background"]).optional().describe(focusModeDescription),
 };
 
 /**
@@ -78,6 +95,8 @@ const FOCUS_SENSITIVE_ACTIONS: ReadonlySet<string> = new Set([
   "key_combo",
   "scroll",
   "drag",
+  "mouse_down",
+  "mouse_up",
 ]);
 
 const coordActionBase = {
@@ -100,6 +119,20 @@ const singleActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("type"),
     text: z.string().describe("Text to type using keyboard input"),
+    wpm: z
+      .number()
+      .int()
+      .min(20)
+      .max(400)
+      .optional()
+      .describe("Typing speed (words/min) for human cadence. Omit = instant."),
+    paste: z
+      .boolean()
+      .optional()
+      .describe(
+        "Insert via the clipboard (Cmd+V) instead of keystrokes, restoring the " +
+          "user's previous clipboard. Reliable for emoji/newlines; ignores wpm.",
+      ),
     ...targetAppField,
   }),
   z.object({
@@ -124,11 +157,36 @@ const singleActionSchema = z.discriminatedUnion("action", [
     ...targetAppField,
   }),
   z.object({
+    action: z.literal("swipe"),
+    direction: z
+      .enum(["up", "down", "left", "right"])
+      .describe("Swipe direction"),
+    amount: z
+      .number()
+      .int()
+      .positive()
+      .default(10)
+      .describe("Swipe magnitude in scroll units."),
+    ...targetAppField,
+  }),
+  z.object({
     action: z.literal("drag"),
     from_x: z.number().describe("Start X coordinate"),
     from_y: z.number().describe("Start Y coordinate"),
     to_x: z.number().describe("End X coordinate"),
     to_y: z.number().describe("End Y coordinate"),
+    ...targetAppField,
+  }),
+  z.object({
+    action: z.literal("mouse_down"),
+    x: z.number().describe("X coordinate to press the left button at"),
+    y: z.number().describe("Y coordinate to press the left button at"),
+    ...targetAppField,
+  }),
+  z.object({
+    action: z.literal("mouse_up"),
+    x: z.number().describe("X coordinate to release the left button at"),
+    y: z.number().describe("Y coordinate to release the left button at"),
     ...targetAppField,
   }),
   z.object({
@@ -162,6 +220,26 @@ const singleActionSchema = z.discriminatedUnion("action", [
     app_name: z
       .string()
       .describe("Application name to activate/launch (e.g. 'Google Chrome', 'Finder', 'Terminal')"),
+  }),
+  z.object({
+    action: z.literal("launch_app"),
+    app_name: z.string().describe("Application name to launch/start (e.g. 'TextEdit', 'Calculator')"),
+    background: z
+      .boolean()
+      .optional()
+      .describe(
+        "Launch without bringing the app to the front (open -g). Useful for warming up an " +
+          "app you will drive headlessly. Default false (foreground).",
+      ),
+  }),
+  z.object({
+    action: z.literal("quit_app"),
+    app_name: z
+      .string()
+      .describe(
+        "Application name to quit gracefully (like Cmd+Q). Never force-kills — an app with " +
+          "unsaved changes may surface a dialog and stay open.",
+      ),
   }),
   z.object({
     action: z.literal("cdp_eval"),
@@ -279,6 +357,96 @@ const singleActionSchema = z.discriminatedUnion("action", [
           "params.verify === false.",
       ),
   }),
+  z.object({
+    action: z.literal("window"),
+    op: z
+      .enum([
+        "move",
+        "resize",
+        "set_bounds",
+        "minimize",
+        "unminimize",
+        "maximize",
+        "focus",
+      ])
+      .optional()
+      .describe(
+        "Window operation. Omit when using `preset`. One of: move, resize, " +
+          "set_bounds, minimize, unminimize, maximize, focus.",
+      ),
+    app: z
+      .string()
+      .optional()
+      .describe("Target app name (e.g. 'Finder'). Omit to target the frontmost app."),
+    window_index: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("Window index within the app (0 = the frontmost window)."),
+    x: z.number().optional().describe("Top-left X in screen points (move / set_bounds)."),
+    y: z.number().optional().describe("Top-left Y in screen points (move / set_bounds)."),
+    width: z.number().optional().describe("Width in points (resize / set_bounds)."),
+    height: z.number().optional().describe("Height in points (resize / set_bounds)."),
+    preset: z
+      .enum([
+        "left_half",
+        "right_half",
+        "top_half",
+        "bottom_half",
+        "top_left",
+        "top_right",
+        "bottom_left",
+        "bottom_right",
+        "maximize",
+        "center",
+      ])
+      .optional()
+      .describe("Tiling preset over the display's visible frame. Overrides op + geometry."),
+    display: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Target display index (0-based). Defaults to the window's current display."),
+  }),
+  z.object({
+    action: z.literal("dialog"),
+    op: z
+      .enum(["list", "click", "set_field", "dismiss"])
+      .describe(
+        "Dialog op: list (enumerate buttons + fields), click (button by title), " +
+          "set_field (set a text field), dismiss (Cancel / Don't Save / Close).",
+      ),
+    button: z
+      .string()
+      .optional()
+      .describe("Button title to click (op=click); case-insensitive substring."),
+    value: z.string().optional().describe("Value to set (op=set_field)."),
+    field_index: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe("Which visible text field to set (op=set_field, 0-based)."),
+  }),
+  z.object({
+    action: z.literal("dock"),
+    op: z
+      .enum(["list", "launch", "right_click", "hide", "show"])
+      .describe(
+        "Dock op: list (item titles), launch (by title), right_click (show its " +
+          "menu), hide / show (toggle auto-hide).",
+      ),
+    name: z.string().optional().describe("Dock item title (op=launch / right_click)."),
+  }),
+  z.object({
+    action: z.literal("menu_extra"),
+    op: z
+      .enum(["list", "click"])
+      .describe("Menu-extra op: list (system status-item titles) or click (by title)."),
+    name: z.string().optional().describe("Status-item title to click (op=click)."),
+  }),
 ]);
 
 export const celActSchema = z.union([
@@ -303,6 +471,7 @@ const advertisedActionSchema = z
   .object({
     action: z.enum(actionTypes).optional().describe("Action variant to execute."),
     target_app: z.string().optional().describe(targetAppDescription),
+    focus_mode: z.enum(["foreground", "background"]).optional().describe(focusModeDescription),
   })
   .passthrough();
 
@@ -322,6 +491,7 @@ export const celActMcpInputSchema = z
       .describe("Batch of 1-4 actions to execute sequentially."),
     delay_between_ms: z.number().optional().describe("Delay between batched actions in milliseconds."),
     target_app: z.string().optional().describe(targetAppDescription),
+    focus_mode: z.enum(["foreground", "background"]).optional().describe(focusModeDescription),
   })
   .passthrough();
 
@@ -371,11 +541,15 @@ function dispatchPathForAction(action: SingleAction): ActionDispatchPath {
     case "key_combo":
     case "scroll":
     case "drag":
+    case "mouse_down":
+    case "mouse_up":
       return "native_input";
     case "ax_action":
     case "set_value":
       return action.element_id.startsWith("dom:") ? "cdp" : "accessibility";
     case "activate_app":
+    case "launch_app":
+    case "quit_app":
     case "focus_lock":
     case "focus_release":
       return "focus";
@@ -386,6 +560,11 @@ function dispatchPathForAction(action: SingleAction): ActionDispatchPath {
     case "read_cells":
     case "adapter_action":
       return "adapter";
+    case "window":
+    case "dialog":
+    case "dock":
+    case "menu_extra":
+      return "accessibility";
     default:
       return "unknown";
   }
@@ -411,6 +590,8 @@ function requiresVerification(action: SingleAction): boolean {
       return action.verify !== false;
     case "focus_lock":
     case "activate_app":
+    case "launch_app":
+    case "quit_app":
       return true;
     default:
       return mutatesState(action);
@@ -430,6 +611,8 @@ function verificationMode(action: SingleAction): ActionReceipt["verification"] {
     case "cdp_eval":
     case "focus_lock":
     case "activate_app":
+    case "launch_app":
+    case "quit_app":
       return "cdp_or_cortex";
     default:
       return "caller_must_reobserve";
@@ -445,6 +628,9 @@ function evidenceForAction(action: SingleAction): ActionReceipt["evidence"] {
   }
   if ("target_app" in action && action.target_app) {
     evidence.push({ kind: "target_app", value: action.target_app });
+  }
+  if ("focus_mode" in action && action.focus_mode) {
+    evidence.push({ kind: "focus_mode", value: action.focus_mode });
   }
   if (action.action === "write_cells") {
     evidence.push({ kind: "cell_refs", value: action.writes.map((w) => w.cell_ref) });
@@ -520,6 +706,48 @@ async function bringTargetFrontmost(targetApp: string | undefined) {
   return focus;
 }
 
+/**
+ * WS1: execute a focus-sensitive action via the background (non-focus-stealing)
+ * PID path. Returns the result string, or `null` for variants without a
+ * background equivalent (scroll/drag/mouse_move) so the caller falls back to
+ * the foreground path.
+ */
+function executeSingleBackground(
+  cel: Cel,
+  action: SingleAction,
+  pid: number,
+): string | null {
+  switch (action.action) {
+    case "click": {
+      const { x, y, label } = resolveCoords(cel, action);
+      cel.clickToPid(pid, x, y);
+      return `Clicked ${label} at (${x}, ${y})`;
+    }
+    case "right_click": {
+      const { x, y, label } = resolveCoords(cel, action);
+      cel.rightClickToPid(pid, x, y);
+      return `Right-clicked ${label} at (${x}, ${y})`;
+    }
+    case "double_click": {
+      const { x, y, label } = resolveCoords(cel, action);
+      cel.doubleClickToPid(pid, x, y);
+      return `Double-clicked ${label} at (${x}, ${y})`;
+    }
+    case "type":
+      cel.typeTextToPid(pid, action.text);
+      return `Typed "${action.text}"`;
+    case "key_press":
+      cel.keyPressToPid(pid, action.key);
+      return `Pressed key: ${action.key}`;
+    case "key_combo":
+      cel.keyComboToPid(pid, action.keys);
+      return `Pressed combo: ${action.keys.join("+")}`;
+    default:
+      // scroll / drag / mouse_move have no background variant yet.
+      return null;
+  }
+}
+
 function executeSingle(cel: Cel, action: SingleAction): string {
   switch (action.action) {
     case "click": {
@@ -543,8 +771,16 @@ function executeSingle(cel: Cel, action: SingleAction): string {
       return `Moved mouse to ${label} at (${x}, ${y})`;
     }
     case "type":
-      cel.typeText(action.text);
-      return `Typed "${action.text}"`;
+      if (action.paste) {
+        cel.pasteWithRestore(action.text);
+        return `Pasted "${action.text}" via clipboard (restored)`;
+      }
+      if (action.wpm) {
+        cel.typeTextCadence(action.text, Math.max(1, Math.round(12000 / action.wpm)));
+      } else {
+        cel.typeText(action.text);
+      }
+      return `Typed "${action.text}"${action.wpm ? ` @ ${action.wpm}wpm` : ""}`;
     case "key_press":
       cel.keyPress(action.key);
       return `Pressed key: ${action.key}`;
@@ -557,9 +793,18 @@ function executeSingle(cel: Cel, action: SingleAction): string {
       }
       cel.scroll(action.dx ?? 0, action.dy ?? 0);
       return `Scrolled (${action.dx ?? 0}, ${action.dy ?? 0})`;
+    case "swipe":
+      cel.swipe(action.direction, action.amount);
+      return `Swiped ${action.direction} (${action.amount})`;
     case "drag":
       cel.drag(action.from_x, action.from_y, action.to_x, action.to_y);
       return `Dragged from (${action.from_x}, ${action.from_y}) to (${action.to_x}, ${action.to_y})`;
+    case "mouse_down":
+      (cel as any).mouseDown(action.x, action.y);
+      return `Pressed mouse at (${action.x}, ${action.y})`;
+    case "mouse_up":
+      (cel as any).mouseUp(action.x, action.y);
+      return `Released mouse at (${action.x}, ${action.y})`;
     case "ax_action": {
       const success = cel.axPerformAction(action.element_id, action.ax_action);
       return success
@@ -577,6 +822,19 @@ function executeSingle(cel: Cel, action: SingleAction): string {
       return success
         ? `Activated app: ${action.app_name}`
         : `Failed to activate app: ${action.app_name}`;
+    }
+    case "launch_app": {
+      const success = (cel as any).launchApp(action.app_name, action.background ?? false);
+      const how = action.background ? " (background)" : "";
+      return success
+        ? `Launched app: ${action.app_name}${how}`
+        : `Failed to launch app: ${action.app_name}`;
+    }
+    case "quit_app": {
+      const success = (cel as any).quitApp(action.app_name);
+      return success
+        ? `Asked app to quit: ${action.app_name}`
+        : `Failed to quit app: ${action.app_name}`;
     }
     case "cdp_eval": {
       // cdp_eval is async — handled separately in handleCelAct
@@ -597,6 +855,14 @@ function executeSingle(cel: Cel, action: SingleAction): string {
       // adapter_action routes through the canonical pipeline (PlannedAction::Custom
       // in cortex.rs); handled async in executeAction.
       throw new Error("adapter_action must be handled async");
+    case "window":
+      throw new Error("window must be handled async");
+    case "dialog":
+      throw new Error("dialog must be handled async");
+    case "dock":
+      throw new Error("dock must be handled async");
+    case "menu_extra":
+      throw new Error("menu_extra must be handled async");
   }
 }
 
@@ -682,6 +948,138 @@ async function executeNavigateAction(
   const finalUrl = data.final_url ?? action.url;
   const loadMs = typeof data.load_ms === "number" ? data.load_ms : 0;
   return `Navigated to ${action.url} (final: ${finalUrl}, ${loadMs}ms)`;
+}
+
+/**
+ * Route a `cel_act window` op through the canonical pipeline →
+ * `PlannedAction::Window` → cortex `dispatch_window` (cel-accessibility AX).
+ * The receipt carries the window geometry read back afterward. WS2.
+ */
+async function executeWindowAction(
+  cel: Cel,
+  action: Extract<SingleAction, { action: "window" }>,
+): Promise<string> {
+  await ensureCortexForCanonicalAction(cel);
+  const result = await cel.canonicalExecuteStep({
+    purpose: action.preset ? `Window preset ${action.preset}` : `Window ${action.op ?? "op"}`,
+    kind: "deterministic",
+    action: {
+      type: "window",
+      // `op` is required by the contract; for preset-only calls it is ignored
+      // (the cortex resolves the preset before matching op).
+      op: action.op ?? "set_bounds",
+      app: action.app ?? null,
+      window_index: action.window_index ?? 0,
+      x: action.x ?? null,
+      y: action.y ?? null,
+      width: action.width ?? null,
+      height: action.height ?? null,
+      preset: action.preset ?? null,
+      display: action.display ?? null,
+    },
+  });
+  if (result.status !== "ok") {
+    throw new Error(result.message);
+  }
+  const g = (result.data ?? {}) as {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    minimized?: boolean;
+  };
+  const what = action.preset ? `preset ${action.preset}` : (action.op ?? "op");
+  return (
+    `Window ${what} → ${Math.round(g.x ?? 0)},${Math.round(g.y ?? 0)} ` +
+    `${Math.round(g.width ?? 0)}×${Math.round(g.height ?? 0)}` +
+    (g.minimized ? " (minimized)" : "")
+  );
+}
+
+/**
+ * Route a `cel_act dialog` op through the canonical pipeline →
+ * `PlannedAction::Dialog` → cortex `dispatch_dialog` (AX tree). WS5.
+ */
+async function executeDialogAction(
+  cel: Cel,
+  action: Extract<SingleAction, { action: "dialog" }>,
+): Promise<string> {
+  await ensureCortexForCanonicalAction(cel);
+  const result = await cel.canonicalExecuteStep({
+    purpose: `Dialog ${action.op}${action.button ? ` "${action.button}"` : ""}`,
+    kind: "deterministic",
+    action: {
+      type: "dialog",
+      op: action.op,
+      button: action.button ?? null,
+      value: action.value ?? null,
+      field_index: action.field_index ?? 0,
+    },
+  });
+  if (result.status !== "ok") {
+    throw new Error(result.message);
+  }
+  if (action.op === "list") {
+    const d = (result.data ?? {}) as { buttons?: string[]; fields?: string[] };
+    return `Dialog: buttons [${(d.buttons ?? []).join(", ")}]; fields [${(d.fields ?? []).join(" | ")}]`;
+  }
+  return `Dialog ${action.op}${action.button ? ` "${action.button}"` : ""} ok`;
+}
+
+/**
+ * Route a `cel_act dock` op through the canonical pipeline →
+ * `PlannedAction::Dock` → cortex `dispatch_dock`. WS6.
+ */
+async function executeDockAction(
+  cel: Cel,
+  action: Extract<SingleAction, { action: "dock" }>,
+): Promise<string> {
+  await ensureCortexForCanonicalAction(cel);
+  const result = await cel.canonicalExecuteStep({
+    purpose: `Dock ${action.op}${action.name ? ` "${action.name}"` : ""}`,
+    kind: "deterministic",
+    action: {
+      type: "dock",
+      op: action.op,
+      name: action.name ?? null,
+    },
+  });
+  if (result.status !== "ok") {
+    throw new Error(result.message);
+  }
+  if (action.op === "list") {
+    const d = (result.data ?? {}) as { items?: string[] };
+    return `Dock items: [${(d.items ?? []).join(", ")}]`;
+  }
+  return `Dock ${action.op}${action.name ? ` "${action.name}"` : ""} ok`;
+}
+
+/**
+ * Route a `cel_act menu_extra` op through the canonical pipeline →
+ * `PlannedAction::MenuExtra` → cortex `dispatch_menu_extra`. WS7.
+ */
+async function executeMenuExtraAction(
+  cel: Cel,
+  action: Extract<SingleAction, { action: "menu_extra" }>,
+): Promise<string> {
+  await ensureCortexForCanonicalAction(cel);
+  const result = await cel.canonicalExecuteStep({
+    purpose: `MenuExtra ${action.op}${action.name ? ` "${action.name}"` : ""}`,
+    kind: "deterministic",
+    action: {
+      type: "menu_extra",
+      op: action.op,
+      name: action.name ?? null,
+    },
+  });
+  if (result.status !== "ok") {
+    throw new Error(result.message);
+  }
+  if (action.op === "list") {
+    const d = (result.data ?? {}) as { items?: string[] };
+    return `Menu extras: [${(d.items ?? []).join(", ")}]`;
+  }
+  return `MenuExtra ${action.op}${action.name ? ` "${action.name}"` : ""} ok`;
 }
 
 /**
@@ -809,6 +1207,18 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
   if (action.action === "adapter_action") {
     return executeAdapterAction(cel, action);
   }
+  if (action.action === "window") {
+    return executeWindowAction(cel, action);
+  }
+  if (action.action === "dialog") {
+    return executeDialogAction(cel, action);
+  }
+  if (action.action === "dock") {
+    return executeDockAction(cel, action);
+  }
+  if (action.action === "menu_extra") {
+    return executeMenuExtraAction(cel, action);
+  }
   // Browser DOM elements (`dom:*` ids from the Rust browser adapter,
   // PR #49) route through the cortex's CDP dispatch, not the AX tree.
   // Run this BEFORE the focus-sensitive check below — `dom:*` only
@@ -829,6 +1239,23 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
     const explicitTarget =
       "target_app" in action && action.target_app ? action.target_app : undefined;
     const effectiveTarget = explicitTarget ?? focusLock?.appName;
+    const focusMode = "focus_mode" in action ? action.focus_mode : undefined;
+
+    // WS1: background (non-focus-stealing) path. Post directly to the target
+    // app's PID without activating it. Requires a resolvable target; falls back
+    // to the foreground path below when the PID can't be resolved or the action
+    // has no background variant (scroll/drag/mouse_move).
+    if (focusMode === "background" && effectiveTarget) {
+      const pid = cel.pidForApp(effectiveTarget);
+      if (pid != null) {
+        const bg = executeSingleBackground(cel, action, pid);
+        if (bg != null) {
+          return `${bg} (focus: background → ${effectiveTarget} pid ${pid}, not activated)`;
+        }
+      }
+      // pid unresolved or no background variant → fall through to foreground.
+    }
+
     if (effectiveTarget) {
       const focus = await bringTargetFrontmost(effectiveTarget);
       const result = executeSingle(cel, action);

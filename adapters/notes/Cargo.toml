@@ -6,7 +6,7 @@ license = "MIT"
 description = "CEL adapter for Apple Notes via AppleScript (macOS-only)"
 
 [dependencies]
-cel-cortex = { workspace = true }
+cel-adapter-sdk = { workspace = true }
 cel-contracts = { workspace = true }
 cel-context = { workspace = true }
 cel-accessibility = { workspace = true }

@@ -2081,6 +2081,465 @@ extern "C" {
     fn AXValueGetValue(value: AXValueRef, value_type: i32, out: *mut c_void) -> bool;
 }
 
+// ─── WS2: window management (move/resize/minimize/maximize/focus) ──────────
+// AX-based window ops. Resolve the target window by app (name → pid, or the
+// frontmost app) + window index, apply the op via AXPosition / AXSize /
+// AXMinimized / AXZoomButton / AXRaise, then read geometry back for the receipt.
+
+use core_graphics::geometry::{CGPoint, CGSize};
+
+// AXValueGetValue + AX_VALUE_TYPE_CG_* are already declared above (CGPoint/
+// CGSize extraction). Window setters additionally need AXValueCreate.
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn AXValueCreate(the_type: i32, value_ptr: *const c_void) -> AXValueRef;
+}
+
+fn pid_for_named_app(name: &str) -> Option<i32> {
+    let safe = name.replace('"', "\\\"");
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &format!(
+                "tell application \"System Events\" to unix id of first process whose name is \"{safe}\""
+            ),
+        ])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<i32>()
+            .ok()
+    } else {
+        None
+    }
+}
+
+fn frontmost_pid() -> Option<i32> {
+    let out = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "tell application \"System Events\" to unix id of first process whose frontmost is true",
+        ])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<i32>()
+            .ok()
+    } else {
+        None
+    }
+}
+
+fn ax_read_point(win: AXUIElementRef, attr: &str) -> Option<(f64, f64)> {
+    let cf = get_ax_attribute(win, attr)?;
+    let mut p = CGPoint::new(0.0, 0.0);
+    let ok = unsafe {
+        AXValueGetValue(
+            cf.as_CFTypeRef(),
+            AX_VALUE_TYPE_CG_POINT,
+            &mut p as *mut CGPoint as *mut c_void,
+        )
+    };
+    ok.then_some((p.x, p.y))
+}
+
+fn ax_read_size(win: AXUIElementRef, attr: &str) -> Option<(f64, f64)> {
+    let cf = get_ax_attribute(win, attr)?;
+    let mut s = CGSize::new(0.0, 0.0);
+    let ok = unsafe {
+        AXValueGetValue(
+            cf.as_CFTypeRef(),
+            AX_VALUE_TYPE_CG_SIZE,
+            &mut s as *mut CGSize as *mut c_void,
+        )
+    };
+    ok.then_some((s.width, s.height))
+}
+
+fn ax_set_point(win: AXUIElementRef, attr: &str, x: f64, y: f64) -> bool {
+    let p = CGPoint::new(x, y);
+    let val = unsafe {
+        AXValueCreate(
+            AX_VALUE_TYPE_CG_POINT,
+            &p as *const CGPoint as *const c_void,
+        )
+    };
+    if val.is_null() {
+        return false;
+    }
+    let attr_cf = CFString::new(attr);
+    let err = unsafe { AXUIElementSetAttributeValue(win, attr_cf.as_concrete_TypeRef(), val) };
+    unsafe { CFRelease(val) };
+    err == K_AX_ERROR_SUCCESS
+}
+
+fn ax_set_size(win: AXUIElementRef, w: f64, h: f64) -> bool {
+    let s = CGSize::new(w, h);
+    let val = unsafe { AXValueCreate(AX_VALUE_TYPE_CG_SIZE, &s as *const CGSize as *const c_void) };
+    if val.is_null() {
+        return false;
+    }
+    let attr_cf = CFString::new("AXSize");
+    let err = unsafe { AXUIElementSetAttributeValue(win, attr_cf.as_concrete_TypeRef(), val) };
+    unsafe { CFRelease(val) };
+    err == K_AX_ERROR_SUCCESS
+}
+
+fn ax_set_bool(win: AXUIElementRef, attr: &str, v: bool) -> bool {
+    let cf = if v {
+        CFBoolean::true_value()
+    } else {
+        CFBoolean::false_value()
+    };
+    let attr_cf = CFString::new(attr);
+    let err = unsafe {
+        AXUIElementSetAttributeValue(win, attr_cf.as_concrete_TypeRef(), cf.as_CFTypeRef())
+    };
+    err == K_AX_ERROR_SUCCESS
+}
+
+fn ax_perform(win: AXUIElementRef, action: &str) -> bool {
+    let a = CFString::new(action);
+    unsafe { AXUIElementPerformAction(win, a.as_concrete_TypeRef()) == K_AX_ERROR_SUCCESS }
+}
+
+fn read_window_geom(win: AXUIElementRef) -> crate::window::WindowGeom {
+    let (x, y) = ax_read_point(win, "AXPosition").unwrap_or((0.0, 0.0));
+    let (w, h) = ax_read_size(win, "AXSize").unwrap_or((0.0, 0.0));
+    crate::window::WindowGeom {
+        x,
+        y,
+        width: w,
+        height: h,
+        minimized: get_ax_bool(win, "AXMinimized").unwrap_or(false),
+        title: get_ax_string(win, "AXTitle"),
+    }
+}
+
+/// Resolve the target window (app name → pid, or the frontmost app; + window
+/// index), run `f` against it, and release the AX refs afterward. Shared by
+/// `perform_window_op` and `get_window_geom`. WS2/WS4.
+fn with_target_window<F, R>(
+    app: Option<&str>,
+    window_index: usize,
+    f: F,
+) -> Result<R, AccessibilityError>
+where
+    F: FnOnce(AXUIElementRef) -> R,
+{
+    let pid = match app {
+        Some(name) => pid_for_named_app(name)
+            .ok_or_else(|| AccessibilityError::NotFound(format!("app '{name}' is not running")))?,
+        None => frontmost_pid()
+            .ok_or_else(|| AccessibilityError::QueryFailed("no frontmost app".into()))?,
+    };
+
+    let app_el = unsafe { AXUIElementCreateApplication(pid) };
+    if app_el.is_null() {
+        return Err(AccessibilityError::QueryFailed(
+            "failed to create app element".into(),
+        ));
+    }
+
+    let resolved = get_ax_attribute(app_el, "AXWindows").and_then(|windows_cf| {
+        let windows_ref = windows_cf.as_CFTypeRef();
+        if unsafe { core_foundation::array::CFArrayGetTypeID() }
+            != unsafe { core_foundation::base::CFGetTypeID(windows_ref) }
+        {
+            return None;
+        }
+        let arr: CFArray<CFType> = unsafe {
+            CFArray::wrap_under_get_rule(windows_ref as core_foundation::array::CFArrayRef)
+        };
+        let item = arr.get(window_index as isize)?;
+        let r = item.as_CFTypeRef() as AXUIElementRef;
+        unsafe { CFRetain(r as *const c_void) };
+        Some(r)
+    });
+
+    let win = match resolved {
+        Some(w) => w,
+        None => {
+            unsafe { CFRelease(app_el as *const c_void) };
+            return Err(AccessibilityError::NotFound(format!(
+                "window index {window_index} not found for app pid {pid}"
+            )));
+        }
+    };
+
+    let result = f(win);
+    unsafe {
+        CFRelease(win as *const c_void);
+        CFRelease(app_el as *const c_void);
+    }
+    Ok(result)
+}
+
+/// Resolve the target window (app + index) and apply `op`, returning the
+/// window's geometry read back afterward. WS2.
+pub fn perform_window_op(
+    app: Option<&str>,
+    window_index: usize,
+    op: &crate::window::WindowOp,
+) -> Result<crate::window::WindowGeom, AccessibilityError> {
+    use crate::window::WindowOp;
+
+    let (ok, geom) = with_target_window(app, window_index, |win| {
+        let ok = match op {
+            WindowOp::Move { x, y } => ax_set_point(win, "AXPosition", *x, *y),
+            WindowOp::Resize { width, height } => ax_set_size(win, *width, *height),
+            WindowOp::SetBounds {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let a = ax_set_point(win, "AXPosition", *x, *y);
+                let b = ax_set_size(win, *width, *height);
+                a && b
+            }
+            WindowOp::Minimize => ax_set_bool(win, "AXMinimized", true),
+            WindowOp::Unminimize => ax_set_bool(win, "AXMinimized", false),
+            WindowOp::Maximize => match get_ax_attribute(win, "AXZoomButton") {
+                Some(zoom) => ax_perform(zoom.as_CFTypeRef() as AXUIElementRef, "AXPress"),
+                None => false,
+            },
+            WindowOp::Focus => {
+                let raised = ax_perform(win, "AXRaise");
+                let _ = ax_set_bool(win, "AXMain", true);
+                raised
+            }
+        };
+        (ok, read_window_geom(win))
+    })?;
+
+    if ok {
+        Ok(geom)
+    } else {
+        Err(AccessibilityError::OperationFailed(format!(
+            "window op {op:?} failed (AX setter returned error)"
+        )))
+    }
+}
+
+/// Read a window's geometry without modifying it. Used by WS4 display
+/// targeting to find which display a window currently sits on.
+pub fn get_window_geom(
+    app: Option<&str>,
+    window_index: usize,
+) -> Result<crate::window::WindowGeom, AccessibilityError> {
+    with_target_window(app, window_index, read_window_geom)
+}
+
+// ─── WS6: Dock control ─────────────────────────────────────────────────────
+
+fn dock_autohide(on: bool) -> bool {
+    let script = format!(
+        "tell application \"System Events\" to set autohide of dock preferences to {}",
+        if on { "true" } else { "false" }
+    );
+    std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// First direct child of `el` whose AXRole equals `role` (retained; caller releases).
+fn first_child_of_role(el: AXUIElementRef, role: &str) -> Option<AXUIElementRef> {
+    let children_cf = get_ax_attribute(el, "AXChildren")?;
+    let children_ref = children_cf.as_CFTypeRef();
+    if unsafe { core_foundation::array::CFArrayGetTypeID() }
+        != unsafe { core_foundation::base::CFGetTypeID(children_ref) }
+    {
+        return None;
+    }
+    let arr: CFArray<CFType> =
+        unsafe { CFArray::wrap_under_get_rule(children_ref as core_foundation::array::CFArrayRef) };
+    for i in 0..arr.len() {
+        if let Some(child) = arr.get(i) {
+            let cref = child.as_CFTypeRef() as AXUIElementRef;
+            if get_ax_string(cref, "AXRole").as_deref() == Some(role) {
+                unsafe { CFRetain(cref as *const c_void) };
+                return Some(cref);
+            }
+        }
+    }
+    None
+}
+
+/// Drive the macOS Dock: list items, launch / right-click an item by title, or
+/// toggle auto-hide. WS6.
+pub fn perform_dock_op(
+    op: &crate::window::DockOp,
+) -> Result<crate::window::DockResult, AccessibilityError> {
+    use crate::window::{DockOp, DockResult};
+
+    match op {
+        DockOp::Hide => {
+            return if dock_autohide(true) {
+                Ok(DockResult::default())
+            } else {
+                Err(AccessibilityError::OperationFailed(
+                    "failed to hide Dock".into(),
+                ))
+            };
+        }
+        DockOp::Show => {
+            return if dock_autohide(false) {
+                Ok(DockResult::default())
+            } else {
+                Err(AccessibilityError::OperationFailed(
+                    "failed to show Dock".into(),
+                ))
+            };
+        }
+        _ => {}
+    }
+
+    let pid = pid_for_named_app("Dock")
+        .ok_or_else(|| AccessibilityError::NotFound("Dock process not found".into()))?;
+    let app = unsafe { AXUIElementCreateApplication(pid) };
+    if app.is_null() {
+        return Err(AccessibilityError::QueryFailed(
+            "failed to create Dock element".into(),
+        ));
+    }
+
+    let outcome = (|| {
+        let list = first_child_of_role(app, "AXList")
+            .ok_or_else(|| AccessibilityError::NotFound("Dock item list not found".into()))?;
+
+        let mut titles = Vec::new();
+        let mut acted = false;
+        if let Some(items_cf) = get_ax_attribute(list, "AXChildren") {
+            let items_ref = items_cf.as_CFTypeRef();
+            if unsafe { core_foundation::array::CFArrayGetTypeID() }
+                == unsafe { core_foundation::base::CFGetTypeID(items_ref) }
+            {
+                let arr: CFArray<CFType> = unsafe {
+                    CFArray::wrap_under_get_rule(items_ref as core_foundation::array::CFArrayRef)
+                };
+                for i in 0..arr.len() {
+                    let Some(item) = arr.get(i) else { continue };
+                    let iref = item.as_CFTypeRef() as AXUIElementRef;
+                    let title = get_ax_string(iref, "AXTitle").unwrap_or_default();
+                    match op {
+                        DockOp::List => titles.push(title),
+                        DockOp::Launch { name } if title.eq_ignore_ascii_case(name) => {
+                            acted = ax_perform(iref, "AXPress");
+                            break;
+                        }
+                        DockOp::RightClick { name } if title.eq_ignore_ascii_case(name) => {
+                            acted = ax_perform(iref, "AXShowMenu");
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        unsafe { CFRelease(list as *const c_void) };
+
+        match op {
+            DockOp::List => Ok(DockResult { items: titles }),
+            DockOp::Launch { name } | DockOp::RightClick { name } => {
+                if acted {
+                    Ok(DockResult::default())
+                } else {
+                    Err(AccessibilityError::NotFound(format!(
+                        "Dock item '{name}' not found"
+                    )))
+                }
+            }
+            DockOp::Hide | DockOp::Show => unreachable!("handled above"),
+        }
+    })();
+
+    unsafe { CFRelease(app as *const c_void) };
+    outcome
+}
+
+// ─── WS7: menu-bar extras (system status items) ────────────────────────────
+
+/// Drive the system menu-bar extras (Control Center / SystemUIServer status
+/// items): list titles or click one by title. Uses each owner process's
+/// `AXExtrasMenuBar`. WS7.
+pub fn perform_menu_extra_op(
+    op: &crate::window::MenuExtraOp,
+) -> Result<crate::window::MenuExtraResult, AccessibilityError> {
+    use crate::window::{MenuExtraOp, MenuExtraResult};
+
+    let mut titles = Vec::new();
+    let mut acted = false;
+
+    for app_name in ["ControlCenter", "SystemUIServer"] {
+        if acted {
+            break;
+        }
+        let Some(pid) = pid_for_named_app(app_name) else {
+            continue;
+        };
+        let app = unsafe { AXUIElementCreateApplication(pid) };
+        if app.is_null() {
+            continue;
+        }
+
+        if let Some(extras) = get_ax_attribute(app, "AXExtrasMenuBar") {
+            let extras_ref = extras.as_CFTypeRef() as AXUIElementRef;
+            if let Some(children_cf) = get_ax_attribute(extras_ref, "AXChildren") {
+                let children_ref = children_cf.as_CFTypeRef();
+                if unsafe { core_foundation::array::CFArrayGetTypeID() }
+                    == unsafe { core_foundation::base::CFGetTypeID(children_ref) }
+                {
+                    let arr: CFArray<CFType> = unsafe {
+                        CFArray::wrap_under_get_rule(
+                            children_ref as core_foundation::array::CFArrayRef,
+                        )
+                    };
+                    for i in 0..arr.len() {
+                        let Some(item) = arr.get(i) else { continue };
+                        let iref = item.as_CFTypeRef() as AXUIElementRef;
+                        let title = get_ax_string(iref, "AXTitle")
+                            .filter(|s| !s.is_empty())
+                            .or_else(|| get_ax_string(iref, "AXDescription"))
+                            .unwrap_or_default();
+                        match op {
+                            MenuExtraOp::List if !title.is_empty() => titles.push(title),
+                            MenuExtraOp::Click { name }
+                                if !title.is_empty()
+                                    && title.to_lowercase().contains(&name.to_lowercase()) =>
+                            {
+                                acted = ax_perform(iref, "AXPress");
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        unsafe { CFRelease(app as *const c_void) };
+    }
+
+    match op {
+        MenuExtraOp::List => Ok(MenuExtraResult { items: titles }),
+        MenuExtraOp::Click { name } => {
+            if acted {
+                Ok(MenuExtraResult::default())
+            } else {
+                Err(AccessibilityError::NotFound(format!(
+                    "menu extra '{name}' not found"
+                )))
+            }
+        }
+    }
+}
+
 // --- Tests ---
 
 #[cfg(test)]

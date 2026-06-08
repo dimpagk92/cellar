@@ -38,6 +38,10 @@ pub enum ProviderKind {
     Openai,
     /// Local models via Ollama.
     Ollama,
+    /// Google Gemini (via the official OpenAI-compatible endpoint).
+    Gemini,
+    /// xAI / Grok (OpenAI-compatible).
+    Xai,
 }
 
 impl FromStr for ProviderKind {
@@ -48,6 +52,8 @@ impl FromStr for ProviderKind {
             "anthropic" => Ok(ProviderKind::Anthropic),
             "openai" | "openai-compatible" => Ok(ProviderKind::Openai),
             "ollama" => Ok(ProviderKind::Ollama),
+            "gemini" | "google" => Ok(ProviderKind::Gemini),
+            "xai" | "grok" => Ok(ProviderKind::Xai),
             other => Err(LlmError::UnknownProvider(other.to_string())),
         }
     }
@@ -126,6 +132,10 @@ pub fn resolve(subsystem: &str, env: &EnvSource<'_>) -> Result<SubsystemConfig> 
             ProviderKind::Anthropic => env.get("ANTHROPIC_API_KEY"),
             ProviderKind::Openai => env.get("OPENAI_API_KEY"),
             ProviderKind::Ollama => None,
+            ProviderKind::Gemini => env
+                .get("GEMINI_API_KEY")
+                .or_else(|| env.get("GOOGLE_API_KEY")),
+            ProviderKind::Xai => env.get("XAI_API_KEY"),
         },
     };
 

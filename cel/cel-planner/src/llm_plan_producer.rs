@@ -1325,6 +1325,9 @@ fn action_kind(action: &crate::types::PlannedAction) -> String {
         PlannedAction::WriteCells { .. } => "write_cells".into(),
         PlannedAction::ReadCells { .. } => "read_cells".into(),
         PlannedAction::ExtractWithFallback { .. } => "extract_with_fallback".into(),
+        // Window / Dialog / Dock are host-driven (cel_act) actions the planner
+        // never emits; a catch-all keeps this summary match future-proof.
+        _ => "other".into(),
     }
 }
 

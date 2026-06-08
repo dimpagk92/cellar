@@ -1,0 +1,14 @@
+[package]
+name = "cellar-ipc-macros"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Proc-macro for cellar-ipc: #[ipc_dispatch] derives the JSON-RPC dispatch fn from the Handler trait so a method can't exist without its route."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

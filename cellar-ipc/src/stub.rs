@@ -114,6 +114,7 @@ impl Handler for StubHandler {
             daemon_version: self.daemon_version.clone(),
             memory_mb: 0.0,
             cpu_pct: 0.0,
+            memory: None,
         })
     }
 

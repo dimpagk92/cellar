@@ -26,7 +26,7 @@
 //! single call and the AdapterDriver impl in the adapter's `lib.rs`
 //! remains the only thing the adapter author writes.
 
-use cel_cortex::{ActionResult, AdapterDriver, AdapterError};
+use cel_adapter_sdk::{ActionResult, AdapterDriver, AdapterError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};

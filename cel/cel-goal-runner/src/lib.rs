@@ -12,8 +12,13 @@ pub mod canonical_runner;
 pub mod config;
 pub mod outcome;
 pub mod runtime_backend;
+pub mod session;
 
 pub use canonical_runner::{CanonicalGoalRunner, CortexStepExecutor, StepExecutor};
 pub use config::GoalConfig;
 pub use outcome::{ActionRecord, GoalMetrics, GoalResult, GoalStatus, StepOutcome};
 pub use runtime_backend::{resolve_runtime_backend, RuntimeBackend};
+pub use session::{
+    default_session_dir, list_resumable_sessions, load_session, now_ms, save_session, SessionState,
+    SessionStatus,
+};

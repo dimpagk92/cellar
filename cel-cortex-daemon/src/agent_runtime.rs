@@ -37,6 +37,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use cel_act_gateway::{ActionOutcome, AgentGateway, ProposedAction};
+use cel_brief::{
+    BriefBuilder, BriefContext, BriefMessage, HistoryEntry, HistorySource, MemorySource,
+    Role as BriefRole, SystemPromptSource, TokenBudget, UserMessageSource,
+};
 use cel_memory::{
     CallerScope, ChunkKind, ChunkSource, MemoryProvider, MemoryQuery, NewMemoryChunk,
     RetrievalProfile,
@@ -64,6 +68,9 @@ pub enum AgentRuntimeError {
     /// Tool dispatch via gateway failed.
     #[error("gateway error: {0}")]
     Gateway(#[from] cel_act_gateway::GatewayError),
+    /// Per-turn brief assembly (cel-brief) failed.
+    #[error("brief assembly error: {0}")]
+    Brief(#[from] cel_brief::BriefError),
 }
 
 /// Per-call result returned by `run_turn`.
@@ -103,10 +110,37 @@ pub struct AgentRuntime {
     /// Uses `std::sync::Mutex` (not tokio) because it's held only for the
     /// duration of a `HashSet` insert or remove — never across an `.await`.
     interrupted: Arc<Mutex<HashSet<String>>>,
+    /// Prompt-token ceiling handed to the per-turn `cel-brief` `BriefBuilder`.
+    /// The brief prunes lowest-importance history first once the assembled
+    /// prompt would exceed this; system prompt and the user's message are
+    /// `Critical` and never pruned. Defaults high
+    /// ([`DEFAULT_BRIEF_PROMPT_BUDGET_TOKENS`]) so chat sessions behave like
+    /// the pre-brief "send everything" path until a caller tunes it down to a
+    /// real model context window.
+    brief_prompt_budget_tokens: usize,
+    /// Top-K durable memories the brief's `MemorySource` recalls each turn
+    /// (cross-session `JobSummary` / `Rollup` / `Correction` / `Context`
+    /// chunks — deliberately NOT `Chat`, which `HistorySource` already replays
+    /// for the current session, so there's no conversation duplication and the
+    /// just-written user turn can't be recalled as a "memory"). `0` disables
+    /// the source entirely. Default [`DEFAULT_MEMORY_RECALL_K`].
+    memory_recall_k: usize,
 }
 
 const DEFAULT_MAX_TOKENS: u32 = 2048;
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
+/// Default prompt-token budget for the per-turn brief. Deliberately large so
+/// the brief's pruning is effectively a no-op for ordinary chat — the budget
+/// machinery records token usage in the receipt without changing which
+/// messages reach the model. Tune down via
+/// [`AgentRuntime::with_brief_prompt_budget`] to enforce a real context window.
+const DEFAULT_BRIEF_PROMPT_BUDGET_TOKENS: usize = 96_000;
+/// Default top-K for the brief's cross-session `MemorySource` recall. Modest
+/// so it adds a few high-signal durable memories without crowding the prompt;
+/// they're Normal priority and redactable, so the budget prunes them before
+/// the system prompt or the user's message. Override via
+/// [`AgentRuntime::with_memory_recall`]; `0` disables recall.
+const DEFAULT_MEMORY_RECALL_K: usize = 6;
 
 const DEFAULT_SYSTEM_PROMPT_NO_TOOLS: &str =
     "You are Cellar, the embedded agent in the user's Cellar daemon. \
@@ -173,6 +207,8 @@ impl AgentRuntime {
             gateway: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             interrupted: Arc::new(Mutex::new(HashSet::new())),
+            brief_prompt_budget_tokens: DEFAULT_BRIEF_PROMPT_BUDGET_TOKENS,
+            memory_recall_k: DEFAULT_MEMORY_RECALL_K,
         }
     }
 
@@ -222,6 +258,24 @@ impl AgentRuntime {
     /// Builder: override the max tool-call iterations per turn (default 10).
     pub fn with_max_tool_iterations(mut self, n: usize) -> Self {
         self.max_tool_iterations = n;
+        self
+    }
+
+    /// Builder: override the per-turn brief prompt-token budget (default
+    /// [`DEFAULT_BRIEF_PROMPT_BUDGET_TOKENS`]). Set this to the model's real
+    /// context window (minus the response reserve) to make the brief prune
+    /// stale history instead of overflowing the provider.
+    pub fn with_brief_prompt_budget(mut self, tokens: usize) -> Self {
+        self.brief_prompt_budget_tokens = tokens;
+        self
+    }
+
+    /// Builder: override how many durable cross-session memories the brief
+    /// recalls each turn (default [`DEFAULT_MEMORY_RECALL_K`]). Pass `0` to
+    /// disable the `MemorySource` — the brief then assembles from system
+    /// prompt + this-session history + the user message only.
+    pub fn with_memory_recall(mut self, k: usize) -> Self {
+        self.memory_recall_k = k;
         self
     }
 
@@ -281,36 +335,110 @@ impl AgentRuntime {
             })
             .await?;
 
-        // ── 3. Build initial message list ──
+        // ── 3. Assemble the initial prompt via cel-brief ──
+        //
+        // The per-turn assembly (system prompt + replayed history + recalled
+        // memories + the user's message) flows through a `cel_brief::BriefBuilder`
+        // instead of the hand-rolled `Vec<Message>` build it replaced. Sources,
+        // in registration → render order:
+        //   - SystemPromptSource (Critical) → `brief.system`
+        //   - HistorySource      (Normal)   → this session's prior turns,
+        //                                      replayed in order, pruned
+        //                                      lowest-importance-first if over budget
+        //   - MemorySource       (Normal)   → cross-session durable recall
+        //                                      (JobSummary/Rollup/Correction/Context
+        //                                      only — never Chat, so it can't
+        //                                      duplicate HistorySource or recall
+        //                                      the just-written user turn). Placed
+        //                                      right before the user message so the
+        //                                      model attends to it with the question.
+        //                                      Disabled when `memory_recall_k == 0`.
+        //   - UserMessageSource  (Critical) → the current user turn (always last)
+        // `PerceptionSource` (live Cortex snapshot) remains a follow-up — see
+        // cel-brief plan §10.1.
         let mut ordered: Vec<_> = context.into_iter().collect();
         ordered.sort_by_key(|c| c.created_at);
-        let mut messages: Vec<Message> = Vec::new();
-        for chunk in &ordered {
-            if chunk.id == user_chunk.id {
-                continue; // added explicitly at the end
+        let history: Vec<HistoryEntry> = ordered
+            .iter()
+            .filter(|chunk| chunk.id != user_chunk.id) // current turn added by UserMessageSource
+            .map(|chunk| {
+                let role = match chunk.metadata.get("role").and_then(|v| v.as_str()) {
+                    Some("assistant") => BriefRole::Assistant,
+                    _ => BriefRole::User,
+                };
+                HistoryEntry::Text {
+                    role,
+                    content: chunk.content.clone(),
+                }
+            })
+            .collect();
+        let history_window = history.len().max(1);
+
+        let mut builder = BriefBuilder::new()
+            .budget(TokenBudget::new(self.brief_prompt_budget_tokens, 0))
+            .source(Arc::new(SystemPromptSource::new(
+                self.system_prompt.clone(),
+            )))
+            .source(Arc::new(HistorySource::new(history, history_window)));
+        if self.memory_recall_k > 0 {
+            builder = builder.source(Arc::new(
+                MemorySource::new(self.memory.clone(), AGENT_CALLER_ID, self.memory_recall_k)
+                    .with_caller_scope(CallerScope::Own)
+                    .with_kinds(Some(vec![
+                        ChunkKind::JobSummary,
+                        ChunkKind::Rollup,
+                        ChunkKind::Correction,
+                        ChunkKind::Context,
+                    ])),
+            ));
+        }
+        // UserMessageSource is registered last so the user's current turn is the
+        // final message — `brief_message_to_llm` and the loop below depend on it.
+        let builder = builder.source(Arc::new(UserMessageSource::new()));
+
+        let brief_ctx = BriefContext::new(TokenBudget::new(self.brief_prompt_budget_tokens, 0))
+            .with_user_message(user_content)
+            .with_turn(ordered.len() as u64);
+
+        let brief = match builder.build(&brief_ctx).await {
+            Ok(b) => b,
+            Err(e) => {
+                self.publish_error(session_id, &request_id, &e.to_string(), true);
+                return Err(AgentRuntimeError::Brief(e));
             }
-            let role = chunk
-                .metadata
-                .get("role")
-                .and_then(|v| v.as_str())
-                .unwrap_or("user");
-            let llm_role = match role {
-                "assistant" => Role::Assistant,
-                _ => Role::User,
-            };
+        };
+
+        // Compact receipt summary, stamped onto the assistant chunk's metadata
+        // below so the assembly is auditable from the activity/memory trail.
+        let brief_receipt_summary = summarize_brief_receipt(&brief.receipt);
+        tracing::debug!(
+            total_tokens = brief.receipt.total_tokens,
+            dropped = brief.receipt.dropped.len(),
+            "agent turn: assembled brief"
+        );
+
+        // System prompt now travels via the brief (SystemPromptSource); the
+        // historical + user messages become the initial LLM message list.
+        let brief_system = brief.system.clone();
+        let mut messages: Vec<Message> = brief
+            .messages
+            .into_iter()
+            .filter_map(brief_message_to_llm)
+            .collect();
+        // Defensive: UserMessageSource always contributes the user turn, but if
+        // a future budget/governance change ever dropped it, keep the turn
+        // well-formed by re-appending the user's literal message.
+        if !messages
+            .last()
+            .is_some_and(|m| matches!(m.role, Role::User))
+        {
             messages.push(Message {
-                role: llm_role,
+                role: Role::User,
                 content: vec![ContentBlock::Text {
-                    text: chunk.content.clone(),
+                    text: user_content.into(),
                 }],
             });
         }
-        messages.push(Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: user_content.into(),
-            }],
-        });
 
         // ── 4. Agentic loop ──
         let tools: Vec<ToolDefinition> = if self.gateway.is_some() {
@@ -351,7 +479,7 @@ impl AgentRuntime {
 
             let req = CompletionRequest {
                 model: self.model.clone(),
-                system: Some(self.system_prompt.clone()),
+                system: brief_system.clone(),
                 messages: messages.clone(),
                 tools: tools.clone(),
                 temperature: None,
@@ -507,6 +635,7 @@ impl AgentRuntime {
                     "request_id": request_id,
                     "model": self.model,
                     "tool_calls_dispatched": tool_calls_dispatched,
+                    "brief_receipt": brief_receipt_summary,
                 }),
                 importance: None,
                 shareable: false,
@@ -615,6 +744,77 @@ pub fn role_str_of_chunk(metadata: &Value) -> &str {
         .get("role")
         .and_then(|v| v.as_str())
         .unwrap_or("user")
+}
+
+/// Map a `cel_brief::Role` onto the LLM-router `Role`.
+///
+/// `System` never reaches the message list — it travels via
+/// `CompletionRequest.system` — but is mapped to `User` defensively in case a
+/// source ever emits a `Role::System` *message* (rather than a system
+/// contribution). `Tool` collapses to `User`, matching how the router models
+/// tool-result turns.
+fn brief_role_to_llm(role: BriefRole) -> Role {
+    match role {
+        BriefRole::Assistant => Role::Assistant,
+        BriefRole::System | BriefRole::User | BriefRole::Tool => Role::User,
+    }
+}
+
+/// Convert one assembled [`BriefMessage`] into an LLM-router [`Message`].
+///
+/// Returns `None` for variants the chat path doesn't render yet (images).
+/// `Text` is the only variant the current three-source wiring produces;
+/// `ToolCall` / `ToolResult` are handled so a future `ToolCatalogSource` or
+/// tool-replaying `HistorySource` doesn't silently drop content.
+fn brief_message_to_llm(msg: BriefMessage) -> Option<Message> {
+    match msg {
+        BriefMessage::Text { role, content, .. } => Some(Message {
+            role: brief_role_to_llm(role),
+            content: vec![ContentBlock::Text { text: content }],
+        }),
+        BriefMessage::ToolCall { id, name, args, .. } => Some(Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id,
+                name,
+                input: args,
+            }],
+        }),
+        BriefMessage::ToolResult { id, content, .. } => Some(Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id,
+                content: Value::String(content),
+                is_error: false,
+            }],
+        }),
+        // Vision turns aren't wired through the embedded chat agent yet.
+        BriefMessage::Image { .. } => None,
+    }
+}
+
+/// Compact, audit-friendly summary of a [`cel_brief::BriefReceipt`] for the
+/// assistant chunk's `metadata.brief_receipt`. Keeps the durable trail small
+/// (per-source kept/dropped counts + totals) rather than serialising the full
+/// receipt with its `Duration` timings.
+fn summarize_brief_receipt(receipt: &cel_brief::BriefReceipt) -> Value {
+    let mut by_source = serde_json::Map::new();
+    for (sid, stats) in &receipt.by_source {
+        by_source.insert(
+            sid.to_string(),
+            json!({
+                "contributions": stats.contributions,
+                "kept": stats.kept,
+                "tokens": stats.tokens,
+            }),
+        );
+    }
+    json!({
+        "total_tokens": receipt.total_tokens,
+        "dropped": receipt.dropped.len(),
+        "redactions": receipt.redactions.len(),
+        "by_source": by_source,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -845,6 +1045,202 @@ mod tests {
         assert!(
             !agent.system_prompt.contains("not yet enabled"),
             "system prompt should be updated when gateway is wired"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_stamps_brief_receipt_on_assistant_chunk() {
+        // The per-turn assembly now runs through cel-brief; its receipt is
+        // stamped onto the assistant chunk's metadata for the audit trail.
+        // Assert the receipt is present, records tokens, and shows both
+        // Critical sources (system prompt + user message) surviving.
+        let memory: Arc<dyn MemoryProvider> = Arc::new(BasicMemoryProvider::new());
+        let provider = MockProvider::new(vec![text_response("hi there")]);
+        let bus = ChatBus::new();
+        let agent = AgentRuntime::new(memory.clone(), provider, "mock-model", bus);
+        let session_id = fresh_session(&memory).await;
+
+        let result = agent.run_turn(&session_id, "hello").await.unwrap();
+
+        let chunk = memory
+            .get(&result.assistant_message_id)
+            .await
+            .unwrap()
+            .expect("assistant chunk exists");
+        let receipt = chunk
+            .metadata
+            .get("brief_receipt")
+            .expect("brief_receipt present in assistant metadata");
+
+        assert!(
+            receipt
+                .get("total_tokens")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|t| t > 0),
+            "receipt should record a positive total_tokens, got {receipt}"
+        );
+        let by_source = receipt
+            .get("by_source")
+            .and_then(|v| v.as_object())
+            .expect("by_source map present");
+        assert!(
+            by_source.contains_key("system_prompt"),
+            "system_prompt source should appear in the receipt"
+        );
+        let user_kept = by_source
+            .get("user_message")
+            .and_then(|v| v.get("kept"))
+            .and_then(|v| v.as_u64())
+            .expect("user_message kept count present");
+        assert_eq!(
+            user_kept, 1,
+            "the user's message must survive into the brief"
+        );
+    }
+
+    #[tokio::test]
+    async fn brief_assembly_preserves_prior_turn_history() {
+        // Two turns in one session: the second turn's brief should replay the
+        // prior turn as history. `BasicMemoryProvider.retrieve` is a strict
+        // case-insensitive *substring* match (it returns a chunk only when its
+        // content contains the whole query text), so the two turns share an
+        // identical user message — that guarantees the first turn's user chunk
+        // is retrieved and flows into HistorySource on the second turn.
+        let memory: Arc<dyn MemoryProvider> = Arc::new(BasicMemoryProvider::new());
+        let provider = MockProvider::new(vec![
+            text_response("first answer"),
+            text_response("second answer"),
+        ]);
+        let bus = ChatBus::new();
+        let agent = AgentRuntime::new(memory.clone(), provider, "mock-model", bus);
+        let session_id = fresh_session(&memory).await;
+
+        let prompt = "status report please";
+        agent.run_turn(&session_id, prompt).await.unwrap();
+        let second = agent.run_turn(&session_id, prompt).await.unwrap();
+        assert_eq!(second.assistant_text, "second answer");
+
+        let chunk = memory
+            .get(&second.assistant_message_id)
+            .await
+            .unwrap()
+            .expect("assistant chunk exists");
+        let by_source = chunk.metadata["brief_receipt"]["by_source"]
+            .as_object()
+            .expect("by_source map present");
+        let history_kept = by_source
+            .get("history")
+            .and_then(|v| v.get("kept"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            history_kept >= 1,
+            "second turn should replay >=1 prior-turn history entry, got {history_kept}"
+        );
+    }
+
+    #[tokio::test]
+    async fn brief_recalls_durable_memory_across_sessions() {
+        // Seed a durable JobSummary memory in a PRIOR session (authored by the
+        // embedded agent so CallerScope::Own matches), then run a turn in a
+        // fresh session whose user message is a substring of that memory's
+        // content. MemorySource is scoped to durable kinds, so it recalls the
+        // JobSummary cross-session — and because Chat is excluded, it neither
+        // duplicates the conversation nor recalls the just-written user turn.
+        let memory: Arc<dyn MemoryProvider> = Arc::new(BasicMemoryProvider::new());
+        let prior = memory
+            .open_session(cel_memory::NewMemorySession {
+                caller_id: AGENT_CALLER_ID.into(),
+                title: Some("prior".into()),
+                metadata: Value::Null,
+            })
+            .await
+            .unwrap();
+        let memo = "deploy checklist: run migrations before flipping the flag";
+        memory
+            .write(NewMemoryChunk {
+                kind: ChunkKind::JobSummary,
+                source: ChunkSource::Embedded,
+                session_id: Some(prior.id.clone()),
+                project_root: None,
+                caller_id: AGENT_CALLER_ID.into(),
+                content: memo.into(),
+                metadata: json!({ "role": "assistant" }),
+                importance: Some(0.8),
+                shareable: false,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+
+        let provider = MockProvider::new(vec![text_response("ack")]);
+        let bus = ChatBus::new();
+        // Default memory_recall_k (> 0) ⇒ MemorySource is wired.
+        let agent = AgentRuntime::new(memory.clone(), provider, "mock-model", bus);
+        let chat_session = fresh_session(&memory).await;
+
+        let result = agent.run_turn(&chat_session, memo).await.unwrap();
+
+        let chunk = memory
+            .get(&result.assistant_message_id)
+            .await
+            .unwrap()
+            .expect("assistant chunk exists");
+        let by_source = chunk.metadata["brief_receipt"]["by_source"]
+            .as_object()
+            .expect("by_source map present");
+        let mem_kept = by_source
+            .get("memory")
+            .and_then(|v| v.get("kept"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        assert!(
+            mem_kept >= 1,
+            "MemorySource should recall the durable cross-session memory, got kept={mem_kept}"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_recall_zero_disables_memory_source() {
+        // with_memory_recall(0) drops MemorySource entirely: the receipt has no
+        // `memory` entry even when a matching durable memory exists.
+        let memory: Arc<dyn MemoryProvider> = Arc::new(BasicMemoryProvider::new());
+        let memo = "the archived runbook mentions the staging password rotation";
+        memory
+            .write(NewMemoryChunk {
+                kind: ChunkKind::JobSummary,
+                source: ChunkSource::Embedded,
+                session_id: None,
+                project_root: None,
+                caller_id: AGENT_CALLER_ID.into(),
+                content: memo.into(),
+                metadata: json!({ "role": "assistant" }),
+                importance: Some(0.8),
+                shareable: false,
+                pinned: false,
+            })
+            .await
+            .unwrap();
+
+        let provider = MockProvider::new(vec![text_response("ack")]);
+        let bus = ChatBus::new();
+        let agent =
+            AgentRuntime::new(memory.clone(), provider, "mock-model", bus).with_memory_recall(0);
+        let chat_session = fresh_session(&memory).await;
+
+        let result = agent.run_turn(&chat_session, memo).await.unwrap();
+
+        let chunk = memory
+            .get(&result.assistant_message_id)
+            .await
+            .unwrap()
+            .expect("assistant chunk exists");
+        let by_source = chunk.metadata["brief_receipt"]["by_source"]
+            .as_object()
+            .expect("by_source map present");
+        assert!(
+            !by_source.contains_key("memory"),
+            "MemorySource must be absent when memory_recall_k == 0, got {by_source:?}"
         );
     }
 }

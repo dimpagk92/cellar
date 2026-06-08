@@ -1,0 +1,18 @@
+[package]
+name = "cel-adapters"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Single modular registry for wiring CEL's default in-process adapters + the process-driver scan into a Cortex."
+
+[dependencies]
+# Depends on cel-cortex for `Cortex`, `register_adapter`, `discover_adapters`,
+# and `ProcessDriver`. The in-process adapter crates depend on cel-cortex too
+# (for the `AdapterDriver` trait), so this aggregator sits ABOVE both — it can
+# never live inside cel-cortex without creating a dependency cycle.
+cel-cortex = { workspace = true }
+cel-cdp = { workspace = true }
+adapter-browser = { workspace = true }
+adapter-notes = { workspace = true }
+adapter-numbers = { workspace = true }
+tracing = { workspace = true }

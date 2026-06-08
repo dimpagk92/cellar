@@ -25,17 +25,22 @@
 #![warn(rust_2018_idioms)]
 
 mod doctor;
+mod eval;
+mod guide;
+mod mcp;
+mod workflow;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use cellar_ipc::params::confirmation::ConfirmationDecisionWire;
-use cellar_ipc::params::events::EventsRecentParams;
+use cellar_ipc::params::events::{EventsPublishParams, EventsRecentParams};
 use cellar_ipc::params::fires::FiresRecentParams;
 use cellar_ipc::params::stream_filter::StreamFilter;
 use cellar_ipc::params::system::SystemHelloParams;
 use cellar_ipc::Client;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use serde_json::Value;
 
 pub(crate) const PROTOCOL_VERSION: &str = "1";
@@ -64,10 +69,70 @@ enum Command {
 
     /// Health check: socket exists, daemon responds to system.hello +
     /// daemon.status, advertised capabilities listed, etc.
-    Doctor,
+    ///
+    /// With `cellar doctor memory`, runs the memory-subsystem-specific
+    /// battery (DB exists + readable, embedding-model present, corpus
+    /// growth inside the configured cap, recent embedding latency p95
+    /// inside budget).
+    Doctor {
+        #[command(subcommand)]
+        cmd: Option<DoctorCmd>,
+    },
+
+    /// Offline benchmarks (memory recall today; more to come).
+    Eval {
+        #[command(subcommand)]
+        cmd: eval::EvalCmd,
+    },
 
     /// Print the daemon's `system.hello` capability set.
     Capabilities,
+
+    /// Print an embeddable agent guide for driving CEL — no daemon needed.
+    ///
+    ///   cellar learn > CEL_GUIDE.md
+    Learn,
+
+    /// List CEL's surfaces: CLI verbs, native gateway actions, and MCP tools.
+    /// No daemon needed (see `cellar capabilities` for daemon-advertised caps).
+    Tools,
+
+    /// Generate a shell-completion script (bash, zsh, fish, elvish,
+    /// powershell) for the `cellar` CLI. Prints to stdout — no daemon needed.
+    ///
+    ///   cellar completions zsh > ~/.zsh/completions/_cellar
+    Completions {
+        /// Target shell.
+        shell: Shell,
+    },
+
+    /// Run a workflow script — an ordered list of CEL actions in JSON. Each
+    /// step is dispatched through the governed gateway (same path as
+    /// `cellar act`), so every step is rule-checked and produces a receipt.
+    ///
+    ///   cellar run tidy.json            # execute (needs the daemon)
+    ///   cellar run tidy.json --dry-run  # validate + print the plan, offline
+    Run {
+        /// Path to a JSON workflow script: { "name": ..., "steps": [ ... ] }.
+        file: PathBuf,
+
+        /// Validate the script and print the execution plan without
+        /// connecting to the daemon or dispatching any action.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Continue past steps the gateway did not execute (vetoed / denied /
+        /// timed-out) instead of halting at the first one. Default is
+        /// stop-on-failure.
+        #[arg(long)]
+        keep_going: bool,
+
+        /// Retry a step up to N times on a *transient* failure — a transport
+        /// error or a confirmation timeout. Deterministic outcomes (executed /
+        /// vetoed / denied) are never retried. Default 0.
+        #[arg(long, default_value_t = 0)]
+        retries: u32,
+    },
 
     /// Rule management.
     Rules {
@@ -99,6 +164,270 @@ enum Command {
         cmd: ConfirmationCmd,
     },
 
+    /// Submit a proposed action to the daemon's cel_act gateway.
+    ///
+    /// Runs the rule matcher, applies allow / veto / require_confirmation
+    /// decisions, and prints the outcome. If a `require_confirmation` rule
+    /// fires, the call **blocks** until you resolve it in another terminal:
+    ///
+    ///   cellar confirmation list
+    ///   cellar confirmation resolve <id> allow
+    ///
+    /// Blocks for up to the rule's `timeout_s` (default 60 s).
+    Act {
+        /// The action type — e.g. `copy_file`, `fs.move`, `shell.run`.
+        action_type: String,
+
+        /// Action arguments as a JSON object. E.g. `'{"source_path":"~/Documents/x.pdf","target_path":"/Volumes/Ext/"}'`.
+        ///
+        /// Defaults to `{}` when omitted.
+        #[arg(long, short = 'a', default_value = "{}")]
+        args: String,
+
+        /// Caller label surfaced in rule conditions via `data.caller`.
+        /// Defaults to `"cli"`.
+        #[arg(long, default_value = "cli")]
+        caller: String,
+
+        /// Optional agent-session ID (links the action to a chat session).
+        #[arg(long)]
+        session_id: Option<String>,
+    },
+
+    /// Run a one-shot agent goal via the daemon's embedded agent (governed).
+    ///
+    /// Sends the goal to the daemon, which runs it to completion in a fresh
+    /// session and returns the agent's final response. Every action the agent
+    /// takes dispatches through the governed gateway. Blocks until the turn
+    /// finishes. Requires the daemon configured with an LLM
+    /// (`CELLAR_DEFAULT_PROVIDER` + `CELLAR_DEFAULT_MODEL`).
+    ///
+    ///   cellar agent "open Safari and search for the weather"
+    ///   cellar agent "tidy my downloads folder" --dry-run
+    Agent {
+        /// The natural-language goal.
+        goal: String,
+        /// Plan only — describe the steps without dispatching tools.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    // ── WS11: ergonomic human-automation verbs ──────────────────────────
+    // Each is sugar over `cellar act <type> -a <json>`: it builds the action
+    // args and submits them through the SAME governed gateway, so every verb
+    // is rule-checked and produces a receipt.
+    /// Click a UI element by its perception target id (governed).
+    ///
+    ///   cellar click el-42
+    Click {
+        /// Target element id (from a `cel_see` / perception snapshot).
+        target_id: String,
+        /// Caller label surfaced to rules via `data.caller`.
+        #[arg(long, default_value = "cli")]
+        caller: String,
+    },
+
+    /// Type text, optionally focusing a target element first (governed).
+    ///
+    ///   cellar type "hello world" --target el-7
+    Type {
+        /// The text to type.
+        text: String,
+        /// Optional target element id to focus before typing.
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, default_value = "cli")]
+        caller: String,
+    },
+
+    /// Activate / launch / quit an application by name (governed).
+    ///
+    /// Default activates (brings to front). `--launch` starts the app
+    /// (add `--background` to start it without stealing focus); `--quit`
+    /// asks it to quit gracefully (like ⌘Q).
+    ///
+    ///   cellar app Safari
+    ///   cellar app TextEdit --launch --background
+    ///   cellar app TextEdit --quit
+    App {
+        /// Application name, e.g. "Safari".
+        app_name: String,
+        /// Launch (start) the app instead of activating it.
+        #[arg(long)]
+        launch: bool,
+        /// Quit the app gracefully instead of activating it.
+        #[arg(long, conflicts_with = "launch")]
+        quit: bool,
+        /// With `--launch`, start the app without bringing it to the front.
+        #[arg(long)]
+        background: bool,
+        #[arg(long, default_value = "cli")]
+        caller: String,
+    },
+
+    /// Window management — `op` is a tiling preset (left_half, right_half,
+    /// maximize, …) or minimize / center / raise (governed).
+    ///
+    ///   cellar window left_half --app Safari
+    Window {
+        /// Window operation.
+        op: String,
+        /// Target app (defaults to the frontmost app).
+        #[arg(long)]
+        app: Option<String>,
+        /// Window index (0 = the app's frontmost window).
+        #[arg(long, default_value_t = 0)]
+        index: usize,
+        #[arg(long, default_value = "cli")]
+        caller: String,
+    },
+
+    /// Menu-bar extra (status item): list the extras or click one (governed).
+    ///
+    ///   cellar menu list
+    ///   cellar menu click --name Wi-Fi
+    Menu {
+        /// Operation: `list` or `click`.
+        op: String,
+        /// Status-item title to click (for `op = click`), case-insensitive.
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value = "cli")]
+        caller: String,
+    },
+
+    /// Read the current screen via Accessibility — a local AX snapshot (the
+    /// focused element + interactive elements with bounds). No daemon.
+    ///
+    /// This is the lightweight CLI `see`; the warm, fused Cortex perception
+    /// (diffs, stability, CDP page content) is the richer MCP `cel_see` surface.
+    ///
+    ///   cellar see
+    ///   cellar see --json
+    See,
+
+    /// Recognize text in an image via on-device OCR (macOS Vision framework).
+    ///
+    /// Local, no LLM, no network — millisecond latency, deterministic text +
+    /// pixel bounding boxes. The fast perception fallback for surfaces with no
+    /// Accessibility tree (`<canvas>`, games, image-only documents). Reads an
+    /// image file, or `--screen` to capture the main display first. Runs
+    /// locally — no daemon.
+    ///
+    ///   cellar ocr screenshot.png
+    ///   cellar ocr --screen --json
+    ///   cellar ocr doc.png --fast --min-confidence 0.5
+    Ocr {
+        /// Path to an image file (PNG/JPEG/…). Required unless `--screen`.
+        path: Option<String>,
+        /// Capture the main display and OCR that instead of reading a file.
+        #[arg(long)]
+        screen: bool,
+        /// Faster, lower-accuracy recognition pass (default is accurate).
+        #[arg(long)]
+        fast: bool,
+        /// Drop recognized lines below this confidence (0.0..=1.0).
+        #[arg(long, default_value_t = 0.0)]
+        min_confidence: f32,
+    },
+
+    /// Record a macro — capture a timed sequence of keyboard + mouse input.
+    ///
+    /// ⚠️ Records your real input for the duration. By default only keycodes
+    /// and pointer events are stored; pass `--capture-chars` to also record
+    /// typed text (do not use while typing passwords). Requires Input
+    /// Monitoring permission. Writes JSON to `--output` (or stdout). Runs
+    /// locally — no daemon.
+    ///
+    ///   cellar record --seconds 5 --output macro.json
+    Record {
+        /// Capture duration in seconds.
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        /// Write the recording JSON here (default: stdout).
+        #[arg(long)]
+        output: Option<String>,
+        /// Also record typed characters (privacy-sensitive; off by default).
+        #[arg(long)]
+        capture_chars: bool,
+    },
+
+    /// Replay a recorded macro through the input injector (governed/intrusive).
+    ///
+    /// ⚠️ Injects real keyboard + mouse events. Reads a recording produced by
+    /// `cellar record`. Runs locally — no daemon.
+    ///
+    ///   cellar replay macro.json --speed 2
+    Replay {
+        /// Path to a recording JSON file (from `cellar record`).
+        path: String,
+        /// Playback speed multiplier (1.0 = real time, 2.0 = twice as fast).
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+    },
+
+    /// Register a global hotkey that runs a command when pressed (macOS).
+    ///
+    /// Human-convenience surface: registers a system-wide shortcut; on each
+    /// press it spawns the given command with `$CELLAR_HOTKEY` set to the
+    /// combo. Blocks until interrupted. Runs locally — no daemon.
+    ///
+    ///   cellar hotkey cmd+shift+k -- cellar app Safari
+    ///   cellar hotkey cmd+ctrl+o -- cellar ocr --screen --json
+    Hotkey {
+        /// Key combo, e.g. "cmd+shift+k".
+        combo: String,
+        /// Command to run on each press (everything after `--`).
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Spaces / virtual desktops (macOS).
+    ///
+    /// ⚠️ Uses private SkyLight APIs — fragile across macOS releases. Degrades
+    /// gracefully ("unavailable") when unsupported. Runs locally (no daemon);
+    /// routing space changes through the governed gateway is a follow-up.
+    ///
+    ///   cellar space active
+    ///   cellar space list
+    Space {
+        #[command(subcommand)]
+        cmd: SpaceCmd,
+    },
+
+    /// Call *other* MCP servers (CEL as an MCP client — WS19).
+    ///
+    /// Registers servers and connects to them over stdio to list / call their
+    /// tools. The complement of the cellar MCP *server*. Runs locally.
+    ///
+    ///   cellar mcp add fs -- npx -y @modelcontextprotocol/server-filesystem /tmp
+    ///   cellar mcp inspect fs
+    ///   cellar mcp call fs read_file --args '{"path":"/tmp/x.txt"}'
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCmd,
+    },
+
+    /// Capture microphone audio and print the live transcript (WS17).
+    ///
+    /// ⚠️ Accesses the microphone + a Whisper transcription backend (set
+    /// `OPENAI_API_KEY` for the Whisper API). Runs locally — no daemon.
+    /// `--list-devices` is read-only (no capture).
+    ///
+    ///   cellar listen --list-devices
+    ///   cellar listen --seconds 10
+    Listen {
+        /// Capture duration in seconds.
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Audio source: mic | system | both.
+        #[arg(long, default_value = "mic")]
+        source: String,
+        /// List input devices and exit (no capture).
+        #[arg(long)]
+        list_devices: bool,
+    },
+
     /// Manage the daemon as a macOS LaunchAgent (install / uninstall / status).
     ///
     /// These subcommands call `launchctl` directly and work even when the
@@ -106,6 +435,85 @@ enum Command {
     Service {
         #[command(subcommand)]
         cmd: ServiceCmd,
+    },
+}
+
+/// MCP-client operations (WS19). All run locally (spawn + talk to a server).
+#[derive(Debug, Subcommand)]
+enum McpCmd {
+    /// Register an MCP server: `cellar mcp add <name> -- <command> [args...]`.
+    Add {
+        /// Local name for the server.
+        name: String,
+        /// The command + args to spawn it over stdio (everything after `--`).
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Remove a registered server.
+    Remove { name: String },
+    /// List registered servers.
+    List,
+    /// Connect to a server and list the tools it exposes.
+    Inspect { name: String },
+    /// Call a tool on a server.
+    Call {
+        /// Registered server name.
+        name: String,
+        /// Tool name (from `cellar mcp inspect`).
+        tool: String,
+        /// Tool arguments as a JSON object.
+        #[arg(long, default_value = "{}")]
+        args: String,
+    },
+}
+
+/// Spaces operations (WS3). All run locally via cel-spaces (private SkyLight).
+#[derive(Debug, Subcommand)]
+enum SpaceCmd {
+    /// Print the active space id on the main display.
+    Active,
+    /// List managed spaces across all displays.
+    List,
+    /// Switch a display (UUID from `space list`) to a space.
+    Switch {
+        /// Display UUID (the `display_uuid` field from `space list`).
+        display_uuid: String,
+        /// Target managed-space id.
+        space_id: u64,
+    },
+    /// Move a window (CoreGraphics window id) to a space.
+    MoveWindow {
+        /// CoreGraphics window id.
+        window_id: u32,
+        /// Target managed-space id.
+        space_id: u64,
+    },
+}
+
+/// Sub-batteries for `cellar doctor`. Today only `memory` is split out
+/// (the full system battery runs when no subcommand is given). Future
+/// work (`cellar doctor llm`, `cellar doctor adapters`) hangs off the
+/// same spine.
+#[derive(Debug, Subcommand)]
+enum DoctorCmd {
+    /// Memory subsystem health: DB exists + readable, embedding model
+    /// present, corpus growth within configured cap, embedding latency
+    /// p95 inside budget.
+    Memory {
+        /// Override the memory DB path. Default:
+        /// `$CELLAR_MEMORY_DB` if set, else `$HOME/.cellar/memory.sqlite`.
+        ///
+        /// Special value `:memory:` skips the file existence check and
+        /// asks the daemon for `memory.stats` instead (which the
+        /// in-memory provider serves the same way).
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Maximum corpus chunk count beyond which the doctor flags a
+        /// warning. Defaults to 500_000 per the memory plan's §14.3
+        /// sizing.
+        #[arg(long, default_value_t = 500_000)]
+        max_chunks: usize,
     },
 }
 
@@ -231,6 +639,24 @@ enum ActivityCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Inject a synthetic event into the daemon's event bus (for testing rules).
+    ///
+    /// The event is evaluated by the rule matcher immediately, just like any
+    /// natively-sourced event. Use this to verify that a `url_changed` rule
+    /// fires correctly without needing Chrome open.
+    Publish {
+        /// Event kind in snake_case (e.g. `url_changed`, `file_deleted`).
+        kind: String,
+        /// Event source in snake_case. Default: `cortex_cdp`.
+        #[arg(long, default_value = "cortex_cdp")]
+        source: String,
+        /// Data fields as `key=value` pairs (repeat for multiple fields).
+        ///
+        /// Values are interpreted as JSON when they start with `{`, `[`, or a
+        /// digit; otherwise treated as plain strings.
+        #[arg(long = "data", value_name = "KEY=VALUE")]
+        data: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -355,12 +781,114 @@ async fn main() -> Result<()> {
         return run_service(cmd, json).await;
     }
 
+    // `eval` runs purely against an on-disk corpus + a fresh in-memory
+    // provider — no daemon needed, no socket connection attempt.
+    if let Command::Eval { cmd } = cli.cmd {
+        let code = eval::run(cmd, json).await?;
+        std::process::exit(code);
+    }
+
+    // `completions` just prints a shell-completion script — no daemon needed.
+    if let Command::Completions { shell } = cli.cmd {
+        generate(shell, &mut Cli::command(), "cellar", &mut std::io::stdout());
+        return Ok(());
+    }
+
+    // `learn` / `tools` are static agent-ergonomics prints — no daemon needed.
+    if matches!(cli.cmd, Command::Learn) {
+        guide::learn();
+        return Ok(());
+    }
+    if matches!(cli.cmd, Command::Tools) {
+        return guide::tools(json);
+    }
+
+    // `run --dry-run` validates a workflow script and prints the plan offline —
+    // no daemon, no actions dispatched. (A live `run` connects, below.)
+    if let Command::Run {
+        file,
+        dry_run: true,
+        ..
+    } = &cli.cmd
+    {
+        let script = workflow::WorkflowScript::load(file)?;
+        print!("{}", script.plan_summary());
+        println!(
+            "\nvalidated {} step(s) — dry run (no actions dispatched).",
+            script.steps.len()
+        );
+        return Ok(());
+    }
+
+    // `see` is a local Accessibility snapshot — no daemon.
+    if matches!(cli.cmd, Command::See) {
+        return run_see(json);
+    }
+
+    // `ocr` runs locally via cel-ocr (on-device Vision) — no daemon.
+    if let Command::Ocr {
+        path,
+        screen,
+        fast,
+        min_confidence,
+    } = &cli.cmd
+    {
+        return run_ocr(path.clone(), *screen, *fast, *min_confidence, json);
+    }
+
+    // `record` / `replay` run locally via cel-input — no daemon.
+    if let Command::Record {
+        seconds,
+        output,
+        capture_chars,
+    } = &cli.cmd
+    {
+        return run_record(*seconds, output.clone(), *capture_chars, json);
+    }
+    if let Command::Replay { path, speed } = &cli.cmd {
+        return run_replay(path.clone(), *speed, json);
+    }
+    if let Command::Hotkey { combo, command } = &cli.cmd {
+        return run_hotkey(combo.clone(), command.clone());
+    }
+
+    // `space` runs locally via cel-spaces (private SkyLight) — no daemon.
+    if let Command::Space { cmd } = cli.cmd {
+        return run_space(cmd, json);
+    }
+
+    // `mcp` is an MCP *client* — it talks to other MCP servers, not the daemon.
+    if let Command::Mcp { cmd } = cli.cmd {
+        return run_mcp(cmd, json);
+    }
+
+    // `listen` captures audio locally (cel-audio) — no daemon.
+    if let Command::Listen {
+        seconds,
+        source,
+        list_devices,
+    } = cli.cmd
+    {
+        return run_listen(seconds, source, list_devices, json);
+    }
+
+    // `doctor memory` runs purely against the on-disk memory DB and the
+    // local Ollama model directory — no daemon needed. Other `doctor`
+    // sub-batteries still talk to the daemon and so go through `connect`.
+    if let Command::Doctor {
+        cmd: Some(DoctorCmd::Memory { db, max_chunks }),
+    } = &cli.cmd
+    {
+        let code = doctor::run_memory_doctor(db.clone(), *max_chunks, json).await?;
+        std::process::exit(code);
+    }
+
     let socket = cli.socket.clone().unwrap_or_else(default_socket_path);
     let client = connect(&socket).await?;
 
     match cli.cmd {
         Command::Status => run_status(&client, json).await,
-        Command::Doctor => {
+        Command::Doctor { cmd: None } => {
             // Doctor manages its own exit code: every check runs, then the
             // report drives the process exit (0 if all pass/warn, 1 if any
             // fail). Other commands fall through to the default `Result<()>`
@@ -368,14 +896,104 @@ async fn main() -> Result<()> {
             let code = run_doctor(&client, &socket, json).await?;
             std::process::exit(code);
         }
+        Command::Doctor { cmd: Some(_) } => {
+            unreachable!("doctor sub-batteries that don't need the daemon are handled above")
+        }
         Command::Capabilities => run_capabilities(&client, json).await,
         Command::Rules { cmd } => run_rules(&client, cmd, json).await,
         Command::Watchlists { cmd } => run_watchlists(&client, cmd, json).await,
         Command::Webhooks { cmd } => run_webhooks(&client, cmd, json).await,
         Command::Activity { cmd } => run_activity(&client, cmd, json).await,
         Command::Confirmation { cmd } => run_confirmation(&client, cmd, json).await,
+        Command::Act {
+            action_type,
+            args,
+            caller,
+            session_id,
+        } => run_act(&client, action_type, args, caller, session_id, json).await,
+        Command::Agent { goal, dry_run } => run_agent(&client, goal, dry_run, json).await,
+        Command::Click { target_id, caller } => {
+            dispatch_action(
+                &client,
+                "click".into(),
+                serde_json::json!({ "target_id": target_id }),
+                caller,
+                None,
+                json,
+            )
+            .await
+        }
+        Command::Type {
+            text,
+            target,
+            caller,
+        } => {
+            let mut args = serde_json::json!({ "text": text });
+            if let Some(t) = target {
+                args["target_id"] = Value::String(t);
+            }
+            dispatch_action(&client, "type".into(), args, caller, None, json).await
+        }
+        Command::App {
+            app_name,
+            launch,
+            quit,
+            background,
+            caller,
+        } => {
+            let (action_type, args) = if quit {
+                ("quit_app", serde_json::json!({ "app_name": app_name }))
+            } else if launch {
+                (
+                    "launch_app",
+                    serde_json::json!({ "app_name": app_name, "background": background }),
+                )
+            } else {
+                ("activate_app", serde_json::json!({ "app_name": app_name }))
+            };
+            dispatch_action(&client, action_type.into(), args, caller, None, json).await
+        }
+        Command::Window {
+            op,
+            app,
+            index,
+            caller,
+        } => {
+            let mut args = serde_json::json!({ "op": op, "window_index": index });
+            if let Some(a) = app {
+                args["app"] = Value::String(a);
+            }
+            dispatch_action(&client, "window".into(), args, caller, None, json).await
+        }
+        Command::Menu { op, name, caller } => {
+            let mut args = serde_json::json!({ "op": op });
+            if let Some(n) = name {
+                args["name"] = Value::String(n);
+            }
+            dispatch_action(&client, "menu_extra".into(), args, caller, None, json).await
+        }
         // Already handled above — the compiler requires exhaustiveness.
         Command::Service { .. } => unreachable!(),
+        Command::See => unreachable!("see is handled above"),
+        Command::Ocr { .. } => unreachable!("ocr is handled above"),
+        Command::Record { .. } => unreachable!("record is handled above"),
+        Command::Replay { .. } => unreachable!("replay is handled above"),
+        Command::Hotkey { .. } => unreachable!("hotkey is handled above"),
+        Command::Space { .. } => unreachable!("space is handled above"),
+        Command::Mcp { .. } => unreachable!("mcp is handled above"),
+        Command::Listen { .. } => unreachable!("listen is handled above"),
+        Command::Eval { .. } => unreachable!("eval is handled above"),
+        Command::Completions { .. } => unreachable!("completions is handled above"),
+        Command::Learn => unreachable!("learn is handled above"),
+        Command::Tools => unreachable!("tools is handled above"),
+        // `run --dry-run` is handled above (offline); a live `run` dispatches
+        // each step through the gateway here.
+        Command::Run {
+            file,
+            keep_going,
+            retries,
+            ..
+        } => run_workflow(&client, &file, keep_going, retries, json).await,
     }
 }
 
@@ -877,6 +1495,32 @@ async fn run_activity(client: &Client, cmd: ActivityCmd, json: bool) -> Result<(
             }
             Ok(())
         }
+        ActivityCmd::Publish { kind, source, data } => {
+            let mut data_map = serde_json::Map::new();
+            for pair in &data {
+                let (k, v) = pair
+                    .split_once('=')
+                    .with_context(|| format!("--data must be KEY=VALUE, got: {pair:?}"))?;
+                // Attempt to parse as JSON; fall back to a plain string.
+                let val: Value =
+                    serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.into()));
+                data_map.insert(k.to_string(), val);
+            }
+            let params = EventsPublishParams {
+                kind: kind.clone(),
+                source: Some(source.clone()),
+                data: data_map,
+            };
+            let _: cellar_ipc::results::OkResult = client
+                .call("events.publish", params)
+                .await
+                .map_err(|e| anyhow!("events.publish: {e}"))?;
+            if json {
+                return emit_json(&serde_json::json!({"ok": true, "kind": kind, "source": source}));
+            }
+            println!("published: {kind}  (source: {source})");
+            Ok(())
+        }
     }
 }
 
@@ -932,6 +1576,612 @@ async fn run_confirmation(client: &Client, cmd: ConfirmationCmd, json: bool) -> 
             Ok(())
         }
     }
+}
+
+// ───── act (gateway.intercept) ─────
+
+/// Submit a single action to the daemon's governed gateway and print the
+/// outcome. Shared by `cellar act` (raw action_type + JSON args) and the WS11
+/// ergonomic verbs (click / type / app / window / menu), which build the args.
+async fn dispatch_action(
+    client: &Client,
+    action_type: String,
+    action_args: serde_json::Value,
+    caller: String,
+    session_id: Option<String>,
+    json: bool,
+) -> Result<()> {
+    eprintln!("⏳  Submitting `{action_type}` to gateway (blocks until resolved or timed out)…");
+
+    let r: cellar_ipc::results::gateway::GatewayInterceptResult = client
+        .call(
+            "gateway.intercept",
+            cellar_ipc::params::gateway::GatewayInterceptParams {
+                caller,
+                action_type,
+                action_args,
+                agent_session_id: session_id,
+                project_root: None,
+            },
+        )
+        .await
+        .map_err(|e| anyhow!("gateway.intercept: {e}"))?;
+
+    if json {
+        return emit_json(&r);
+    }
+
+    println!("{}", r.outcome.summary());
+    Ok(())
+}
+
+async fn run_act(
+    client: &Client,
+    action_type: String,
+    args: String,
+    caller: String,
+    session_id: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let action_args: serde_json::Value =
+        serde_json::from_str(&args).with_context(|| format!("--args is not valid JSON: {args}"))?;
+    dispatch_action(client, action_type, action_args, caller, session_id, json).await
+}
+
+/// Run a one-shot agent goal via the daemon's embedded agent (`agent.run`).
+/// Blocks until the turn completes, then prints the agent's response.
+async fn run_agent(client: &Client, goal: String, dry_run: bool, json: bool) -> Result<()> {
+    eprintln!(
+        "🤖  running agent goal{} (blocks until the turn completes)…",
+        if dry_run { " [dry run]" } else { "" }
+    );
+    let r: cellar_ipc::results::agent::AgentRunResult = client
+        .call(
+            "agent.run",
+            cellar_ipc::params::agent::AgentRunParams { goal, dry_run },
+        )
+        .await
+        .map_err(|e| anyhow!("agent.run: {e}"))?;
+
+    if json {
+        return emit_json(&r);
+    }
+    println!("{}", r.response);
+    eprintln!(
+        "\n[session {} · {} tool call(s) dispatched]",
+        r.session_id, r.tool_calls
+    );
+    Ok(())
+}
+
+/// Run a workflow script (WS10): dispatch each step through the governed
+/// gateway (`gateway.intercept` — the same path as `cellar act`), printing a
+/// per-step receipt. By default the run **stops at the first step the gateway
+/// did not execute** (vetoed / denied / timed-out) and exits non-zero, so
+/// automation sees an incomplete workflow; `--keep-going` continues past
+/// blocked steps (exiting 0, with the blocked count reported). Transient
+/// failures (transport errors, confirmation timeouts) are retried up to
+/// `--retries` times before that logic applies; branching remains a follow-up.
+async fn run_workflow(
+    client: &Client,
+    file: &Path,
+    keep_going: bool,
+    retries: u32,
+    json: bool,
+) -> Result<()> {
+    let script = workflow::WorkflowScript::load(file)?;
+    eprintln!(
+        "▶  running workflow `{}` ({} steps) via the gateway…",
+        script.name,
+        script.steps.len()
+    );
+
+    let mut receipts: Vec<Value> = Vec::with_capacity(script.steps.len());
+    let mut halted_at: Option<usize> = None;
+    let mut blocked = 0usize;
+    // Branch state: the executed status of the previous step that actually ran
+    // (skipped steps don't change it).
+    let mut prev_executed: Option<bool> = None;
+    for (i, step) in script.steps.iter().enumerate() {
+        let n = i + 1;
+        let label = step.label.clone().unwrap_or_else(|| step.action.clone());
+
+        // WS10 branching: skip steps whose `when` condition isn't met by the
+        // previous run step's outcome. A skip is not a failure.
+        if !step.when.should_run(prev_executed) {
+            if !json {
+                println!("  {n:>2}. {label} → ⤳ skipped (when={:?})", step.when);
+            }
+            continue;
+        }
+
+        // Dispatch with retry on TRANSIENT failures — a transport error or a
+        // confirmation timeout. Deterministic outcomes (executed / vetoed /
+        // denied) are never retried: re-issuing won't change them. Retries are
+        // immediate and bounded by --retries.
+        let mut attempt = 0u32;
+        let outcome = loop {
+            attempt += 1;
+            let res: Result<cellar_ipc::results::gateway::GatewayInterceptResult, _> = client
+                .call(
+                    "gateway.intercept",
+                    cellar_ipc::params::gateway::GatewayInterceptParams {
+                        caller: step.caller.clone().unwrap_or_else(|| "cli.run".to_string()),
+                        action_type: step.action.clone(),
+                        action_args: step.params.clone(),
+                        agent_session_id: None,
+                        project_root: None,
+                    },
+                )
+                .await;
+            match res {
+                Ok(r) => {
+                    let transient = matches!(
+                        r.outcome,
+                        cellar_ipc::results::gateway::GatewayOutcomeWire::ConfirmationTimedOut { .. }
+                    );
+                    if transient && attempt <= retries {
+                        eprintln!("  step {n} timed out — retry {attempt}/{retries}…");
+                        continue;
+                    }
+                    break r.outcome;
+                }
+                Err(e) => {
+                    if attempt <= retries {
+                        eprintln!("  step {n} transport error ({e}) — retry {attempt}/{retries}…");
+                        continue;
+                    }
+                    return Err(anyhow!(
+                        "step {n} `{}` (gateway.intercept): {e}",
+                        step.action
+                    ));
+                }
+            }
+        };
+
+        let executed = outcome.executed();
+        prev_executed = Some(executed);
+        let summary = outcome.summary();
+        if !json {
+            println!("  {n:>2}. {label} → {summary}");
+        }
+        receipts.push(serde_json::json!({
+            "step": n,
+            "label": label,
+            "action": step.action,
+            "executed": executed,
+            "outcome": summary,
+        }));
+
+        if !executed {
+            blocked += 1;
+            if !keep_going {
+                halted_at = Some(n);
+                break;
+            }
+        }
+    }
+
+    if json {
+        emit_json(&receipts)?;
+    }
+
+    if let Some(n) = halted_at {
+        // A governance outcome stopped the run before the end. Non-zero exit so
+        // scripts/automation can tell the workflow did not complete.
+        bail!(
+            "workflow `{}` halted at step {} of {} — the gateway did not execute it \
+             (see the receipt above). Re-run with --keep-going to continue past \
+             blocked steps.",
+            script.name,
+            n,
+            script.steps.len()
+        );
+    }
+
+    if !json {
+        if blocked > 0 {
+            eprintln!(
+                "✓  workflow `{}` finished all {} steps — {} blocked by the gateway (--keep-going).",
+                script.name,
+                script.steps.len(),
+                blocked
+            );
+        } else {
+            eprintln!(
+                "✓  workflow `{}` complete ({} steps).",
+                script.name,
+                script.steps.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+// ───── see (local AX snapshot) ─────
+
+/// Read the current screen via Accessibility and print a snapshot — the focused
+/// element + the interactive elements with bounds. Local (no daemon).
+fn run_see(json: bool) -> Result<()> {
+    let tree = cel_accessibility::create_tree();
+    let focused = tree.focused_element().ok().flatten();
+    let elements = tree.find_elements(None, None).unwrap_or_default();
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "focused": focused,
+            "elements": elements,
+        }));
+    }
+
+    match &focused {
+        Some(f) => println!(
+            "focused: {:?} {}",
+            f.role,
+            f.label.as_deref().or(f.value.as_deref()).unwrap_or("")
+        ),
+        None => println!("focused: (none)"),
+    }
+
+    println!("\nelements ({}):", elements.len());
+    for e in elements.iter().take(60) {
+        let label: String = e
+            .label
+            .as_deref()
+            .or(e.value.as_deref())
+            .unwrap_or("")
+            .chars()
+            .take(36)
+            .collect();
+        let bounds = e
+            .bounds
+            .as_ref()
+            .map(|b| format!("[{},{} {}x{}]", b.x, b.y, b.width, b.height))
+            .unwrap_or_default();
+        println!(
+            "  {:<6} {:<20} {:<38} {}",
+            e.id,
+            format!("{:?}", e.role),
+            label,
+            bounds
+        );
+    }
+    if elements.len() > 60 {
+        println!("  … {} more", elements.len() - 60);
+    }
+    Ok(())
+}
+
+// ───── ocr (on-device Vision framework) ─────
+
+/// Run the `ocr` command locally via cel-ocr. Sources image bytes from a file
+/// or a live screen capture (`--screen`), then recognizes text on-device.
+fn run_ocr(
+    path: Option<String>,
+    screen: bool,
+    fast: bool,
+    min_confidence: f32,
+    json: bool,
+) -> Result<()> {
+    if !cel_ocr::ocr_available() {
+        bail!("OCR is unavailable on this platform (Vision is macOS-only)");
+    }
+
+    // Source the image bytes: a live screen capture, or a file on disk.
+    let (image_bytes, source) = if screen {
+        use cel_display::{encode_png, ScreenCapture, XcapCapture};
+        let mut cap = XcapCapture::new();
+        let frame = cap
+            .capture_frame()
+            .map_err(|e| anyhow!("screen capture failed: {e}"))?;
+        let png = encode_png(&frame).map_err(|e| anyhow!("PNG encode failed: {e}"))?;
+        (png, "screen".to_string())
+    } else {
+        let path = path.ok_or_else(|| anyhow!("provide an image path, or pass --screen"))?;
+        let bytes = std::fs::read(&path).map_err(|e| anyhow!("read {path}: {e}"))?;
+        (bytes, path)
+    };
+
+    let opts = cel_ocr::OcrOptions {
+        level: if fast {
+            cel_ocr::RecognitionLevel::Fast
+        } else {
+            cel_ocr::RecognitionLevel::Accurate
+        },
+        min_confidence,
+        ..Default::default()
+    };
+    let lines = cel_ocr::recognize_text_with(&image_bytes, &opts)
+        .map_err(|e| anyhow!("OCR failed: {e}"))?;
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "source": source,
+            "count": lines.len(),
+            "lines": lines,
+        }));
+    }
+
+    println!("ocr: {} ({} line(s))", source, lines.len());
+    for l in &lines {
+        let b = &l.bounds;
+        println!(
+            "  {:>3}% [{:>4.0},{:>4.0} {:>4.0}x{:>3.0}]  {}",
+            (l.confidence * 100.0).round() as i32,
+            b.x,
+            b.y,
+            b.width,
+            b.height,
+            l.text
+        );
+    }
+    Ok(())
+}
+
+// ───── record / replay (macro, cel-input) ─────
+
+/// Record a macro locally via cel-input. Captures real input for `seconds`,
+/// then writes the recording JSON to `output` (or stdout).
+fn run_record(seconds: u64, output: Option<String>, capture_chars: bool, json: bool) -> Result<()> {
+    if capture_chars {
+        eprintln!("⚠️  --capture-chars is ON — typed text WILL be recorded. Avoid passwords.");
+    }
+    eprintln!("● recording for {seconds}s (Input Monitoring permission required)…");
+
+    let mut capture = cel_input::create_input_capture(capture_chars);
+    let recording = cel_input::record(
+        capture.as_mut(),
+        std::time::Duration::from_secs(seconds),
+        capture_chars,
+    )
+    .map_err(|e| anyhow!("record failed: {e}"))?;
+
+    let body = recording
+        .to_json()
+        .map_err(|e| anyhow!("serialize recording: {e}"))?;
+
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &body).map_err(|e| anyhow!("write {path}: {e}"))?;
+            if json {
+                return emit_json(&serde_json::json!({
+                    "ok": true,
+                    "path": path,
+                    "events": recording.events.len(),
+                    "duration_ms": recording.duration_ms,
+                }));
+            }
+            println!(
+                "saved {} event(s) over {}ms → {path}",
+                recording.events.len(),
+                recording.duration_ms
+            );
+        }
+        None => {
+            // Recording JSON to stdout; keep the human note on stderr.
+            eprintln!(
+                "captured {} event(s) over {}ms",
+                recording.events.len(),
+                recording.duration_ms
+            );
+            println!("{body}");
+        }
+    }
+    Ok(())
+}
+
+/// Replay a recorded macro locally via cel-input. Injects real input.
+fn run_replay(path: String, speed: f64, json: bool) -> Result<()> {
+    let body = std::fs::read_to_string(&path).map_err(|e| anyhow!("read {path}: {e}"))?;
+    let recording =
+        cel_input::Recording::from_json(&body).map_err(|e| anyhow!("parse {path}: {e}"))?;
+
+    eprintln!(
+        "▶ replaying {} event(s) at {speed}× (injects real input)…",
+        recording.events.len()
+    );
+    let mut controller = cel_input::create_controller().map_err(|e| anyhow!("injector: {e}"))?;
+    let stats = cel_input::replay(&recording, controller.as_mut(), speed)
+        .map_err(|e| anyhow!("replay failed: {e}"))?;
+
+    if json {
+        return emit_json(&serde_json::json!({
+            "ok": true,
+            "injected": stats.injected,
+            "skipped_keys": stats.skipped_keys,
+        }));
+    }
+    println!(
+        "replayed: {} injected, {} skipped",
+        stats.injected, stats.skipped_keys
+    );
+    Ok(())
+}
+
+// ───── hotkey (global shortcuts, cel-hotkey) ─────
+
+/// Register a global hotkey and run a command on each press. Blocks until
+/// interrupted. Each press spawns the command with `$CELLAR_HOTKEY` = combo.
+///
+/// The whole lifecycle runs on a dedicated **OS thread**, not the async
+/// runtime's worker: macOS delivers global-hotkey events on the run loop of the
+/// thread that registered them, so the manager must be created and the loop
+/// pumped on the *same* thread — and a `std::thread` keeps that thread stable
+/// for the process lifetime (immune to tokio scheduling) instead of pinning a
+/// worker in an infinite loop.
+fn run_hotkey(combo: String, command: Vec<String>) -> Result<()> {
+    let handle = std::thread::spawn(move || -> Result<()> {
+        let mut reg = cel_hotkey::HotkeyRegistry::new().map_err(|e| anyhow!("hotkey init: {e}"))?;
+        reg.register(&combo)
+            .map_err(|e| anyhow!("register {combo}: {e}"))?;
+        eprintln!(
+            "⌨  registered {combo}; press to run `{}` ($CELLAR_HOTKEY set). Ctrl-C to stop.",
+            command.join(" ")
+        );
+        // run() never returns; this thread blocks for the process lifetime.
+        reg.run(|_id, fired| {
+            eprintln!("▶ {fired}");
+            if let Err(e) = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .env("CELLAR_HOTKEY", fired)
+                .spawn()
+            {
+                eprintln!("  failed to spawn `{}`: {e}", command[0]);
+            }
+        });
+        Ok(())
+    });
+    // Block here for the process lifetime. A setup error (bad combo / manager
+    // init) returns from the thread early and is propagated; `run()` itself
+    // never returns, so on success this join never completes.
+    handle
+        .join()
+        .map_err(|_| anyhow!("hotkey thread panicked"))?
+}
+
+// ───── space (WS3, private SkyLight) ─────
+
+/// Run a `space` subcommand locally via cel-spaces. Degrades gracefully when
+/// Spaces support is unavailable (unsupported macOS / not compiled in).
+fn run_space(cmd: SpaceCmd, json: bool) -> Result<()> {
+    if !cel_spaces::spaces_available() {
+        bail!(
+            "Spaces unavailable on this system — the private SkyLight APIs are not \
+             accessible (expected on unsupported macOS versions)."
+        );
+    }
+    match cmd {
+        SpaceCmd::Active => {
+            let id = cel_spaces::active_space().map_err(|e| anyhow!("space active: {e}"))?;
+            if json {
+                emit_json(&serde_json::json!({ "active_space": id }))
+            } else {
+                println!("active space: {id}");
+                Ok(())
+            }
+        }
+        SpaceCmd::List => {
+            let spaces = cel_spaces::list_spaces().map_err(|e| anyhow!("space list: {e}"))?;
+            if json {
+                return emit_json(&spaces);
+            }
+            if spaces.is_empty() {
+                println!("(no spaces enumerated)");
+            }
+            for s in &spaces {
+                let marker = if s.is_current { "*" } else { " " };
+                println!(
+                    "{marker} space {:<6} display {}",
+                    s.space_id, s.display_uuid
+                );
+            }
+            Ok(())
+        }
+        SpaceCmd::Switch {
+            display_uuid,
+            space_id,
+        } => {
+            cel_spaces::switch_to_space(&display_uuid, space_id)
+                .map_err(|e| anyhow!("space switch: {e}"))?;
+            println!("switched display {display_uuid} to space {space_id}");
+            Ok(())
+        }
+        SpaceCmd::MoveWindow {
+            window_id,
+            space_id,
+        } => {
+            cel_spaces::move_window_to_space(window_id, space_id)
+                .map_err(|e| anyhow!("space move-window: {e}"))?;
+            println!("moved window {window_id} to space {space_id}");
+            Ok(())
+        }
+    }
+}
+
+// ───── mcp client (WS19) ─────
+
+/// Run an `mcp` subcommand: register / list / inspect / call other MCP servers.
+fn run_mcp(cmd: McpCmd, json: bool) -> Result<()> {
+    match cmd {
+        McpCmd::Add { name, command } => {
+            let (c, args) = command
+                .split_first()
+                .ok_or_else(|| anyhow!("missing command after `--`"))?;
+            mcp::add(name, c.clone(), args.to_vec())
+        }
+        McpCmd::Remove { name } => mcp::remove(name),
+        McpCmd::List => mcp::list(json),
+        McpCmd::Inspect { name } => mcp::inspect(name, json),
+        McpCmd::Call { name, tool, args } => mcp::call(name, tool, args, json),
+    }
+}
+
+// ───── listen (WS17, audio input) ─────
+
+/// Run `listen`: list input devices, or capture audio for `seconds` and print
+/// the transcript. Local (cel-audio); degrades gracefully when capture or the
+/// transcription backend is unavailable.
+fn run_listen(seconds: u64, source: String, list_devices: bool, json: bool) -> Result<()> {
+    if list_devices {
+        let devices = cel_audio::list_input_devices();
+        if json {
+            let arr: Vec<_> = devices
+                .iter()
+                .map(
+                    |(name, is_default)| serde_json::json!({ "name": name, "default": is_default }),
+                )
+                .collect();
+            return emit_json(&arr);
+        }
+        if devices.is_empty() {
+            println!("(no input devices found)");
+        }
+        for (name, is_default) in &devices {
+            println!("{} {name}", if *is_default { "*" } else { " " });
+        }
+        return Ok(());
+    }
+
+    let src = match source.to_lowercase().as_str() {
+        "mic" | "microphone" => cel_audio::AudioSource::Microphone,
+        "system" | "output" => cel_audio::AudioSource::SystemOutput,
+        "both" => cel_audio::AudioSource::Both,
+        other => bail!("unknown --source `{other}` (use mic | system | both)"),
+    };
+
+    let mut capture = cel_audio::create_audio_capture();
+    let config = cel_audio::AudioConfig {
+        source: src,
+        transcribe: true,
+        ..Default::default()
+    };
+    capture
+        .start(config)
+        .map_err(|e| anyhow!("audio start: {e}"))?;
+    eprintln!("🎙  listening {seconds}s (transcribing — Ctrl-C to stop early)…");
+
+    let mut transcripts: Vec<cel_audio::TranscriptChunk> = Vec::new();
+    let start = std::time::Instant::now();
+    while start.elapsed().as_secs() < seconds {
+        transcripts.extend(capture.drain_transcripts());
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    transcripts.extend(capture.drain_transcripts());
+    let _ = capture.stop();
+
+    if json {
+        return emit_json(&transcripts);
+    }
+    if transcripts.is_empty() {
+        println!(
+            "(no transcript — the mic or the Whisper transcription backend may be \
+             unavailable; set OPENAI_API_KEY for the Whisper API)"
+        );
+    }
+    for t in &transcripts {
+        println!("{}", t.text);
+    }
+    Ok(())
 }
 
 // ───── service (launchd) ─────

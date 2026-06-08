@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # oss-squat-crates.sh
 #
-# Workstream A from plans/cellar-oss-extraction-prep.md §A.
-#
 # "Squat" the OSS-extraction-candidate crate names on crates.io with a
 # placeholder publish so we don't lose the name before the real extraction
-# (months out — see §6 for trigger conditions). Without a squat publish,
-# any other crate author can take `cel-memory` / `cel-memory-sqlite` /
-# `cel-brief` and we'd be stuck renaming our public surface forever.
+# or first real release. Without a squat publish, any other crate author can
+# take `cel-memory` / `cel-memory-sqlite` / `cel-brief` and we'd be stuck
+# renaming our public surface forever.
 #
 # This script is INTENTIONALLY dry-run by default. Running it as-is hits the
 # crates.io API without actually publishing — it validates that the package
@@ -32,13 +30,11 @@
 #       │
 #       └── cel-brief         (optional path dep on cel-memory via `memory` feature)
 #
-# Both `cel-memory-sqlite` and `cel-brief` reference `cel-memory` via
-# `path = "../cel-memory"` today. For a real publish you must first either
-#   (a) publish `cel-memory` so the others can switch to `cel-memory = "0.0.0"`, or
-#   (b) use the `cargo publish` "package the workspace member with its path deps"
-#       flow — which for `0.0.0` placeholders requires a version field on the
-#       dependency. Easiest: publish cel-memory first, then update the path
-#       deps to also specify `version = "0.0.0"` before publishing the other two.
+# Both `cel-memory-sqlite` and `cel-brief` reference `cel-memory` via path +
+# version dependencies. Order still matters: publish `cel-memory` first, wait
+# for crates.io to index it, then publish the two consumers. If publishing
+# placeholder `0.0.0` crates, make the workspace package version and both
+# consumer dependency versions agree before running the real publish lines.
 #
 # Usage:
 #   ./scripts/oss-squat-crates.sh           # dry run — safe, no upload

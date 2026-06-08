@@ -8,12 +8,6 @@ use crate::rt_handle;
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
 
-fn dirs_or_home() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
-}
-
 fn default_audio_capture() -> Option<(Box<dyn cel_audio::AudioCapture>, cel_audio::AudioConfig)> {
     if std::env::var("CEL_DISABLE_AUDIO")
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
@@ -149,45 +143,20 @@ pub fn boot_cortex() -> napi::Result<()> {
     // automatically when a CDP target is bound; this is the fallback for
     // desktop apps.
     let mut cortex = cel_cortex::Cortex::new("mcp-default".into()).with_native_input_unsafe();
-    #[cfg(target_os = "macos")]
-    cortex.register_adapter(Box::new(adapter_numbers::NumbersAdapter::new()));
-    #[cfg(target_os = "macos")]
-    cortex.register_adapter(Box::new(adapter_notes::NotesAdapter::new()));
-    // Mail / Calendar / Reminders / Messages are NOT registered in-process
-    // here. They ship as ProcessDriver adapters: each has an `adapter.json`
-    // under `adapters/<name>/` (runtime: process) and a small binary built
-    // by `cargo build --release -p adapter-<name>`. The
-    // `cel_cortex::discover_adapters` loop below picks them up automatically
-    // — to add a new productivity adapter, drop a folder under `adapters/`
-    // or `~/.cellar/adapters/`, no edits to this file.
-    // Register the native browser adapter so MCP clients automatically get
-    // DOM perception when a CDP target is reachable. Registered without a
-    // CDP client up front — `BrowserAdapter::probe()` returns false until
-    // one is bound, so the cortex tick loop simply leaves the adapter
-    // inactive in non-browser sessions. When the user's MCP host opens a
-    // browser and `cel_cdp::connect_to_focused_app()` succeeds, the
-    // adapter activates without any extra wiring.
-    cortex.register_adapter(Box::new(adapter_browser::BrowserAdapter::new()));
     if let Some((capture, config)) = default_audio_capture() {
         cortex = cortex.with_audio(capture, config);
         stream_status.audio_capture = true;
     }
 
-    // Discover and register adapters from known locations
-    let adapter_dirs = [
-        // Project-local adapters
-        std::path::PathBuf::from("adapters"),
-        // User-installed adapters
-        dirs_or_home().join(".cellar").join("adapters"),
-    ];
-    for dir in &adapter_dirs {
-        for (adapter_path, manifest) in cel_cortex::discover_adapters(dir) {
-            if manifest.runtime == "process" {
-                let driver = cel_cortex::ProcessDriver::new(manifest, adapter_path);
-                cortex.register_adapter(Box::new(driver));
-            }
-        }
-    }
+    // Wire the default adapter set through the single shared registry:
+    // in-process Numbers / Notes (macOS) + the native Browser adapter, plus
+    // the process-driver discover scan for Mail / Calendar / Reminders /
+    // Messages and any user-installed adapter under `adapters/` or
+    // `~/.cellar/adapters/`. `None` = ambient CDP discovery: the browser
+    // adapter self-activates when `cel_cdp::connect_to_focused_app()` finds a
+    // target. Adding a new in-process adapter is a one-line change in
+    // `cel-adapters`, inherited by every host — no edits here.
+    cel_adapters::register_default_adapters(&mut cortex, None);
 
     handle
         .block_on(async { cortex.boot(merger, observer).await })
@@ -252,6 +221,26 @@ pub fn notify_cortex_action(action: String) -> napi::Result<()> {
         .ok_or_else(|| napi::Error::from_reason("Cortex not running"))?;
 
     handle.block_on(cortex.notify_action(&action));
+    Ok(())
+}
+
+/// Set the native-input focus policy on the singleton cortex (WS1). When
+/// `background` is true, Click/Type/Key/KeyCombo post directly to the target
+/// app's PID without stealing focus (falling back to foreground per-action
+/// when no PID resolves); false restores the activate-then-dispatch default.
+/// The MCP `cel_act` `focus_mode` param flips this per call.
+#[napi]
+pub fn set_cortex_focus_mode(background: bool) -> napi::Result<()> {
+    let state = get_state()
+        .lock()
+        .map_err(|e| napi::Error::from_reason(format!("State lock poisoned: {}", e)))?;
+
+    let cortex = state
+        .cortex
+        .as_ref()
+        .ok_or_else(|| napi::Error::from_reason("Cortex not running"))?;
+
+    cortex.set_background_input(background);
     Ok(())
 }
 

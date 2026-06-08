@@ -4,6 +4,9 @@ members = [
     "cel/cel-display",
     "cel/cel-input",
     "cel/cel-accessibility",
+    "cel/cel-spaces",
+    "cel/cel-ocr",
+    "cel/cel-hotkey",
     "cel/cel-audio",
     "cel/cel-llm",
     "cel/cel-vision",
@@ -15,10 +18,13 @@ members = [
     "cel/cel-cdp",
     "cel/cel-signals",
     "cel/cel-cortex",
+    "cel/cel-adapter-sdk",
+    "cel/cel-adapters",
     "cel/cel-goal-runner",
     "cel/cel-memory",
     "cel/cel-memory-sqlite",
     "cel/cel-brief",
+    "cel/cel-summarizer",
     "cel/cel-napi",
     "cellar-worker",
     "cellar-types",
@@ -27,9 +33,11 @@ members = [
     "cellar-rule-compiler",
     "cellar-rules-store",
     "cellar-cli",
+    "cellar-stress",
     "cel-cortex-daemon",
     "cel-act-gateway",
     "cellar-ipc",
+    "cellar-ipc-macros",
     "adapters/adapter-common",
     "adapters/browser-rs",
     "adapters/calendar",
@@ -68,6 +76,9 @@ cel-llm = { path = "cel/cel-llm" }
 cel-display = { path = "cel/cel-display" }
 cel-input = { path = "cel/cel-input" }
 cel-accessibility = { path = "cel/cel-accessibility" }
+cel-spaces = { path = "cel/cel-spaces" }
+cel-ocr = { path = "cel/cel-ocr" }
+cel-hotkey = { path = "cel/cel-hotkey" }
 cel-audio = { path = "cel/cel-audio" }
 cel-vision = { path = "cel/cel-vision" }
 cel-network = { path = "cel/cel-network" }
@@ -76,10 +87,13 @@ cel-contracts = { path = "cel/cel-contracts" }
 cel-store = { path = "cel/cel-store" }
 cel-planner = { path = "cel/cel-planner" }
 cel-cortex = { path = "cel/cel-cortex" }
+cel-adapter-sdk = { path = "cel/cel-adapter-sdk" }
+cel-adapters = { path = "cel/cel-adapters" }
 cel-goal-runner = { path = "cel/cel-goal-runner" }
 cel-cdp = { path = "cel/cel-cdp" }
 cel-memory = { path = "cel/cel-memory" }
 cel-memory-sqlite = { path = "cel/cel-memory-sqlite" }
+cel-summarizer = { path = "cel/cel-summarizer" }
 cel-signals = { path = "cel/cel-signals" }
 
 # Cellar app crates (v1)
@@ -91,6 +105,7 @@ cellar-rules-store = { path = "cellar-rules-store" }
 cel-cortex-daemon = { path = "cel-cortex-daemon" }
 cel-act-gateway = { path = "cel-act-gateway" }
 cellar-ipc = { path = "cellar-ipc" }
+cellar-ipc-macros = { path = "cellar-ipc-macros" }
 adapter-common = { path = "adapters/adapter-common" }
 adapter-browser = { path = "adapters/browser-rs" }
 adapter-calendar = { path = "adapters/calendar" }
@@ -106,3 +121,4 @@ tauri = { version = "2", features = [] }
 tauri-build = { version = "2" }
 tauri-plugin-shell = "2"
 tauri-plugin-store = "2"
+tauri-plugin-updater = "2"

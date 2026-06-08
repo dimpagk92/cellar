@@ -5,10 +5,8 @@ All notable changes to `cel-memory-sqlite` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Pre-`0.1.0` versions develop in-workspace as part of [Cellar](https://github.com/dimpagk92/cellar);
-the first published release on crates.io will be `0.1.0`. See
-[`plans/cellar-oss-extraction-prep.md`](../../plans/cellar-oss-extraction-prep.md)
-for the extraction roadmap.
+Pre-`0.1.0` versions develop in-workspace as part of the Cellar project; the
+first published release on crates.io will be `0.1.0`.
 
 ## [Unreleased]
 
@@ -37,7 +35,6 @@ for the extraction roadmap.
 ### Notes
 - Imports only `cel-memory` from the workspace — verified by
   `scripts/lint-guard-extraction-crates.sh` (added 2026-05-23).
-- Dev-deps on `cel-act-gateway` / `cellar-types` are deliberately absent
-  here. Daemon-level integration tests live in
-  `cel-cortex-daemon/tests/scenario_4_sqlite.rs` where those deps are
-  first-class. See `plans/cellar-oss-extraction-prep.md` §D2.
+- Dev-deps on daemon-only crates are deliberately absent here, so the crate
+  stays standalone-testable. Daemon-level integration tests that need them
+  live in the downstream Cellar daemon.

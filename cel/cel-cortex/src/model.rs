@@ -13,6 +13,19 @@ use std::collections::{HashMap, HashSet, VecDeque};
 /// Cortex tick interval in ms.
 pub const TICK_INTERVAL_MS: u64 = 200;
 
+// ─── Daemon-bridge forwarding throttles ─────────────────────────────────────
+// The tick loop forwards perception streams to the daemon; these bound how
+// often the high-frequency / subprocess-backed sources are sampled or emitted.
+
+/// Min interval between forwarded pointer-move events (coalesces ~4/s).
+pub const POINTER_FWD_INTERVAL_MS: u64 = 250;
+
+/// Min interval between network-connection polls (lsof is a subprocess).
+pub const NETWORK_POLL_INTERVAL_MS: u64 = 1_000;
+
+/// Min interval between ambient CDP auto-bind probes when a browser is frontmost.
+pub const CDP_PROBE_INTERVAL_MS: u64 = 3_000;
+
 /// How many cycles an element must survive unchanged to be "stable".
 pub const STABLE_THRESHOLD: u32 = 5;
 
@@ -285,6 +298,11 @@ pub struct SourceSummary {
     /// adapter-backed (Numbers/Excel/SAP).
     #[serde(default)]
     pub cdp: usize,
+    /// On-device OCR text elements (the `CEL_OCR_FALLBACK` perception path).
+    /// Separate from `vision` so dashboards can tell deterministic pixel OCR
+    /// from the VLM read.
+    #[serde(default)]
+    pub ocr: usize,
     pub merged: usize,
     pub adapter_backed: usize,
 }
@@ -372,6 +390,7 @@ impl MentalModel {
                 ContextSource::NativeApi => source_summary.native_api += 1,
                 ContextSource::Vision => source_summary.vision += 1,
                 ContextSource::Cdp => source_summary.cdp += 1,
+                ContextSource::Ocr => source_summary.ocr += 1,
                 ContextSource::Merged => source_summary.merged += 1,
             }
         }

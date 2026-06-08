@@ -63,6 +63,45 @@ pub fn capture_screen(display_id: Option<u32>) -> napi::Result<napi::bindgen_pre
     Ok(png.into())
 }
 
+/// Capture a rectangular region of a display and return as PNG bytes.
+///
+/// `x`, `y`, `width`, `height` are pixels relative to the captured display's
+/// top-left. `display_id` selects the monitor (None → the active display,
+/// resolved exactly as `capture_screen`). The region is clamped to the display
+/// bounds by `crop_frame`; a region that lands entirely outside the display is
+/// an error. This is the WS18 region-capture primitive — a read-only
+/// perception op, so it needs no governance gate beyond the existing screen
+/// capture permission. The caller (MCP/daemon) records the region rect +
+/// display on the receipt.
+#[napi]
+pub fn capture_region(
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    display_id: Option<u32>,
+) -> napi::Result<napi::bindgen_prelude::Buffer> {
+    let mut capture = cel_display::create_capture();
+    let frame = match display_id {
+        Some(id) => capture
+            .capture_monitor(id)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+        None => match resolve_active_display(&*capture) {
+            Some(id) => capture
+                .capture_monitor(id)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+            None => capture
+                .capture_frame()
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?,
+        },
+    };
+    let cropped = cel_display::crop_frame(&frame, x, y, width, height)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    let png =
+        cel_display::encode_png(&cropped).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+    Ok(png.into())
+}
+
 /// Capture a window by platform capture ID and return as PNG bytes.
 #[napi]
 pub fn capture_window(window_id: u32) -> napi::Result<napi::bindgen_prelude::Buffer> {

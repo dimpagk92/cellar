@@ -332,6 +332,18 @@ pub async fn extract_page_content(client: &CdpClient) -> Result<PageContent, Cdp
 
                     if (visible && isInteractive(el)) {
                         nodeCounter++;
+                        // Tag the DOM node with a stable address that dispatch
+                        // can resolve back EXACTLY — eliminates the
+                        // perception-slug ↔ raw-text mismatch that previously
+                        // caused "no-match" failures on Apple-style hero
+                        // links where the visible label slugifies but the
+                        // HTML has no matching id. The tag survives the
+                        // current tick's dispatch window; gets overwritten
+                        // on the next walk (same nodeCounter sequence).
+                        // Try-catch because some elements (e.g. those in
+                        // closed shadow roots, sealed custom elements)
+                        // throw on setAttribute.
+                        try { el.setAttribute('data-cel-tag', String(nodeCounter)); } catch (e) {}
                         var rect = null;
                         try {
                             var r = el.getBoundingClientRect();

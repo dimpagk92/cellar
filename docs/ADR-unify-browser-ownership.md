@@ -276,3 +276,85 @@ Pass rate doesn't need to be high (the planner is what determines that, not the 
 ## Decision log
 
 - **2026-05-19** — User authorized the ~6-9 day investment on `unify-browser-ownership` branch. Hybrid suite at 100% as the gate at each phase. Design doc + implementation in the same flow.
+
+## Addendum: CDP client ownership on the Rust side (Cortex) — 2026-06-02
+
+The body of this ADR concerns the **TypeScript** browser-*launching* paths
+(`cel.ensureBrowser`, `BrowserAdapter`, `ensureDedicatedCdpBrowser`). This
+addendum covers the symmetric question one layer down, on the **Rust** side:
+who owns the `CdpClient` *connection* inside `cel-cortex`, and how it is bound.
+This was item #4 of the June-2026 architecture pass; it was deferred while
+`cortex.rs` was being decomposed into submodules (commit `1ba48bb`,
+*"decompose cortex.rs and planning_view.rs into submodules"*) and is applied on
+top of that split.
+
+### Problem (Rust side)
+
+CDP-client state lived in **three** independent slots, written by **five**
+different paths, with no single authority:
+
+| Slot | Written by | Read by |
+|---|---|---|
+| `Cortex::cdp_client` | `with_cdp_client`, `set_cdp_client`, `bind_browser_cdp_url`, tick-loop auto-bind, per-action fallbacks | `execute()` dispatch, `cdp_eval`/navigate/screenshot, `url_changed` bridge |
+| `BrowserAdapter::cdp_client` (browser-rs) | pushed via `set_cdp_client`, **plus its own `probe()` ambient discovery** | DOM perception |
+| TS `BrowserAdapter` (separate process) | its own `connect()` | its own perception |
+
+Only `bind_browser_cdp_url` propagated a client from the cortex to the adapters.
+The other writers (`with_cdp_client`, the tick-loop auto-bind, and ~6 per-action
+`connect_to_focused_app()` fallbacks) set the cortex slot alone — and each
+per-action fallback opened its own throwaway connection. In ambient mode the
+cortex and the browser-rs adapter discovered clients via two *separate*
+`connect_to_focused_app()` calls with no synchronization, so "which client is
+bound?" had no single answer.
+
+### Decision: Cortex-internal consolidation
+
+Make the **Cortex the single runtime owner** of the CDP client, with exactly one
+runtime writer that always propagates to adapters. Scope deliberately kept
+inside `cel-cortex` — the lower-risk option, chosen because the CDP subsystem
+was being actively redesigned in a parallel stream.
+
+**Invariant:** at runtime there is exactly one mutator —
+`install_cdp_client(slot, adapters, client)` in the parent `cortex` module —
+which sets `Cortex::cdp_client` *and* pushes the same client to every registered
+adapter. Everything funnels through it:
+
+- `Cortex::bind_cdp_client(client)` — thin method wrapper (new).
+- `bind_browser_cdp_url(url)` — resolve page-level URL → connect → `bind_cdp_client`.
+- The tick-loop ambient auto-bind (still **gated on `daemon_bridge`**) now calls
+  `install_cdp_client` instead of writing the slot directly, so the app's
+  in-process browser adapter perceives the cortex's exact client.
+- `cdp_client_or_ambient()` (new) — returns the bound client, or does **one**
+  ambient `connect_to_focused_app()` discovery and binds it (propagating) for
+  reuse. The six per-action fallbacks — `cdp_navigate_page`, `cdp_page_content`,
+  `cdp_eval_via_shared_or_focused`, the `execute()` dom path, the
+  `extract_with_fallback` loop, and `dispatch_navigate` — now route through this
+  single helper instead of each opening a throwaway connection.
+
+The sync builders `with_cdp_client` / `set_cdp_client` stay slot-only **by
+design**: they run at construction time (by value / `&mut self`, before the
+cortex is shared behind an `Arc` and booted), when no adapters are registered
+and `self` is owned exclusively. Once booted, `self` is shared immutably, so
+`bind_cdp_client` (and the tick loop) is the only reachable writer — which is
+what makes the invariant hold in practice.
+
+### Explicitly NOT done (deferred)
+
+The stronger "full single-owner" option was considered and **declined for now**
+to keep the blast radius inside `cel-cortex`:
+
+- The browser-rs adapter keeps its own slot and its lazy `probe()`
+  `connect_to_focused_app()` self-discovery — it remains a second owner that
+  self-syncs by convention (both prefer port 9333). The cortex's propagation
+  overwrites the adapter slot on every bind, so the cortex is authoritative
+  whenever it binds; but in pure-MCP mode (no `daemon_bridge`, no explicit bind)
+  the adapter can still self-discover independently until the first CDP action
+  funnels through `cdp_client_or_ambient` and converges them.
+- The ambient auto-bind stays gated on `daemon_bridge` (unchanged).
+- No mutex-type unification to literally share one slot object across the crate
+  boundary (the cortex uses `std::sync::Mutex`; the adapter uses
+  `tokio::sync::Mutex`).
+
+The TS-adapter regime (separate process) is untouched: it shares a *target*
+(page-level CDP URL) with the cortex via `bind_browser_cdp_url`, as established
+by the `642b1aa` page-handle fix.

@@ -4,7 +4,7 @@ Local-first memory subsystem for AI agents. Trait surface, value types, and an i
 
 `cel-memory` is the contract between an agent runtime and an arbitrary persistence layer. The trait is small enough to drop in your own backend (file, SQLite, Redis, Mem0, Hindsight, etc.) without changing agent code. Cellar ships an SQLite + vector implementation in [`cel-memory-sqlite`](../cel-memory-sqlite).
 
-**Status:** v0.1 — trait surface is locked per [the Cellar v1 memory plan](https://github.com/dimpagk92/cellar/blob/main/plans/cellar-memory-manager.md).
+**Status:** v0.1 — the `MemoryProvider` trait surface is stable. Two implementations ship against it: `BasicMemoryProvider` (in-crate, in-memory reference) and [`cel-memory-sqlite`](../cel-memory-sqlite) (SQLite + vector + FTS, hybrid retrieval).
 
 ## What's in this crate
 

@@ -169,6 +169,7 @@ fn render_action(action: &Action) -> String {
         ActionType::Veto => "veto".into(),
         ActionType::SoftBlock => "soft-block via cel_act".into(),
         ActionType::LogOnly => "log only".into(),
+        ActionType::RedactMemory => "redact memory (suppress persistence)".into(),
     }
 }
 

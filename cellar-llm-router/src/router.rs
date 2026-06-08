@@ -6,7 +6,9 @@ use std::sync::Arc;
 use crate::config::{resolve, EnvSource, ProviderKind, SubsystemConfig};
 use crate::error::{LlmError, Result};
 use crate::provider::LlmProvider;
-use crate::providers::{AnthropicProvider, OllamaProvider, OpenAiProvider};
+use crate::providers::{
+    AnthropicProvider, GeminiProvider, OllamaProvider, OpenAiProvider, XaiProvider,
+};
 
 /// One subsystem's resolved handle: provider + model name.
 #[derive(Clone)]
@@ -68,6 +70,8 @@ fn build_handle(cfg: SubsystemConfig) -> Result<SubsystemHandle> {
         ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(cfg.api_key, cfg.base_url)?),
         ProviderKind::Openai => Arc::new(OpenAiProvider::new(cfg.api_key, cfg.base_url)?),
         ProviderKind::Ollama => Arc::new(OllamaProvider::new(cfg.base_url)?),
+        ProviderKind::Gemini => Arc::new(GeminiProvider::new(cfg.api_key)?),
+        ProviderKind::Xai => Arc::new(XaiProvider::new(cfg.api_key)?),
     };
     Ok(SubsystemHandle { provider, model })
 }

@@ -1,0 +1,16 @@
+{
+  "id": "url_change_guard",
+  "name": "Pause when the browser navigates to a blocked domain",
+  "nl_original": "ask me before the browser ends up on a domain from my blocklist, no matter who navigated there",
+  "kind": "guard",
+  "enabled": true,
+  "match": {
+    "all": [
+      { "leaf": { "field": "kind", "op": "eq", "value": "url_changed" } },
+      { "leaf": { "field": "data.url", "op": "in_watchlist", "value": "blocked_domains" } }
+    ]
+  },
+  "action": { "type": "require_confirmation", "timeout_s": 120 },
+  "cooldown_seconds": 60,
+  "created_at": "2026-06-01T00:00:00Z"
+}

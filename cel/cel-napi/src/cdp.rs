@@ -35,10 +35,24 @@ pub fn cdp_discover_targets() -> napi::Result<String> {
     serde_json::to_string(&targets).map_err(|e| napi::Error::from_reason(e.to_string()))
 }
 
-/// Extract page content from the first available CDP target.
+/// Extract page content from the CDP-bound browser tab.
 /// Returns JSON PageContent, or "null" if no CDP target is available.
+///
+/// Prefers the Cortex's explicitly-bound CDP client so extraction always
+/// targets the correct Chrome tab, not whatever tab happens to be frontmost.
 #[napi]
 pub async fn cdp_get_page_content() -> napi::Result<String> {
+    if let Some(cortex) = crate::cortex::get_cortex_handle() {
+        if cortex.has_cdp_client() {
+            return match cortex.cdp_page_content().await {
+                Some(content) => serde_json::to_string(&content)
+                    .map_err(|e| napi::Error::from_reason(e.to_string())),
+                None => Ok("null".to_string()),
+            };
+        }
+    }
+
+    // Fallback: ambient discovery.
     let client = match cel_cdp::connect_to_focused_app().await {
         Some(c) => c,
         None => return Ok("null".to_string()),
@@ -106,9 +120,26 @@ pub async fn cdp_get_network_requests(limit: Option<u32>) -> napi::Result<String
     }
 }
 
-/// Navigate the focused CDP target to a URL.
+/// Navigate the CDP-bound tab to a URL.
+///
+/// Prefers the Cortex's explicitly-bound CDP client (set by `bindBrowserCdpUrl`)
+/// over ambient `connect_to_focused_app()` discovery. This ensures the navigation
+/// lands on the same Chrome tab that all other cortex operations (eval, probe,
+/// DOM reading) use — critical when multiple tabs are open.
 #[napi]
 pub async fn cdp_navigate(url: String) -> napi::Result<()> {
+    // Prefer the cortex-bound client so navigation targets the same tab
+    // that bindBrowserCdpUrl wired up, not whatever Chrome tab is frontmost.
+    if let Some(cortex) = crate::cortex::get_cortex_handle() {
+        if cortex.has_cdp_client() {
+            return cortex
+                .cdp_navigate_page(&url)
+                .await
+                .map_err(napi::Error::from_reason);
+        }
+    }
+
+    // Fallback: ambient discovery (no cortex / no bound client).
     let client = match cel_cdp::connect_to_focused_app().await {
         Some(c) => c,
         None => return Err(napi::Error::from_reason("No CDP target available")),

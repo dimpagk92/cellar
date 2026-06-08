@@ -17,9 +17,9 @@ pub type Result<T> = std::result::Result<T, MemoryError>;
 pub enum MemoryError {
     /// The requested feature isn't implemented by the current provider.
     ///
-    /// v1's [`BasicMemoryProvider`] returns this for summarization, rollups,
-    /// and re-embed methods. The full Memory & Context Manager replaces the
-    /// provider and implements all of these.
+    /// The in-crate [`BasicMemoryProvider`] returns this for summarization,
+    /// rollups, and re-embed methods. A full storage backend (e.g. the
+    /// `cel-memory-sqlite` crate) implements all of these.
     ///
     /// [`BasicMemoryProvider`]: crate::BasicMemoryProvider
     #[error("not implemented in this provider: {0}")]

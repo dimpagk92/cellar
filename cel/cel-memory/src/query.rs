@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunk::ChunkKind;
 
-/// A retrieval query. See [`cellar-memory-manager.md`] §8.1.
-///
-/// [`cellar-memory-manager.md`]: file:///Users/dimitriospagkratis/.claude/plans/cellar-memory-manager.md
+/// A retrieval query — the input to [`crate::MemoryProvider::retrieve`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryQuery {
     /// Free-text query. Embedded for vector search and tokenized for FTS.
@@ -63,14 +61,13 @@ fn default_true() -> bool {
 
 /// Multi-agent visibility scope for a query.
 ///
-/// See [`cellar-memory-manager.md`] §13. Default scope for every external MCP
-/// client is [`Own`]; the embedded agent gets [`OwnPlusShared`]; the Memory
-/// tab UI and the audit timeline get [`Global`].
+/// The default scope for an external MCP client is [`Own`]; an embedded agent
+/// typically gets [`OwnPlusShared`]; privileged user surfaces (a Memory tab UI,
+/// an audit timeline) get [`Global`].
 ///
 /// [`Own`]: CallerScope::Own
 /// [`OwnPlusShared`]: CallerScope::OwnPlusShared
 /// [`Global`]: CallerScope::Global
-/// [`cellar-memory-manager.md`]: file:///Users/dimitriospagkratis/.claude/plans/cellar-memory-manager.md
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum CallerScope {
@@ -86,12 +83,10 @@ pub enum CallerScope {
 /// Named retrieval profiles. Each profile sets a tuned set of hybrid weights
 /// (vector / FTS / recency) and kind filters appropriate to the caller path.
 ///
-/// The v1 [`crate::BasicMemoryProvider`] accepts the profile but does not
-/// honor it (it always performs a single lexical match). The full Memory &
-/// Context Manager implements per-profile tuning per
-/// [`cellar-memory-manager.md`] §8.3.
-///
-/// [`cellar-memory-manager.md`]: file:///Users/dimitriospagkratis/.claude/plans/cellar-memory-manager.md
+/// The in-crate [`crate::BasicMemoryProvider`] accepts the profile but does not
+/// honor it (it always performs a single lexical match). A full storage backend
+/// (e.g. the `cel-memory-sqlite` crate) implements per-profile hybrid-weight
+/// tuning (vector / FTS / recency).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrievalProfile {

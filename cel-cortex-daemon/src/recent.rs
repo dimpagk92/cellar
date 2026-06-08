@@ -66,18 +66,27 @@ impl<T: Clone> Ring<T> {
         self.len() == 0
     }
 
-    /// Read with a filter predicate. Returns oldest-first up to `limit`.
-    /// `predicate` is evaluated per-item; `None` means "no filter".
+    /// Read with a filter predicate. Selects the most-recent entries, up to
+    /// `limit`. Iterating newest-first means callers that request a
+    /// small `limit` get the freshest data even when the ring is full.
+    /// The returned `Vec` is in ascending-time order (oldest of the selected
+    /// entries first) so the Activity tab can render a chronological timeline.
     pub fn filtered<F>(&self, limit: usize, predicate: F) -> Vec<T>
     where
         F: Fn(&T) -> bool,
     {
         let q = self.inner.lock().expect("ring mutex poisoned");
-        q.iter()
+        // Iterate newest-first so `take(limit)` grabs the most recent matches.
+        let mut items: Vec<T> = q
+            .iter()
+            .rev()
             .filter(|t| predicate(t))
             .take(limit)
             .cloned()
-            .collect()
+            .collect();
+        // Re-order to ascending (oldest first) for chronological display.
+        items.reverse();
+        items
     }
 }
 
@@ -199,8 +208,11 @@ mod tests {
         for i in 0..5 {
             r.push(i);
         }
+        // `filtered` keeps the newest `limit` matches (freshest data for a
+        // "recent" feed), returned in ascending order — so the newest 2 of
+        // 0..5 are [3, 4], not the oldest [0, 1].
         let two = r.filtered(2, |_| true);
-        assert_eq!(two, vec![0, 1]);
+        assert_eq!(two, vec![3, 4]);
     }
 
     #[test]

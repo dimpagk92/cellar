@@ -9,14 +9,20 @@ description = "Always-on perception engine for CEL — maintains a continuously-
 [dependencies]
 cel-context = { workspace = true }
 cel-audio = { workspace = true }
+cellar-types = { workspace = true }
 cel-accessibility = { workspace = true }
 cel-input = { workspace = true }
 cel-contracts = { workspace = true }
 cel-signals = { workspace = true }
 cel-network = { workspace = true }
 cel-cdp = { workspace = true }
+# The adapter contract (AdapterDriver trait + manifest types + discovery)
+# lives here now; cel-cortex re-exports it from `src/adapter.rs`.
+cel-adapter-sdk = { workspace = true }
+cel-display = { workspace = true }
 cel-store = { workspace = true }
 cel-llm = { workspace = true }
+image = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

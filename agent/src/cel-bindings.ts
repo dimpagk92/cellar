@@ -125,7 +125,18 @@ export interface CelNative {
   axRequestPermission(): boolean;
   getContext(): string;
   captureScreen(displayId?: number): Buffer;
+  captureRegion(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    displayId?: number,
+  ): Buffer;
   captureWindow(windowId: number): Buffer;
+  // On-device OCR (macOS Vision). Returns JSON: { count, lines:[{text,
+  // confidence, bounds:{x,y,width,height}}] }. Pixel bounds, top-left origin.
+  ocr(imageBytes: Buffer, fast?: boolean, minConfidence?: number): string;
+  ocrAvailable(): boolean;
   listMonitors(): string;
   listWindows(): string;
   listCaptureWindows(): string;
@@ -133,15 +144,32 @@ export interface CelNative {
   click(x: number, y: number): void;
   rightClick(x: number, y: number): void;
   doubleClick(x: number, y: number): void;
+  // Mouse press/release (drag-and-hold; pair them with mouseMove between).
+  mouseDown(x: number, y: number): void;
+  mouseUp(x: number, y: number): void;
   typeText(text: string): void;
+  typeTextCadence(text: string, delayMs: number): void;
+  pasteWithRestore(text: string): void;
   keyPress(key: string): void;
   keyCombo(keys: string[]): void;
+  // WS1 background (non-focus-stealing) input — posts to a target PID.
+  pidForApp(name: string): number | null;
+  clickToPid(pid: number, x: number, y: number): void;
+  rightClickToPid(pid: number, x: number, y: number): void;
+  doubleClickToPid(pid: number, x: number, y: number): void;
+  typeTextToPid(pid: number, text: string): void;
+  keyPressToPid(pid: number, key: string): void;
+  keyComboToPid(pid: number, keys: string[]): void;
+  backgroundInputAvailable(): boolean;
   scroll(dx: number, dy: number): void;
+  swipe(direction: string, amount: number): void;
   mousePosition(): number[];
   drag(fromX: number, fromY: number, toX: number, toY: number): void;
   axPerformAction(elementId: string, action: string): boolean;
   axSetValue(elementId: string, value: string): boolean;
   activateApp(appName: string): boolean;
+  launchApp(appName: string, background?: boolean): boolean;
+  quitApp(appName: string): boolean;
   shellExec(command: string, args: string[]): string;
   axIsSettable(elementId: string): boolean;
   axElementAtPosition(x: number, y: number): string;
@@ -201,6 +229,13 @@ export interface CelNative {
   ): string;
   cortexMemoryTouch(dbPath: string, id: number): string;
   cortexMemoryPrune(dbPath: string, threshold: number): number;
+  // Cellar Memory Manager — backs the cel_remember / cel_recall / cel_forget
+  // MCP tools against the same ~/.cellar/memory.sqlite file the daemon owns.
+  // See cel-napi/src/memory.rs.
+  memoryRemember(dbPath: string, payloadJson: string): string;
+  memoryRecall(dbPath: string, queryJson: string): string;
+  memoryForgetMatching(dbPath: string, predicateJson: string): number;
+  memoryForgetIds(dbPath: string, callerId: string, idsJson: string): number;
   // Quick context (app/window only, no tree walk)
   getQuickContext(): string;
   // Blind planner (no screen context, uses device baseline)
@@ -364,6 +399,19 @@ export interface MonitorInfo {
   is_primary: boolean;
 }
 
+/** One OCR-recognized line: text, confidence, and a pixel bounding box. */
+export interface OcrLine {
+  text: string;
+  confidence: number;
+  bounds: { x: number; y: number; width: number; height: number };
+}
+
+/** Result of an on-device OCR pass (from `Cel.ocr`). */
+export interface OcrResult {
+  count: number;
+  lines: OcrLine[];
+}
+
 /** Window info from CEL display layer. */
 export interface WindowInfo {
   id: number;
@@ -441,18 +489,54 @@ export interface StepRecord {
 }
 
 let _native: CelNative | null = null;
+let _loadAttempted = false;
+let _loadError: Error | null = null;
 
-/** Load the native CEL module. Returns null if not available. */
+/** Load the native CEL module. Returns null if not available.
+ *
+ * Surfaces the load error to stderr on the FIRST failure (only) and
+ * caches it for later introspection via `getNativeLoadError()`. Without
+ * this, every "Native module not available" error in callers is opaque
+ * — you can't tell whether the .node file is missing, the platform
+ * tag is wrong, or there's an ABI mismatch. The 2026-05-25 benchmark
+ * session burned hours on exactly this: standalone `require` worked,
+ * but long-running bench processes silently failed with no
+ * indication of why.
+ *
+ * Suppressible via `CEL_SUPPRESS_NATIVE_LOAD_ERROR=1` for tests that
+ * intentionally probe the "no native available" path.
+ */
 function loadNative(): CelNative | null {
   if (_native) return _native;
+  if (_loadAttempted) return null;
+  _loadAttempted = true;
   try {
     // Try to load the napi-rs compiled module
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     _native = require("@dpagk/cellar-napi") as CelNative;
     return _native;
-  } catch {
+  } catch (err) {
+    _loadError = err instanceof Error ? err : new Error(String(err));
+    if (process.env.CEL_SUPPRESS_NATIVE_LOAD_ERROR !== "1") {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[cel-bindings] loadNative() failed — every downstream "Native module not available" error stems from this. ` +
+          `Resolve before debugging callers. Error: ${_loadError.message}`,
+      );
+      if (_loadError.stack) {
+        // eslint-disable-next-line no-console
+        console.error(_loadError.stack.split("\n").slice(0, 8).join("\n"));
+      }
+    }
     return null;
   }
+}
+
+/** Inspect why the last loadNative() attempt failed. Returns null when
+ *  the load succeeded or was never attempted. Useful in tests + diagnostic
+ *  tools (`cellar doctor`). */
+export function getNativeLoadError(): Error | null {
+  return _loadError;
 }
 
 /**
@@ -599,12 +683,59 @@ export class Cel implements
     return this.native.captureScreen(displayId);
   }
 
+  /**
+   * Capture a rectangular region of a display as a PNG buffer (WS18).
+   * `x`/`y`/`width`/`height` are pixels relative to the captured display's
+   * top-left; `displayId` selects the monitor (omit → the active display,
+   * resolved exactly as `captureScreen`). The region is clamped to the
+   * display bounds; a region entirely outside it throws. Read-only
+   * perception — no governance gate beyond screen-capture permission.
+   */
+  captureRegion(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    displayId?: number,
+  ): Buffer {
+    if (!this.native) {
+      throw new Error("Native module not available");
+    }
+    return this.native.captureRegion(x, y, width, height, displayId);
+  }
+
   /** Capture a specific window as PNG buffer. */
   captureWindow(windowId: number): Buffer {
     if (!this.native) {
       throw new Error("Native module not available");
     }
     return this.native.captureWindow(windowId);
+  }
+
+  /**
+   * Recognize text in an encoded image (PNG/JPEG/…) using the on-device macOS
+   * Vision framework. Local, no LLM, no network — millisecond latency,
+   * deterministic. Returns recognized lines with pixel bounding boxes
+   * (top-left origin). The fast perception fallback for surfaces with no
+   * Accessibility tree (`<canvas>`, games, image-only documents). Pair with
+   * `captureScreen()` / `captureRegion()` to read text off the live screen.
+   */
+  ocr(
+    imageBytes: Buffer,
+    opts?: { fast?: boolean; minConfidence?: number },
+  ): OcrResult {
+    if (!this.native) {
+      throw new Error("Native module not available");
+    }
+    return JSON.parse(
+      this.native.ocr(imageBytes, opts?.fast, opts?.minConfidence),
+    );
+  }
+
+  /** Whether on-device OCR is available (true on macOS). */
+  ocrAvailable(): boolean {
+    if (!this.native) return false;
+    return this.native.ocrAvailable();
   }
 
   /** List available monitors. */
@@ -642,6 +773,20 @@ export class Cel implements
     this.native?.rightClick(x, y);
   }
 
+  /**
+   * Press (and hold) the left mouse button at coordinates. Pair with
+   * {@link mouseUp} (moving between) for press-drag-release / drag-and-hold —
+   * interactions a single {@link click} can't express.
+   */
+  mouseDown(x: number, y: number): void {
+    this.native?.mouseDown(x, y);
+  }
+
+  /** Release a held left mouse button at coordinates. */
+  mouseUp(x: number, y: number): void {
+    this.native?.mouseUp(x, y);
+  }
+
   /** Double-click at coordinates. */
   doubleClick(x: number, y: number): void {
     this.native?.doubleClick(x, y);
@@ -650,6 +795,16 @@ export class Cel implements
   /** Type text using fast unicode input. */
   typeText(text: string): void {
     this.native?.typeText(text);
+  }
+
+  /** Type text with a per-character delay (ms) for human cadence (WS8). */
+  typeTextCadence(text: string, delayMs: number): void {
+    this.native?.typeTextCadence(text, delayMs);
+  }
+
+  /** Paste text via the clipboard (Cmd+V), restoring the previous clipboard. */
+  pasteWithRestore(text: string): void {
+    this.native?.pasteWithRestore(text);
   }
 
   /** Press a single key. */
@@ -665,6 +820,11 @@ export class Cel implements
   /** Scroll at current position. */
   scroll(dx: number, dy: number): void {
     this.native?.scroll(dx, dy);
+  }
+
+  /** Directional swipe ("up"|"down"|"left"|"right") by `amount` units. */
+  swipe(direction: string, amount: number): void {
+    this.native?.swipe(direction, amount);
   }
 
   /** Get current mouse cursor position as [x, y]. */
@@ -698,6 +858,67 @@ export class Cel implements
   /** Activate (bring to front) a macOS application by name via `open -a`. */
   activateApp(appName: string): boolean {
     return this.native?.activateApp(appName) ?? false;
+  }
+
+  /**
+   * Launch (start) a macOS application by name. With `background`, launches
+   * without stealing focus (`open -g -a`) — for warming up an app to drive
+   * headlessly. Unlike `activateApp`, this is about *starting* the app.
+   */
+  launchApp(appName: string, background = false): boolean {
+    return this.native?.launchApp(appName, background) ?? false;
+  }
+
+  /**
+   * Quit a macOS application by name, gracefully (AppleScript `quit`, like
+   * ⌘Q). Never force-kills — an app with unsaved changes may surface a dialog
+   * and stay open.
+   */
+  quitApp(appName: string): boolean {
+    return this.native?.quitApp(appName) ?? false;
+  }
+
+  // ─── WS1 background (non-focus-stealing) input ───────────────────────────
+  // Post CGEvents directly to a target PID without activating the app.
+
+  /** Resolve a macOS app/process name to its PID (null if not running). */
+  pidForApp(name: string): number | null {
+    return this.native?.pidForApp(name) ?? null;
+  }
+
+  /** Left-click at (x, y) delivered to `pid` without activating the app. */
+  clickToPid(pid: number, x: number, y: number): void {
+    this.native?.clickToPid(pid, x, y);
+  }
+
+  /** Right-click at (x, y) delivered to `pid` without activating the app. */
+  rightClickToPid(pid: number, x: number, y: number): void {
+    this.native?.rightClickToPid(pid, x, y);
+  }
+
+  /** Double-click at (x, y) delivered to `pid` without activating the app. */
+  doubleClickToPid(pid: number, x: number, y: number): void {
+    this.native?.doubleClickToPid(pid, x, y);
+  }
+
+  /** Type text into `pid` without activating the app. */
+  typeTextToPid(pid: number, text: string): void {
+    this.native?.typeTextToPid(pid, text);
+  }
+
+  /** Press a single key in `pid` without activating the app. */
+  keyPressToPid(pid: number, key: string): void {
+    this.native?.keyPressToPid(pid, key);
+  }
+
+  /** Press a key combination in `pid` without activating the app. */
+  keyComboToPid(pid: number, keys: string[]): void {
+    this.native?.keyComboToPid(pid, keys);
+  }
+
+  /** Whether background (non-focus-stealing) input is available on this host. */
+  backgroundInputAvailable(): boolean {
+    return this.native?.backgroundInputAvailable() ?? false;
   }
 
   /** Execute a safe shell command (allowlisted: open, osascript, defaults, etc.). */
@@ -988,6 +1209,101 @@ export class Cel implements
   cortexMemoryPrune(threshold = 0.01): number {
     if (!this.native) return 0;
     return this.native.cortexMemoryPrune(this.dbPath, threshold);
+  }
+
+  // --- Cellar Memory Manager (Phase 4 — backs cel_remember/recall/forget) ---
+
+  /**
+   * Path the daemon writes `~/.cellar/memory.sqlite` to. The MCP server
+   * opens the same file via WAL-mode multi-connection access. Override via
+   * `CELLAR_MEMORY_DB` for tests / sandboxes; default tracks the daemon's
+   * resolved path (see cel-cortex-daemon/main.rs).
+   */
+  get memoryDbPath(): string {
+    const override = process.env.CELLAR_MEMORY_DB;
+    if (override && override.length > 0) {
+      return override.replace("~", process.env.HOME ?? "");
+    }
+    const home = process.env.HOME ?? "";
+    return `${home}/.cellar/memory.sqlite`;
+  }
+
+  /**
+   * `cel_remember` backing — persist a chunk against the Cellar memory DB.
+   * The `payload` shape matches `cel_memory::NewMemoryChunk`. The MCP tool
+   * layer is responsible for normalising `caller_id` to `mcp:<client>`.
+   * Returns the persisted `MemoryChunk` (with id, created_at, embedding
+   * metadata).
+   */
+  memoryRemember(payload: {
+    kind: string;
+    source: string;
+    caller_id: string;
+    content: string;
+    session_id?: string | null;
+    project_root?: string | null;
+    metadata?: unknown;
+    importance?: number | null;
+    shareable?: boolean;
+    pinned?: boolean;
+  }): unknown {
+    if (!this.native) {
+      throw new Error("Native CEL module not available — memoryRemember requires cel-napi");
+    }
+    return JSON.parse(this.native.memoryRemember(this.memoryDbPath, JSON.stringify(payload)));
+  }
+
+  /**
+   * `cel_recall` backing — top-k retrieval scoped by caller. The `query`
+   * shape matches `cel_memory::MemoryQuery`. Returns an array of
+   * `MemoryChunk`s ordered by fused hybrid score (descending).
+   */
+  memoryRecall(query: {
+    text: string;
+    caller_id: string;
+    caller_scope?: "own" | "own_plus_shared" | "global";
+    k?: number;
+    kinds?: string[] | null;
+    session_id?: string | null;
+    min_importance?: number | null;
+    include_rollups?: boolean;
+    profile?: string;
+  }): unknown[] {
+    if (!this.native) return [];
+    const fullQuery = {
+      caller_scope: query.caller_scope ?? "own",
+      k: query.k ?? 8,
+      include_rollups: query.include_rollups ?? true,
+      profile: query.profile ?? "agent_chat_turn",
+      ...query,
+    };
+    return JSON.parse(this.native.memoryRecall(this.memoryDbPath, JSON.stringify(fullQuery)));
+  }
+
+  /**
+   * `cel_forget` backing — predicate path. Always scopes to the caller's
+   * own chunks (no cross-caller deletion through this surface). Returns
+   * count deleted. Empty predicate is a no-op.
+   */
+  memoryForgetMatching(predicate: {
+    callers?: string[];
+    kinds?: string[];
+    before?: string;
+    content_contains?: string;
+    session_ids?: string[];
+  }): number {
+    if (!this.native) return 0;
+    return this.native.memoryForgetMatching(this.memoryDbPath, JSON.stringify(predicate));
+  }
+
+  /**
+   * `cel_forget` backing — id-list path. Skips chunks not owned by
+   * `callerId` (silently — surface authorization errors in the MCP tool
+   * if the caller needs them). Returns count actually deleted.
+   */
+  memoryForgetIds(callerId: string, ids: string[]): number {
+    if (!this.native) return 0;
+    return this.native.memoryForgetIds(this.memoryDbPath, callerId, JSON.stringify(ids));
   }
 
   // --- External Context (browser adapter → Rust pipeline) ---
@@ -1586,12 +1902,17 @@ export class Cel implements
     // cortex isn't running (e.g. Phase 2 standalone benchmark use).
     try {
       await this.bindBrowserCdpUrl(handle.cdpUrl);
+      // Log success at INFO so benchmark runs can verify the bind
+      // actually happened. Pre-2026-05-26 this was silent on success,
+      // so when the cortex's CDP-screenshot vision fallback returned
+      // "no bound browser" we couldn't tell whether ensureBrowser
+      // never called bind OR called it on a different cortex.
+      // eslint-disable-next-line no-console
+      console.error(`[cel] cortex bound to ${handle.cdpUrl}`);
     } catch (err) {
       // Defensive: native binding failures shouldn't break the spawn caller.
-      // Logged at debug-level — Phase 2 benchmark consumers don't have a
-      // cortex and this is expected to be a no-op for them.
       // eslint-disable-next-line no-console
-      console.debug(
+      console.error(
         "[cel] bindBrowserCdpUrl failed (cortex may not be running):",
         err instanceof Error ? err.message : String(err),
       );

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+cel-memory = { path = "../cel/cel-memory" }
 cellar-types.workspace = true
 cellar-llm-router.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -18,3 +19,4 @@ chrono = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 serde_json.workspace = true
+cel-memory = { path = "../cel/cel-memory" }

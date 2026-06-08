@@ -59,6 +59,107 @@ pub fn right_click(x: i32, y: i32) -> napi::Result<()> {
     with_controller(|c| c.click(x, y, cel_input::MouseButton::Right))
 }
 
+/// Press (and hold) the left mouse button at absolute coordinates — pairs with
+/// `mouse_up` for drag-and-hold / press-drag-release (move between them).
+#[napi]
+pub fn mouse_down(x: i32, y: i32) -> napi::Result<()> {
+    with_controller(|c| c.mouse_down(x, y, cel_input::MouseButton::Left))
+}
+
+/// Release a held left mouse button at absolute coordinates.
+#[napi]
+pub fn mouse_up(x: i32, y: i32) -> napi::Result<()> {
+    with_controller(|c| c.mouse_up(x, y, cel_input::MouseButton::Left))
+}
+
+// ─── Background (non-focus-stealing) input — WS1 ──────────────────────────
+// These post CGEvents directly to a target PID via cel_input::background, so
+// the app never comes frontmost. The MCP `cel_act focus_mode: background`
+// param resolves the target app's PID (pid_for_app) and calls these instead
+// of the frontmost-routing controller methods above. Additive — the
+// foreground controller path is unchanged.
+
+/// Resolve a macOS app/process name to its PID (`None` if not running).
+#[napi]
+pub fn pid_for_app(name: String) -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        let safe = name.replace('"', "\\\"");
+        let output = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                &format!(
+                    "tell application \"System Events\" to unix id of first process whose name is \"{safe}\""
+                ),
+            ])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<i32>()
+                .ok()
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = name;
+        None
+    }
+}
+
+/// Left-click at `(x, y)` delivered to `pid` without activating the app.
+#[napi]
+pub fn click_to_pid(pid: i32, x: i32, y: i32) -> napi::Result<()> {
+    cel_input::background::click(pid, x, y, cel_input::MouseButton::Left, 1)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Right-click at `(x, y)` delivered to `pid` without activating the app.
+#[napi]
+pub fn right_click_to_pid(pid: i32, x: i32, y: i32) -> napi::Result<()> {
+    cel_input::background::click(pid, x, y, cel_input::MouseButton::Right, 1)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Double-click at `(x, y)` delivered to `pid` without activating the app.
+#[napi]
+pub fn double_click_to_pid(pid: i32, x: i32, y: i32) -> napi::Result<()> {
+    cel_input::background::click(pid, x, y, cel_input::MouseButton::Left, 2)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Type `text` into `pid` without activating the app.
+#[napi]
+pub fn type_text_to_pid(pid: i32, text: String) -> napi::Result<()> {
+    cel_input::background::type_text(pid, &text)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Press a single key in `pid` without activating the app.
+#[napi]
+pub fn key_press_to_pid(pid: i32, key: String) -> napi::Result<()> {
+    cel_input::background::key_press(pid, &key).map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Press a key combination in `pid` without activating the app.
+#[napi]
+pub fn key_combo_to_pid(pid: i32, keys: Vec<String>) -> napi::Result<()> {
+    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+    cel_input::background::key_combo(pid, &refs)
+        .map_err(|e| napi::Error::from_reason(e.to_string()))
+}
+
+/// Whether background (non-focus-stealing) input is available on this host
+/// (a usable CGEvent source). The authoritative grant is probed by
+/// `cellar doctor`'s `background input` row.
+#[napi]
+pub fn background_input_available() -> bool {
+    cel_input::background::available()
+}
+
 /// Double-click at absolute screen coordinates.
 #[napi]
 pub fn double_click(x: i32, y: i32) -> napi::Result<()> {
@@ -69,6 +170,21 @@ pub fn double_click(x: i32, y: i32) -> napi::Result<()> {
 #[napi]
 pub fn type_text(text: String) -> napi::Result<()> {
     with_controller(|c| c.type_text(&text))
+}
+
+/// Type text with a per-character delay (ms) for human cadence (WS8).
+/// `delay_ms` = 0 types instantly.
+#[napi]
+pub fn type_text_cadence(text: String, delay_ms: u32) -> napi::Result<()> {
+    with_controller(|c| c.type_text_cadence(&text, delay_ms))
+}
+
+/// Paste `text` via the clipboard (Cmd+V), then restore the previous clipboard
+/// contents — reliable insertion (emoji / newlines, no autocorrect) that
+/// doesn't clobber whatever the user had copied.
+#[napi]
+pub fn paste_with_restore(text: String) -> napi::Result<()> {
+    with_controller(|c| cel_input::paste_with_restore(c, &text))
 }
 
 /// Press a single key (e.g., "Enter", "Tab", "Escape").
@@ -105,6 +221,12 @@ pub fn drag(from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> napi::Result<()> 
 #[napi]
 pub fn scroll(dx: i32, dy: i32) -> napi::Result<()> {
     with_controller(|c| c.scroll(dx, dy))
+}
+
+/// Swipe in a direction ("up" | "down" | "left" | "right") by `amount` units.
+#[napi]
+pub fn swipe(direction: String, amount: i32) -> napi::Result<()> {
+    with_controller(|c| c.swipe(&direction, amount))
 }
 
 /// Triple-click at absolute screen coordinates (selects full line/paragraph).
@@ -243,6 +365,42 @@ pub fn activate_app(app_name: String) -> napi::Result<bool> {
             .map_err(|e| napi::Error::from_reason(format!("Failed to run open -a: {}", e)))?;
         Ok(output.status.success())
     }
+}
+
+/// Launch (start) a macOS application by name.
+///
+/// Unlike `activate_app`, this is about *starting* the app — with
+/// `background = true` it launches without stealing focus (`open -g -a`),
+/// useful for warming up an app the agent will drive headlessly. If the app is
+/// already running, `open` simply no-ops (or re-activates when not background).
+/// Returns true when `open` reported success.
+#[napi]
+pub fn launch_app(app_name: String, background: Option<bool>) -> napi::Result<bool> {
+    let mut cmd = std::process::Command::new("open");
+    if background.unwrap_or(false) {
+        cmd.arg("-g");
+    }
+    cmd.arg("-a").arg(&app_name);
+    let output = cmd
+        .output()
+        .map_err(|e| napi::Error::from_reason(format!("Failed to run open -a: {}", e)))?;
+    Ok(output.status.success())
+}
+
+/// Quit a macOS application by name, gracefully (AppleScript `quit`).
+///
+/// This asks the app to quit the same way ⌘Q does — the app may surface an
+/// unsaved-changes dialog and stay open, which is intentional (we never
+/// force-kill the user's app). Returns true when the `quit` command dispatched
+/// without error.
+#[napi]
+pub fn quit_app(app_name: String) -> napi::Result<bool> {
+    let safe_name = app_name.replace('"', "\\\"");
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &format!("tell application \"{safe_name}\" to quit")])
+        .output()
+        .map_err(|e| napi::Error::from_reason(format!("Failed to run osascript quit: {}", e)))?;
+    Ok(output.status.success())
 }
 
 /// Execute a shell command and return its stdout.

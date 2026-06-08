@@ -147,6 +147,14 @@ where
     /// memory failure as fatal. Future work tracks the outcome alongside a
     /// fallible audit channel so the outcome is still surfaced.
     pub async fn intercept(&self, action: ProposedAction) -> Result<ActionOutcome, GatewayError> {
+        // The caller's tracing span (typically the IPC handler's
+        // `ipc.request` span with `trace_id` attached) is current here
+        // by virtue of async-await context propagation — every
+        // `tracing::info!` inside this body and the called subsystems
+        // (matcher, actuator, broker) inherits it. So an end-to-end
+        // request — IPC handler → agent runtime → `cel_act` gateway →
+        // matcher → actuator — shares one `trace_id` across log lines
+        // with no extra wiring inside the gateway itself.
         tracing::debug!(
             caller = %action.caller,
             action_type = %action.action_type,

@@ -5,12 +5,12 @@
 //! the [`kind`] discriminator and kind-specific structured fields living in
 //! [`metadata`]. The single embedded/FTS-indexed text is [`content`].
 //!
-//! See [`cellar-memory-manager.md`] §6.2 for the corresponding SQL schema.
+//! The corresponding SQL schema (the `memory_chunks` table and its indexes)
+//! lives in the `cel-memory-sqlite` crate's migrations.
 //!
 //! [`kind`]: MemoryChunk::kind
 //! [`metadata`]: MemoryChunk::metadata
 //! [`content`]: MemoryChunk::content
-//! [`cellar-memory-manager.md`]: file:///Users/dimitriospagkratis/.claude/plans/cellar-memory-manager.md
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,14 @@ pub struct MemoryChunk {
     pub importance: f32,
     /// If true, never auto-evicted regardless of importance or age.
     pub pinned: bool,
+    /// Cross-caller visibility flag. When `true`, the chunk surfaces to
+    /// every caller whose query uses [`crate::CallerScope::OwnPlusShared`]
+    /// (in addition to the writer's own scope). When `false` (the default),
+    /// the chunk is only visible to its writer under `Own`/`OwnPlusShared`
+    /// and to privileged surfaces under `Global`. See [`crate::CallerScope`]
+    /// for the full visibility model.
+    #[serde(default)]
+    pub shareable: bool,
     /// If non-`None`, the ID of a chunk that replaces this one (e.g. a
     /// correction supersedes the original mistake).
     pub superseded_by: Option<String>,
@@ -192,6 +200,7 @@ mod tests {
             metadata: json!({"action_type":"fs.copy"}),
             importance: 0.7,
             pinned: false,
+            shareable: false,
             superseded_by: None,
             embedding_model: "none".into(),
             embedding_dim: 0,
@@ -199,5 +208,19 @@ mod tests {
         let s = serde_json::to_string(&c).unwrap();
         let back: MemoryChunk = serde_json::from_str(&s).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn chunk_shareable_default_false_on_deserialize() {
+        // Pre-Phase-4 callers that constructed JSON without the `shareable`
+        // field must still round-trip — shareable defaults to false on the
+        // wire. (Other fields are still required.)
+        let raw = r#"{"id":"x","created_at":"2026-01-01T00:00:00Z","kind":"chat",
+            "tier":"session","source":"embedded","session_id":null,
+            "project_root":null,"caller_id":"embedded",
+            "content":"hi","metadata":null,"importance":0.5,"pinned":false,
+            "superseded_by":null,"embedding_model":"none","embedding_dim":0}"#;
+        let c: MemoryChunk = serde_json::from_str(raw).unwrap();
+        assert!(!c.shareable);
     }
 }

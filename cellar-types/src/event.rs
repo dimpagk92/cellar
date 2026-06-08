@@ -34,6 +34,13 @@ pub enum EventSource {
     CortexAx,
     /// Chrome DevTools Protocol (URL changes, page loads).
     CortexCdp,
+    /// OS-level network connection monitor (lsof / /proc/net/tcp).
+    CortexNetwork,
+    /// Audio capture + transcription stream.
+    CortexAudio,
+    /// Keyboard/pointer input capture (CGEventTap). Content-bearing —
+    /// keystroke text and pointer coordinates are governance-sensitive.
+    CortexInput,
     /// Process start/stop from the poller.
     Process,
     /// Filesystem events from FSEvents.
@@ -55,15 +62,91 @@ pub enum EventSource {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
-    // CortexAx
-    /// An app gained keyboard focus.
+    // CortexAx — application + window lifecycle
+    /// An app gained keyboard focus (frontmost).
     AppFocused,
-    /// A new window was opened.
+    /// An app was sent to the background (lost frontmost).
+    AppDeactivated,
+    /// An app was hidden (⌘H).
+    AppHidden,
+    /// A hidden app was shown again.
+    AppShown,
+    /// A new window was opened. `data.title`.
     WindowOpened,
+    /// A window was moved.
+    WindowMoved,
+    /// A window was resized.
+    WindowResized,
+    /// A window was minimized.
+    WindowMinimized,
+    /// A window was restored from the minimized state.
+    WindowRestored,
+    /// The app's main window changed (distinct from focus change).
+    MainWindowChanged,
+    /// A menu was opened.
+    MenuOpened,
+    /// A menu was closed.
+    MenuClosed,
+    /// A sheet/dialog appeared.
+    SheetOpened,
+
+    // CortexAx — element-level (high-frequency; forwarded per user policy)
+    /// Keyboard/mouse focus moved to a different element. `data.element_id`.
+    FocusChanged,
+    /// An element's value changed (text, checkbox, slider).
+    /// `data.element_id`, `data.new_value`.
+    ValueChanged,
+    /// An element's title changed. `data.element_id`, `data.new_title`.
+    TitleChanged,
+    /// A text/list selection changed.
+    SelectionChanged,
+    /// The number of rows in a table/outline changed.
+    RowCountChanged,
+    /// UI layout changed (elements added/removed/repositioned).
+    LayoutChanged,
+    /// An element was destroyed/removed from the tree.
+    ElementDestroyed,
+    /// A screen-reader announcement was requested. `data.text`.
+    AnnouncementRequested,
+    /// A tooltip/help tag was shown.
+    HelpTagShown,
 
     // CortexCdp
-    /// The active browser tab navigated to a new URL.
+    /// The active browser tab navigated to a new URL. `data.url`.
     UrlChanged,
+    /// The active browser tab fired its load event (`Page.loadEventFired`) —
+    /// the page finished loading. `data.timestamp` (CDP monotonic clock).
+    PageLoaded,
+
+    // CortexNetwork
+    /// A new TCP/UDP connection was observed. `data.remote_addr`,
+    /// `data.remote_port`, `data.service`, `data.process_name`, `data.pid`.
+    NetworkConnectionOpened,
+    /// A previously-observed connection closed.
+    NetworkConnectionClosed,
+
+    // CortexAudio
+    /// Audio capture started.
+    AudioCaptureStarted,
+    /// Audio capture stopped.
+    AudioCaptureStopped,
+    /// A transcript segment was produced. `data.text`, `data.source`,
+    /// `data.speaker`. Content-bearing — rules can `Veto`/`RequireConfirmation`
+    /// before the text is persisted or leaves the device.
+    AudioTranscript,
+
+    // CortexInput (content-bearing; governance-sensitive)
+    /// A key was pressed (`data.pressed = true`) or released (`false`).
+    /// `data.keycode`; `data.text` is attached only when content forwarding is
+    /// explicitly enabled.
+    KeyboardInput,
+    /// The pointer moved. `data.x`, `data.y`.
+    PointerMoved,
+    /// A pointer button changed. `data.button`, `data.pressed`, `data.x`,
+    /// `data.y`.
+    PointerButton,
+    /// A scroll-wheel event. `data.delta_x`, `data.delta_y`.
+    PointerScroll,
 
     // Process
     /// A new process started.
@@ -183,6 +266,13 @@ mod tests {
     }
 
     #[test]
+    fn page_loaded_serializes_snake_case() {
+        let e = Event::now(EventSource::CortexCdp, EventKind::PageLoaded);
+        assert_eq!(e.resolve_field("kind"), Some(json!("page_loaded")));
+        assert_eq!(e.resolve_field("source"), Some(json!("cortex_cdp")));
+    }
+
+    #[test]
     fn resolve_top_level_kind() {
         let e = Event::now(EventSource::Fsevents, EventKind::FileDeleted);
         assert_eq!(e.resolve_field("kind"), Some(json!("file_deleted")));
@@ -220,5 +310,82 @@ mod tests {
         let s = serde_json::to_string(&k).unwrap();
         let back: EventKind = serde_json::from_str(&s).unwrap();
         assert_eq!(k, back);
+    }
+
+    #[test]
+    fn new_sources_serialize_snake_case() {
+        for (src, expected) in [
+            (EventSource::CortexNetwork, "cortex_network"),
+            (EventSource::CortexAudio, "cortex_audio"),
+            (EventSource::CortexInput, "cortex_input"),
+        ] {
+            assert_eq!(serde_json::to_value(src).unwrap(), json!(expected));
+            let back: EventSource = serde_json::from_value(json!(expected)).unwrap();
+            assert_eq!(src, back);
+        }
+    }
+
+    #[test]
+    fn new_kinds_serialize_snake_case() {
+        // One representative per stream we just added.
+        for (kind, expected) in [
+            (EventKind::AppDeactivated, "app_deactivated"),
+            (EventKind::WindowMinimized, "window_minimized"),
+            (EventKind::SheetOpened, "sheet_opened"),
+            (EventKind::ValueChanged, "value_changed"),
+            (
+                EventKind::NetworkConnectionOpened,
+                "network_connection_opened",
+            ),
+            (EventKind::AudioTranscript, "audio_transcript"),
+            (EventKind::KeyboardInput, "keyboard_input"),
+            (EventKind::PointerMoved, "pointer_moved"),
+            (EventKind::PointerScroll, "pointer_scroll"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&kind).unwrap(),
+                json!(expected),
+                "kind {kind:?} should serialize to {expected}"
+            );
+            let back: EventKind = serde_json::from_value(json!(expected)).unwrap();
+            assert_eq!(kind, back);
+        }
+    }
+
+    #[test]
+    fn input_event_resolves_content_fields() {
+        // Keyboard fields + pointer coordinates must be addressable from rule
+        // expressions. The shape mirrors exactly what cel-cortex emits (see the
+        // EventKind::KeyboardInput / PointerMoved doc comments).
+        let key = Event::now(EventSource::CortexInput, EventKind::KeyboardInput)
+            .with_data("keycode", 36u64)
+            .with_data("pressed", true)
+            .with_data("text", "\r");
+        assert_eq!(key.resolve_field("source"), Some(json!("cortex_input")));
+        assert_eq!(key.resolve_field("kind"), Some(json!("keyboard_input")));
+        assert_eq!(key.resolve_field("data.keycode"), Some(json!(36)));
+        assert_eq!(key.resolve_field("data.pressed"), Some(json!(true)));
+
+        let mv = Event::now(EventSource::CortexInput, EventKind::PointerMoved)
+            .with_data("x", 640i64)
+            .with_data("y", 480i64);
+        assert_eq!(mv.resolve_field("data.x"), Some(json!(640)));
+        assert_eq!(mv.resolve_field("data.y"), Some(json!(480)));
+    }
+
+    #[test]
+    fn network_event_round_trips_with_payload() {
+        let e = Event::now(
+            EventSource::CortexNetwork,
+            EventKind::NetworkConnectionOpened,
+        )
+        .with_data("remote_addr", "93.184.216.34")
+        .with_data("remote_port", 443u16)
+        .with_data("service", "https")
+        .with_data("process_name", "Google Chrome");
+        let s = serde_json::to_string(&e).unwrap();
+        let back: Event = serde_json::from_str(&s).unwrap();
+        assert_eq!(e, back);
+        assert_eq!(back.resolve_field("data.service"), Some(json!("https")));
     }
 }

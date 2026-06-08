@@ -1,5 +1,10 @@
 //! Cross-goal rolling memory (Phase 3B).
 //!
+//! Distinct from the `cel-memory` crate: that crate is the durable cross-turn
+//! `MemoryProvider` contract; this module is a narrow cortex-local planner
+//! history. It records terminal goal outcomes for the planner's lenses — it is
+//! not a general-purpose memory store.
+//!
 //! Append-only JSONL at `~/.cellar/memory/<machine_id>.jsonl`. Each entry
 //! records the terminal state of a completed goal: what was attempted, on
 //! which cortex, against which apps, and how it ended. The planner reads

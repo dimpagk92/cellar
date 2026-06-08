@@ -10,11 +10,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use cel_cortex_daemon::memory_offdevice_governance::MatcherOffdeviceHook;
 use cel_cortex_daemon::memory_write_governance::MatcherWriteHook;
+use cel_cortex_daemon::sweeper::{self, SweeperConfig, WallClock};
 use cel_cortex_daemon::{fsevents, matcher_task, process_poller, signals_poller, Daemon};
-use cel_memory::{MemoryProvider, MemoryWriteHook};
+use cel_memory::{MemoryProvider, MemoryWriteHook, OffdeviceCallHook};
 use cel_memory_sqlite::{MockEmbedder, SqliteMemoryProvider};
 use cel_signals::{PlatformSignalBus, SignalBus};
+use cel_summarizer::{AnthropicSummarizer, OllamaSummarizer, ANTHROPIC_API_KEY_ENV, PROVIDER_ENV};
 use cellar_ipc::Server;
 use cellar_rules_store::SqliteRulesStore;
 use tokio::task::JoinSet;
@@ -53,7 +56,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&rules_store),
         Arc::clone(&rules_store),
     ));
-    let memory = build_memory_provider(Arc::clone(&write_hook)).await;
+    // `MatcherOffdeviceHook` lets `Veto` rules on
+    // `MemoryOffdeviceCallAttempted` events block cloud summarizer calls
+    // before they leave the device. Attached to the Anthropic summarizer
+    // inside `build_memory_provider`.
+    let offdevice_hook: Arc<dyn OffdeviceCallHook> = Arc::new(MatcherOffdeviceHook::new(
+        Arc::clone(&rules_store),
+        Arc::clone(&rules_store),
+    ));
+    let memory = build_memory_provider(Arc::clone(&write_hook), Arc::clone(&offdevice_hook)).await;
 
     let daemon = Daemon::wire_subsystems_with_store_and_memory(
         Arc::clone(&rules_store),
@@ -124,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(daemon.cooldown.clone()),
         daemon.webhook_hook.clone(),
         Some(daemon.fire_bus.clone()),
+        Some(daemon.confirmation_broker.clone()),
     );
     tracing::info!(
         cooldown = true,
@@ -163,6 +175,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Memory sweeper: daily aging + daily rollup + weekly rule rollup.
+    // Default schedule from `SweeperConfig::production()`. The sweeper
+    // gracefully no-ops when the memory provider returns
+    // `NotImplemented` (e.g., no summarizer configured), so this is
+    // safe to enable unconditionally.
+    let sweeper_handle = sweeper::spawn(
+        daemon.memory.clone(),
+        SweeperConfig::production(),
+        Arc::new(WallClock),
+    );
+    tracing::info!("memory sweeper spawned");
+
     // Compute the IPC socket path. Honours `CELLAR_DAEMON_SOCK` for tests
     // and packaging overrides; defaults to `$HOME/.cellar/daemon.sock` per
     // cellar-app-v1.md §15.
@@ -201,6 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     signals_handle.abort();
     event_ring_task.abort();
     fire_ring_task.abort();
+    sweeper_handle.abort();
     daemon.subscription_registry.abort_all();
     if let Some(h) = &fsevents_handle {
         h.abort();
@@ -209,6 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = matcher_handle.await;
     let _ = poller_handle.await;
     let _ = signals_handle.await;
+    let _ = sweeper_handle.await;
     if let Some(h) = fsevents_handle {
         let _ = h.await;
     }
@@ -249,7 +275,10 @@ fn ipc_socket_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 /// `cel-memory-sqlite` crate, which downloads a ~130 MB model on first
 /// instantiation. Retrieval doesn't work in v1 (Phase 2 work) so the
 /// embedder choice is mostly storage-only for now.
-async fn build_memory_provider(write_hook: Arc<dyn MemoryWriteHook>) -> Arc<dyn MemoryProvider> {
+async fn build_memory_provider(
+    write_hook: Arc<dyn MemoryWriteHook>,
+    offdevice_hook: Arc<dyn OffdeviceCallHook>,
+) -> Arc<dyn MemoryProvider> {
     let path_override = std::env::var("CELLAR_MEMORY_DB").ok();
     let path = match path_override.as_deref() {
         Some(":memory:") => {
@@ -285,14 +314,28 @@ async fn build_memory_provider(write_hook: Arc<dyn MemoryWriteHook>) -> Arc<dyn 
         }
         None => SqliteMemoryProvider::open_in_memory(embedder).await,
     };
+    // Build the summarizer (Anthropic default, Ollama fallback). Wire
+    // the off-device hook *only* into the Anthropic path — Ollama runs
+    // locally so cloud-bound governance doesn't apply. Summarizer
+    // construction is best-effort: if no provider is configured, the
+    // daemon still boots; `rollup_day` and `summarize_session` then
+    // return `NotImplemented`.
+    let summarizer = build_summarizer_with_governance(Arc::clone(&offdevice_hook));
     match result {
-        Ok(provider) => {
+        Ok(mut provider) => {
             tracing::info!(
                 path = ?path,
                 "memory: SqliteMemoryProvider open (sqlite-vec loaded, migrations applied, \
                  matcher-driven write hook attached)"
             );
-            Arc::new(provider.with_write_hook(write_hook))
+            provider = provider.with_write_hook(write_hook);
+            if let Some(s) = summarizer {
+                provider = provider.with_summarizer(s);
+                tracing::info!(
+                    "memory: summarizer attached (rollup_day + summarize_session enabled)"
+                );
+            }
+            Arc::new(provider)
         }
         Err(e) => {
             tracing::warn!(
@@ -301,6 +344,78 @@ async fn build_memory_provider(write_hook: Arc<dyn MemoryWriteHook>) -> Arc<dyn 
                  BasicMemoryProvider. Chunks will be lost on restart."
             );
             Arc::new(cel_memory::BasicMemoryProvider::new().with_write_hook(write_hook))
+        }
+    }
+}
+
+/// Best-effort summarizer construction. Selection follows
+/// `CELLAR_MEMORY_SUMMARIZER_PROVIDER` (default `anthropic`, fallback
+/// `ollama`). The Anthropic path wires the off-device hook so the
+/// rule matcher can govern cloud calls; the Ollama path bypasses
+/// because it's local.
+///
+/// Returns `None` (with a warning) if neither provider could be
+/// constructed — the daemon still boots, rollup APIs return
+/// `NotImplemented`.
+fn build_summarizer_with_governance(
+    offdevice_hook: Arc<dyn OffdeviceCallHook>,
+) -> Option<Arc<dyn cel_memory::Summarizer>> {
+    let kind = std::env::var(PROVIDER_ENV)
+        .ok()
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| "anthropic".to_string());
+    match kind.as_str() {
+        "ollama" => match OllamaSummarizer::from_env() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "memory: summarizer construction failed (ollama); rollups disabled"
+                );
+                None
+            }
+        },
+        _ => {
+            // Anthropic (or unknown — treat as anthropic w/ fallback).
+            let key_present = std::env::var(ANTHROPIC_API_KEY_ENV)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .is_some();
+            if key_present {
+                match AnthropicSummarizer::from_env() {
+                    Ok(s) => Some(Arc::new(s.with_offdevice_hook(offdevice_hook))),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "memory: Anthropic summarizer construction failed; trying Ollama"
+                        );
+                        match OllamaSummarizer::from_env() {
+                            Ok(s) => Some(Arc::new(s)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "memory: summarizer construction failed (ollama fallback); rollups disabled"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+            } else {
+                tracing::info!(
+                    "memory: ANTHROPIC_API_KEY not set; trying Ollama fallback for summarizer"
+                );
+                match OllamaSummarizer::from_env() {
+                    Ok(s) => Some(Arc::new(s)),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "memory: summarizer construction failed; rollups disabled"
+                        );
+                        None
+                    }
+                }
+            }
         }
     }
 }

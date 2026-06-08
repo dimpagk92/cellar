@@ -1,5 +1,5 @@
 //! Storage-side error type. Converted to [`MemoryError`] on the way out
-//! of the [`SqliteMemoryProvider`].
+//! of the [`SqliteMemoryProvider`](crate::SqliteMemoryProvider).
 //!
 //! [`MemoryError`]: cel_memory::MemoryError
 

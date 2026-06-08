@@ -1,19 +1,22 @@
 //! Minimal `cel-brief` example using zero other Cellar crates.
 //!
-//! Phase 1: wires two trivial [`cel_brief::Source`] implementations against
-//! the core types and prints their contributions. The full
-//! [`cel_brief::builder::BriefBuilder`] flow (fan-out, tokenize, prune,
-//! governance, receipt) lands in Phase 2; this example hand-assembles a
-//! [`cel_brief::Brief`] with an empty receipt to exercise the end-to-end
-//! type surface without leaking any Cellar-specific dependencies.
+//! Wires the real Phase 2 [`cel_brief::BriefBuilder`] against four pluggable
+//! sources, applies a token budget tight enough to force pruning, and prints
+//! the assembled [`cel_brief::Brief`] plus the full [`cel_brief::BriefReceipt`].
 //!
-//! Run with: `cargo run -p cel-brief --example no_cellar`
+//! This file exists as the OSS-pluggability proof: if it ever needs to import
+//! something from `cel-cortex`, `cel-context`, or any other Cellar crate, the
+//! abstraction has leaked.
+//!
+//! Run with: `cargo run -p cel-brief --example no_cellar`.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use cel_brief::{
-    Brief, BriefContext, BriefMessage, BriefReceipt, Contribution, ContributionContent, Priority,
-    Role, Source, SourceError, SourceId, TokenBudget,
+    BriefBuilder, BriefContext, BriefMessage, Contribution, Priority, Role, Source, SourceError,
+    SourceId, TokenBudget, ToolSchema,
 };
 
 /// Static system prompt — Critical priority, never redactable.
@@ -41,8 +44,7 @@ impl Source for StaticSystemPrompt {
 }
 
 /// Echoes `ctx.user_message` back as a `User` text contribution. Returns
-/// [`SourceError::Skipped`] when the context has no user message — that
-/// makes it a clear no-op rather than a hard failure.
+/// [`SourceError::Skipped`] when the context has no user message.
 struct UserMessageEcho;
 
 #[async_trait]
@@ -64,111 +66,119 @@ impl Source for UserMessageEcho {
     }
 }
 
+/// Stand-in "memory" source — emits a handful of fake recollections with
+/// varying importance scores. Demonstrates that the builder's pruning kicks
+/// in when the budget is tight.
+struct FakeMemory;
+
+#[async_trait]
+impl Source for FakeMemory {
+    fn id(&self) -> SourceId {
+        SourceId::new("memory")
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::Normal
+    }
+
+    async fn contribute(&self, _ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError> {
+        let entries = [
+            ("User prefers concise answers.", 0.9_f32),
+            (
+                "Last week's incident summary: deploy stuck on migration 119.",
+                0.7,
+            ),
+            (
+                "Mentioned cellar-app v1 in conversation on 2026-05-22.",
+                0.5,
+            ),
+            ("Owns a mechanical keyboard.", 0.2),
+        ];
+        Ok(entries
+            .into_iter()
+            .map(|(text, importance)| {
+                let est = text.len().div_ceil(4);
+                Contribution::text(Role::Assistant, text.to_owned(), est)
+                    .with_importance(importance)
+                    .with_tag("memory")
+            })
+            .collect())
+    }
+}
+
+/// Two-tool catalog so the receipt's tool path is exercised.
+struct ToolCatalog;
+
+#[async_trait]
+impl Source for ToolCatalog {
+    fn id(&self) -> SourceId {
+        SourceId::new("tools")
+    }
+
+    fn priority(&self) -> Priority {
+        Priority::High
+    }
+
+    async fn contribute(&self, _ctx: &BriefContext) -> Result<Vec<Contribution>, SourceError> {
+        let echo = ToolSchema {
+            name: "echo".into(),
+            description: "Echo a string back to the user.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            }),
+            source: SourceId::new("tools"),
+        };
+        let now = ToolSchema {
+            name: "now".into(),
+            description: "Return the current Unix timestamp.".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            source: SourceId::new("tools"),
+        };
+        Ok(vec![
+            Contribution::tool(echo, 32),
+            Contribution::tool(now, 16),
+        ])
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let ctx = BriefContext::new(TokenBudget::default())
         .with_turn(1)
-        .with_goal("ship cel-brief phase 1")
-        .with_user_message("Hello cel-brief!");
+        .with_goal("ship cel-brief phase 2")
+        .with_user_message("Hello cel-brief — what do you remember about me?");
 
-    let sources: Vec<Box<dyn Source>> = vec![
-        Box::new(StaticSystemPrompt {
+    // Tight budget so pruning actually engages — see the `dropped` list in
+    // the receipt below.
+    let budget = TokenBudget::new(80, 16);
+
+    let builder = BriefBuilder::new()
+        .source(Arc::new(StaticSystemPrompt {
             text: "You are a helpful assistant grounded in the Cellar device.",
-        }),
-        Box::new(UserMessageEcho),
-    ];
+        }))
+        .source(Arc::new(UserMessageEcho))
+        .source(Arc::new(FakeMemory))
+        .source(Arc::new(ToolCatalog))
+        .budget(budget);
 
-    // Phase 1: fan out by hand. Phase 2's BriefBuilder will replace this with
-    // a parallel fan-out, tokenizer-driven budget pruning, governance, and
-    // a populated receipt.
-    let mut system_text = String::new();
-    let mut messages = Vec::<BriefMessage>::new();
-
-    for source in &sources {
-        let id = source.id();
-        match source.contribute(&ctx).await {
-            Ok(contributions) => {
-                println!(
-                    "source `{id}` (priority={:?}) returned {} contribution(s)",
-                    source.priority(),
-                    contributions.len()
-                );
-                for c in contributions {
-                    match c.content {
-                        ContributionContent::System { text } => {
-                            if !system_text.is_empty() {
-                                system_text.push_str("\n\n");
-                            }
-                            system_text.push_str(&text);
-                        }
-                        ContributionContent::Text { role, content } => {
-                            messages.push(BriefMessage::Text {
-                                role,
-                                content,
-                                source: id.clone(),
-                            });
-                        }
-                        ContributionContent::Image { role, data, alt } => {
-                            messages.push(BriefMessage::Image {
-                                role,
-                                data,
-                                alt,
-                                source: id.clone(),
-                            });
-                        }
-                        ContributionContent::ToolCall {
-                            id: call_id,
-                            name,
-                            args,
-                        } => {
-                            messages.push(BriefMessage::ToolCall {
-                                id: call_id,
-                                name,
-                                args,
-                                source: id.clone(),
-                            });
-                        }
-                        ContributionContent::ToolResult {
-                            id: call_id,
-                            content,
-                        } => {
-                            messages.push(BriefMessage::ToolResult {
-                                id: call_id,
-                                content,
-                                source: id.clone(),
-                            });
-                        }
-                        ContributionContent::Tool { schema: _ } => {
-                            // Tool catalog assembly lands in Phase 2/3.
-                        }
-                    }
-                }
-            }
-            Err(SourceError::Skipped(reason)) => {
-                println!("source `{id}` skipped: {reason}");
-            }
-            Err(err) => {
-                eprintln!("source `{id}` failed: {err}");
-            }
+    let brief = match builder.build(&ctx).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("build failed: {e}");
+            std::process::exit(1);
         }
-    }
-
-    let brief = Brief {
-        system: if system_text.is_empty() {
-            None
-        } else {
-            Some(system_text)
-        },
-        messages,
-        tools: Vec::new(),
-        receipt: BriefReceipt::empty(),
     };
 
-    println!();
-    println!("--- assembled Brief (Phase 1, no builder) ---");
+    println!("--- assembled Brief (Phase 2 BriefBuilder) ---");
     if let Some(system) = &brief.system {
         println!("system: {system}");
+    } else {
+        println!("system: <none>");
     }
+
+    println!("\nmessages ({}):", brief.messages.len());
     for (idx, msg) in brief.messages.iter().enumerate() {
         match msg {
             BriefMessage::Text {
@@ -176,25 +186,58 @@ async fn main() {
                 content,
                 source,
             } => {
-                println!("[{idx}] text role={role:?} src={source}: {content}");
+                println!("  [{idx}] text role={role:?} src={source}: {content}");
             }
             BriefMessage::Image { role, source, .. } => {
-                println!("[{idx}] image role={role:?} src={source}");
+                println!("  [{idx}] image role={role:?} src={source}");
             }
             BriefMessage::ToolCall {
                 id, name, source, ..
             } => {
-                println!("[{idx}] tool_call id={id} name={name} src={source}");
+                println!("  [{idx}] tool_call id={id} name={name} src={source}");
             }
             BriefMessage::ToolResult { id, source, .. } => {
-                println!("[{idx}] tool_result id={id} src={source}");
+                println!("  [{idx}] tool_result id={id} src={source}");
             }
         }
     }
-    println!(
-        "receipt: total_tokens={} dropped={} redactions={}",
-        brief.receipt.total_tokens,
-        brief.receipt.dropped.len(),
-        brief.receipt.redactions.len()
-    );
+
+    println!("\ntools ({}):", brief.tools.len());
+    for (idx, t) in brief.tools.iter().enumerate() {
+        println!("  [{idx}] {} (src={}): {}", t.name, t.source, t.description);
+    }
+
+    println!("\n--- BriefReceipt ---");
+    println!("total_tokens : {}", brief.receipt.total_tokens);
+    println!("dropped      : {}", brief.receipt.dropped.len());
+    for d in &brief.receipt.dropped {
+        println!("  - {} ({} tokens, {:?})", d.source, d.tokens, d.reason);
+    }
+    println!("redactions   : {}", brief.receipt.redactions.len());
+
+    println!("\nby_source:");
+    let mut by_source: Vec<_> = brief.receipt.by_source.iter().collect();
+    by_source.sort_by_key(|(sid, _)| sid.as_str().to_owned());
+    for (sid, stats) in by_source {
+        println!(
+            "  {sid:18} contributions={} kept={} tokens={} priority={:?}",
+            stats.contributions, stats.kept, stats.tokens, stats.priority
+        );
+    }
+
+    println!("\ntimings:");
+    let t = &brief.receipt.timings;
+    println!("  fanout     : {:?}", t.fanout);
+    println!("  tokenize   : {:?}", t.tokenize);
+    println!("  prune      : {:?}", t.prune);
+    println!("  governance : {:?}", t.governance);
+    println!("  total      : {:?}", t.total);
+
+    // Final hand-off: print the whole Brief as JSON so the example also
+    // demonstrates the structured output contract (serde-friendly).
+    println!("\n--- Brief (JSON) ---");
+    match serde_json::to_string_pretty(&brief) {
+        Ok(s) => println!("{s}"),
+        Err(e) => eprintln!("serialize failed: {e}"),
+    }
 }

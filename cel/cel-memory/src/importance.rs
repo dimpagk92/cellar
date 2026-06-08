@@ -1,9 +1,8 @@
 //! Importance scoring for memory chunks.
 //!
-//! Per `cellar-memory-manager.md` §10.2: importance is a real in `[0,1]`
-//! assigned at write time. It drives eviction priority — chunks with
-//! lower importance are evicted first when storage caps or aging
-//! sweeps run.
+//! Importance is a real in `[0,1]` assigned at write time. It drives eviction
+//! priority — chunks with lower importance are evicted first when storage caps
+//! or aging sweeps run.
 //!
 //! The scorer is a pure function over the new chunk's metadata
 //! (kind, source, content length, explicit caller hint). It produces

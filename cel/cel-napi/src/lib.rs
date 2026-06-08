@@ -21,6 +21,8 @@ mod cortex;
 mod goal_runner;
 mod input;
 mod llm;
+mod memory;
+mod ocr;
 mod planner;
 mod store;
 mod watchdog;

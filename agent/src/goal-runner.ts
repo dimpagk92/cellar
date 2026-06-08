@@ -244,16 +244,21 @@ export async function runGoal(
     ? new PlannerConversation("You are a desktop automation agent. Observe UI elements and take actions to achieve goals. Respond with JSON containing: reasoning, actions array, expected_outcome, confidence.")
     : null;
 
-  // Device baseline for blind planning
+  // Device baseline — pass to the planner UNCONDITIONALLY (cheap, cached).
+  // Pre-2026-05-26 this only ran when `contextLazy === true`, which meant
+  // benchmark runs (contextLazy false) got no baseline and the Rust
+  // planner's `is_linux` / `is_macos` checks in build_composable_system_prompt
+  // both returned false. Result: NEITHER the DESKTOP_SECTION nor the
+  // HEADLESS_LINUX_SECTION was injected — the planner had no idea what
+  // OS it was on and tried Safari activation on Linux. Compute always
+  // so the platform-specific guidance reaches every planner call.
   let deviceBaselineJson: string | null = null;
   let deviceBaseline: import("./device-baseline.js").DeviceBaseline | null = null;
-  if (contextLazy) {
-    try {
-      const { getOrScanBaseline } = await import("./device-baseline.js");
-      deviceBaseline = getOrScanBaseline(cel);
-      deviceBaselineJson = JSON.stringify(deviceBaseline);
-    } catch { /* baseline unavailable */ }
-  }
+  try {
+    const { getOrScanBaseline } = await import("./device-baseline.js");
+    deviceBaseline = getOrScanBaseline(cel);
+    deviceBaselineJson = JSON.stringify(deviceBaseline);
+  } catch { /* baseline unavailable */ }
 
   // ── GOAL ROUTER: LLM-powered classification (~100ms with Gemini Flash) ──
   // Routes simple goals to deterministic execution, complex goals to full planner.

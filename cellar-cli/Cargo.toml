@@ -13,7 +13,21 @@ path = "src/main.rs"
 cellar-ipc = { workspace = true }
 cellar-types = { workspace = true }
 cel-accessibility = { workspace = true }
+# Spaces uses private SkyLight APIs; the runtime probe (cel_spaces::spaces_available)
+# degrades gracefully when unsupported. See cel-spaces docs.
+cel-spaces = { workspace = true, features = ["spaces"] }
+cel-audio = { workspace = true }
+# On-device OCR (Vision); `--screen` captures via cel-display's xcap backend.
+cel-ocr = { workspace = true }
+cel-display = { workspace = true, features = ["xcap"] }
+# Macro record/replay (input capture + injection).
+cel-input = { workspace = true }
+# Global hotkeys (human-convenience trigger surface).
+cel-hotkey = { workspace = true }
+cel-memory = { workspace = true }
+cel-memory-sqlite = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 serde_json.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
@@ -23,4 +37,5 @@ reqwest = { workspace = true }
 async-trait.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util", "net"] }

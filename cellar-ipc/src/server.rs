@@ -10,18 +10,26 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinSet;
+use tracing::Instrument;
+use uuid::Uuid;
 
 use crate::codec::{read_message, write_message, Message};
 use crate::envelope::{JsonRpcRequest, JsonRpcResponse, RequestId};
 use crate::error::{IpcError, IpcResult};
 use crate::handler::{FrameSink, Handler};
 use crate::subscription::StreamFrame;
+
+/// Mint a fresh server-side `trace_id`. Used when the client omits the
+/// field so every request has a correlation token. UUID v7 is monotonic
+/// per millisecond, which keeps daemon log lines naturally sorted.
+fn mint_trace_id() -> String {
+    format!("srv-{}", Uuid::now_v7())
+}
 
 /// The server. Owns a [`UnixListener`] and an [`Arc<Handler>`]. Drop the
 /// server to stop accepting new connections.
@@ -158,6 +166,11 @@ where
     let forwarder = tokio::spawn(async move {
         while let Some(frame) = frame_rx.recv().await {
             let method = frame_notification_method(&frame);
+            // Pull the trace_id off the frame so the JSON-RPC notification
+            // envelope echoes it at the top level too. Subscribers that
+            // only look at the envelope's `trace_id` (e.g. the Tauri
+            // network sniffer) can correlate without parsing the params.
+            let trace_id = frame.trace_id.clone();
             let params = match serde_json::to_value(&frame) {
                 Ok(v) => v,
                 Err(e) => {
@@ -165,7 +178,10 @@ where
                     continue;
                 }
             };
-            let notif = JsonRpcRequest::notification(method, params);
+            let notif = match trace_id {
+                Some(t) => JsonRpcRequest::notification_with_trace(method, params, t),
+                None => JsonRpcRequest::notification(method, params),
+            };
             let mut w = writer_cl.lock().await;
             if let Err(e) = write_message(&mut *w, &Message::Request(notif)).await {
                 tracing::debug!(error = %e, "frame write failed; closing");
@@ -199,8 +215,14 @@ where
                     }
                     Ok(None) => break, // clean EOF
                     Err(IpcError::Codec(msg)) => {
-                        let resp =
-                            JsonRpcResponse::from_ipc_error(None, &IpcError::Parse(msg.clone()));
+                        // Parse errors mint a fresh trace_id — the client
+                        // payload was unparseable so we couldn't extract one.
+                        let trace_id = mint_trace_id();
+                        let resp = JsonRpcResponse::from_ipc_error_with_trace(
+                            None,
+                            &IpcError::Parse(msg.clone()),
+                            trace_id,
+                        );
                         let mut w = writer.lock().await;
                         let _ = write_message(&mut *w, &Message::Response(resp)).await;
                         continue;
@@ -215,24 +237,53 @@ where
 
         let id = msg.id.clone();
         let is_notification = msg.is_notification();
-        let response = dispatch(&handler, msg, sink.clone()).await;
+        // Resolve the correlation token: prefer the client-supplied
+        // trace_id; otherwise mint one so every request has a value the
+        // daemon's structured logs can carry.
+        let trace_id = msg.trace_id.clone().unwrap_or_else(mint_trace_id);
+        let method = msg.method.clone();
+        // Stamp the sink so subscription forwarders inherit the same
+        // trace_id on every frame they push.
+        let scoped_sink = sink.clone().with_trace_id(Some(trace_id.clone()));
+        // Build the per-request span. Every `tracing::info!` /
+        // `warn!` / `error!` inside the handler (and any child spans
+        // the handler enters) will carry these fields.
+        let span = tracing::info_span!(
+            "ipc.request",
+            trace_id = %trace_id,
+            method = %method,
+            request_id = %id.as_ref().map(RequestId::to_str).unwrap_or_default(),
+        );
+        let response = dispatch(&handler, msg, scoped_sink).instrument(span).await;
 
         if is_notification {
             // Notifications get no response, even on error. Log and move on.
             if let Err(e) = response {
-                tracing::debug!(error = %e, "notification handler errored");
+                tracing::debug!(
+                    trace_id = %trace_id,
+                    error = %e,
+                    "notification handler errored"
+                );
             }
             continue;
         }
 
         let id_for_response = id.unwrap_or(RequestId::Num(0));
         let resp = match response {
-            Ok(value) => JsonRpcResponse::ok(id_for_response, value),
-            Err(e) => JsonRpcResponse::from_ipc_error(Some(id_for_response), &e),
+            Ok(value) => JsonRpcResponse::ok_with_trace(id_for_response, value, trace_id.clone()),
+            Err(e) => JsonRpcResponse::from_ipc_error_with_trace(
+                Some(id_for_response),
+                &e,
+                trace_id.clone(),
+            ),
         };
         let mut w = writer.lock().await;
         if let Err(e) = write_message(&mut *w, &Message::Response(resp)).await {
-            tracing::debug!(error = %e, "response write failed; closing");
+            tracing::debug!(
+                trace_id = %trace_id,
+                error = %e,
+                "response write failed; closing"
+            );
             break;
         }
     }
@@ -290,111 +341,7 @@ async fn dispatch<H: Handler>(
     let params = req
         .params
         .unwrap_or_else(|| Value::Object(Default::default()));
-    macro_rules! call {
-        ($method:ident) => {{
-            let p = parse(params)?;
-            let r = handler.$method(p).await?;
-            let v: Value = serde_json::to_value(&r).map_err(serde_to_internal)?;
-            Ok(v)
-        }};
-        ($method:ident, no_params) => {{
-            let r = handler.$method().await?;
-            let v: Value = serde_json::to_value(&r).map_err(serde_to_internal)?;
-            Ok(v)
-        }};
-        ($method:ident, with_sink) => {{
-            let p = parse(params)?;
-            let r = handler.$method(p, sink).await?;
-            let v: Value = serde_json::to_value(&r).map_err(serde_to_internal)?;
-            Ok(v)
-        }};
-        ($method:ident, sink_only) => {{
-            let r = handler.$method(sink).await?;
-            let v: Value = serde_json::to_value(&r).map_err(serde_to_internal)?;
-            Ok(v)
-        }};
-    }
-
-    match req.method.as_str() {
-        // system
-        "system.hello" => call!(system_hello),
-        "system.shutdown" => call!(system_shutdown),
-        "system.pong" => call!(system_pong, no_params),
-
-        // daemon
-        "daemon.status" => call!(daemon_status, no_params),
-        "daemon.health.subscribe" => call!(daemon_health_subscribe, sink_only),
-        "daemon.health.unsubscribe" => call!(daemon_health_unsubscribe),
-
-        // rules
-        "rules.list" => call!(rules_list),
-        "rules.get" => call!(rules_get),
-        "rules.add" => call!(rules_add),
-        "rules.update" => call!(rules_update),
-        "rules.remove" => call!(rules_remove),
-        "rules.pause" => call!(rules_pause),
-        "rules.resume" => call!(rules_resume),
-        "rules.compile" => call!(rules_compile),
-        "rules.test" => call!(rules_test),
-
-        // watchlists
-        "watchlists.list" => call!(watchlists_list),
-        "watchlists.get" => call!(watchlists_get),
-        "watchlists.set" => call!(watchlists_set),
-        "watchlists.add_item" => call!(watchlists_add_item),
-        "watchlists.remove_item" => call!(watchlists_remove_item),
-        "watchlists.remove" => call!(watchlists_remove),
-
-        // webhooks
-        "webhooks.list" => call!(webhooks_list),
-        "webhooks.add" => call!(webhooks_add),
-        "webhooks.remove" => call!(webhooks_remove),
-        "webhooks.test" => call!(webhooks_test),
-
-        // events
-        "events.recent" => call!(events_recent),
-        "events.subscribe" => call!(events_subscribe, with_sink),
-        "events.unsubscribe" => call!(events_unsubscribe),
-
-        // fires
-        "fires.recent" => call!(fires_recent),
-        "fires.subscribe" => call!(fires_subscribe, with_sink),
-        "fires.unsubscribe" => call!(fires_unsubscribe),
-
-        // agent_actions
-        "agent_actions.recent" => call!(agent_actions_recent),
-        "agent_actions.subscribe" => call!(agent_actions_subscribe, with_sink),
-        "agent_actions.unsubscribe" => call!(agent_actions_unsubscribe),
-
-        // confirmation
-        "confirmation.list_pending" => call!(confirmation_list_pending),
-        "confirmation.subscribe" => call!(confirmation_subscribe, with_sink),
-        "confirmation.unsubscribe" => call!(confirmation_unsubscribe),
-        "confirmation.resolve" => call!(confirmation_resolve),
-
-        // agent
-        "agent.sessions.list" => call!(agent_sessions_list),
-        "agent.sessions.create" => call!(agent_sessions_create),
-        "agent.sessions.get" => call!(agent_sessions_get),
-        "agent.sessions.rename" => call!(agent_sessions_rename),
-        "agent.sessions.delete" => call!(agent_sessions_delete),
-        "agent.message" => call!(agent_message),
-        "agent.chat.subscribe" => call!(agent_chat_subscribe, with_sink),
-        "agent.chat.unsubscribe" => call!(agent_chat_unsubscribe),
-        "agent.interrupt" => call!(agent_interrupt),
-
-        // settings
-        "settings.get" => call!(settings_get),
-        "settings.set" => call!(settings_set),
-
-        other => Err(IpcError::MethodNotFound(other.to_string())),
-    }
-}
-
-fn parse<T: DeserializeOwned>(value: Value) -> IpcResult<T> {
-    serde_json::from_value(value).map_err(|e| IpcError::InvalidParams(e.to_string()))
-}
-
-fn serde_to_internal(e: serde_json::Error) -> IpcError {
-    IpcError::Internal(format!("serialize result: {e}"))
+    // Routing is generated by `#[ipc_dispatch]` on the `Handler` trait
+    // (see `crate::handler::dispatch`), so every handler method has a route.
+    crate::handler::dispatch(handler, &req.method, params, sink).await
 }

@@ -54,12 +54,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use cel_context::ContextElement;
-use cel_cortex::adapter::{LifecycleDeclaration, VerificationDeclaration};
-use cel_cortex::{
+use cel_adapter_sdk::{
     ActionDeclaration, ActionResult, AdapterDriver, AdapterError, AdapterManifest,
     ContextDeclaration,
 };
+use cel_adapter_sdk::{LifecycleDeclaration, VerificationDeclaration};
+use cel_context::ContextElement;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 

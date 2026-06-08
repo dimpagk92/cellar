@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+cellar-ipc-macros = { workspace = true }
 cellar-types = { path = "../cellar-types" }
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

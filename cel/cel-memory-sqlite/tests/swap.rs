@@ -2,11 +2,10 @@
 //! the locked `cel_memory::MemoryProvider` trait surface, not just as a
 //! concrete type.
 //!
-//! Daemon-level integration tests (rule + gateway + provider) live in
-//! `cel-cortex-daemon/tests/scenario_4_sqlite.rs`, where they belong — those
-//! tests depend on `cel-act-gateway` and `cellar-types`, which `cel-memory-
-//! sqlite` deliberately does not pull as dev-dependencies (extraction
-//! readiness, see `~/.claude/plans/cellar-oss-extraction-prep.md` §D2).
+//! Daemon-level integration tests (rule + gateway + provider) live in the
+//! downstream Cellar daemon, where they belong — those tests depend on
+//! daemon-only crates that `cel-memory-sqlite` deliberately does not pull as
+//! dev-dependencies, keeping this crate standalone-testable.
 
 use std::sync::Arc;
 

@@ -33,10 +33,29 @@
 //!   IPC (Unix socket)         Tauri commands
 //!   └─ MCP sidecar            └─ Frontend UI
 //! ```
+//!
+//! # Ownership
+//!
+//! cel-cortex answers **"what is true now?"** — it owns *live* world/device
+//! context and execution: AX / CDP / vision / audio / signal fusion, stream
+//! freshness and anomalies, action dispatch, observed effects, and execution
+//! receipts (which prove the dispatch / observed-execution path).
+//!
+//! It deliberately does **not** own the durable cross-turn memory contract —
+//! that is the `cel-memory` crate ("what should persist across turns?") — nor
+//! per-turn LLM brief assembly and prompt budgeting — that is the `cel-brief`
+//! crate ("what should the model see this turn?"). Cortex integrates with those
+//! only through downstream/integration layers, never by pulling brief assembly
+//! into the engine core.
+//!
+//! Naming caveat: the [`memory`] module below is a narrow *cross-goal
+//! planner-history* lens (recent completed-goal records the planner reads), not
+//! the durable `cel-memory` store. See its module docs.
 
 pub mod adapter;
 pub mod anomaly;
 pub mod cortex;
+pub mod daemon_bridge;
 pub mod differ;
 pub mod manager;
 pub mod memory;

@@ -331,18 +331,23 @@ mod tests {
 
     #[test]
     fn falls_back_through_name_then_aria_then_text() {
-        let no_id = dom_element_to_context_element(
-            &dom("input", None, Some("email"), Some("Email"), ""),
-            0,
-        );
+        // With no `data-cel-tag` stamped (backend_node_id = None) the id
+        // falls back through the label chain: name → aria-label → text.
+        // (When a tag IS present it wins — see
+        // `final_fallback_uses_cel_tag_then_walk_index`.)
+        let mut named = dom("input", None, Some("email"), Some("Email"), "");
+        named.backend_node_id = None;
+        let no_id = dom_element_to_context_element(&named, 0);
         assert_eq!(no_id.id, "dom:input:email");
 
-        let no_id_or_name =
-            dom_element_to_context_element(&dom("input", None, None, Some("Email address"), ""), 0);
+        let mut aria_only = dom("input", None, None, Some("Email address"), "");
+        aria_only.backend_node_id = None;
+        let no_id_or_name = dom_element_to_context_element(&aria_only, 0);
         assert_eq!(no_id_or_name.id, "dom:input:email-address");
 
-        let only_text =
-            dom_element_to_context_element(&dom("button", None, None, None, "Click me!"), 0);
+        let mut text_only = dom("button", None, None, None, "Click me!");
+        text_only.backend_node_id = None;
+        let only_text = dom_element_to_context_element(&text_only, 0);
         assert_eq!(only_text.id, "dom:button:click-me");
     }
 
@@ -350,12 +355,13 @@ mod tests {
     fn data_testid_breaks_text_collisions_for_button_lists() {
         // Real-world fixture: a deployment queue renders many
         // `<button>Approve</button>` rows that all share the same text.
-        // Without `data-testid`, every row's button collapses to
-        // `dom:button:approve` and dispatch can't tell them apart. The
-        // testid carries the row's identity (`approve-payment-gateway`)
-        // so the planner can target a specific row.
+        // Absent an exact `data-cel-tag` (backend_node_id = None), the
+        // `data-testid` carries the row's identity
+        // (`approve-payment-gateway`) so the planner can target a specific
+        // row instead of every row collapsing to `dom:button:approve`.
         let mut d = dom("button", None, None, None, "Approve");
         d.data_testid = Some("approve-payment-gateway".into());
+        d.backend_node_id = None;
         let el = dom_element_to_context_element(&d, 0);
         assert_eq!(el.id, "dom:button:approve-payment-gateway");
 
@@ -429,12 +435,15 @@ mod tests {
     }
 
     #[test]
-    fn final_fallback_uses_backend_node_id_then_walk_index() {
+    fn final_fallback_uses_cel_tag_then_walk_index() {
+        // backend_node_id (> 0) is stamped as `data-cel-tag` and becomes
+        // the exact `t<n>` anchor — preferred over slug fallbacks.
         let mut empty = dom("button", None, None, None, "");
         empty.backend_node_id = Some(7);
         let el = dom_element_to_context_element(&empty, 3);
-        assert_eq!(el.id, "dom:button:n7");
+        assert_eq!(el.id, "dom:button:t7");
 
+        // No tag and no labels → DOM-walk index.
         empty.backend_node_id = None;
         let el = dom_element_to_context_element(&empty, 3);
         assert_eq!(el.id, "dom:button:i3");

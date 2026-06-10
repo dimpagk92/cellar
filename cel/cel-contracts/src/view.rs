@@ -353,7 +353,7 @@ pub struct EventRef {
 ///
 /// Lets a planner trace a memory or fact back to its source record without
 /// inflating the view itself.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRef {
     /// Where this evidence came from: "memory", "knowledge", "transcript",
     /// "adapter_fact".

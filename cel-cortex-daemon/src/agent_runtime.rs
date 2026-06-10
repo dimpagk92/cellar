@@ -39,7 +39,8 @@ use std::sync::{Arc, Mutex};
 use cel_act_gateway::{ActionOutcome, AgentGateway, ProposedAction};
 use cel_brief::{
     BriefBuilder, BriefContext, BriefMessage, HistoryEntry, HistorySource, MemorySource,
-    Role as BriefRole, SystemPromptSource, TokenBudget, UserMessageSource,
+    PerceptionSource, ReceiptSource, Role as BriefRole, SystemPromptSource, TokenBudget,
+    UserMessageSource,
 };
 use cel_memory::{
     CallerScope, ChunkKind, ChunkSource, MemoryProvider, MemoryQuery, NewMemoryChunk,
@@ -353,9 +354,13 @@ impl AgentRuntime {
         //                                      right before the user message so the
         //                                      model attends to it with the question.
         //                                      Disabled when `memory_recall_k == 0`.
+        //   - ReceiptSource      (Normal)   → this session's recent execution
+        //                                      receipts from the run timeline
+        //                                      (~/.cellar/runs/<session>.jsonl)
+        //   - PerceptionSource   (Normal)   → live screen snapshot, only when
+        //                                      this daemon hosts the Cortex
+        //                                      (cellar-daemon-cortex.md Phase D)
         //   - UserMessageSource  (Critical) → the current user turn (always last)
-        // `PerceptionSource` (live Cortex snapshot) remains a follow-up — see
-        // cel-brief plan §10.1.
         let mut ordered: Vec<_> = context.into_iter().collect();
         ordered.sort_by_key(|c| c.created_at);
         let history: Vec<HistoryEntry> = ordered
@@ -391,6 +396,23 @@ impl AgentRuntime {
                         ChunkKind::Context,
                     ])),
             ));
+        }
+        // Receipt-Backed Run Timeline continuity: surface this session's recent
+        // execution receipts. The gateway stamps every governed dispatch with
+        // run_id = agent_session_id and appends it to
+        // ~/.cellar/runs/<session>.jsonl; a daemon-hosted Cortex adds UI-action
+        // receipts to the same run — so the next turn is grounded in what just
+        // happened and whether it worked.
+        if let Some(receipts) = ReceiptSource::for_run(session_id, 8) {
+            builder = builder.source(Arc::new(receipts));
+        }
+        // Live screen snapshot — only when this daemon hosts the single Cortex
+        // (cellar-daemon-cortex.md Phase D). The FocusOnly default keeps the
+        // budget impact small.
+        if let Some(cortex) = crate::daemon_cortex() {
+            builder = builder.source(Arc::new(PerceptionSource::new(Arc::new(
+                DaemonCortexPerception::new(cortex),
+            ))));
         }
         // UserMessageSource is registered last so the user's current turn is the
         // final message — `brief_message_to_llm` and the loop below depend on it.
@@ -820,6 +842,138 @@ fn summarize_brief_receipt(receipt: &cel_brief::BriefReceipt) -> Value {
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// [`cel_brief::PerceptionSnapshot`] over the daemon-hosted Cortex
+/// (`cellar-daemon-cortex.md` Phase D).
+///
+/// cel-brief stays cortex-free by design; this adapter lives daemon-side and
+/// projects the live mental model into the three brief-sized views. All three
+/// read the shared model — no perception tick is forced, so a stale-but-recent
+/// snapshot is returned instantly.
+pub struct DaemonCortexPerception {
+    cortex: Arc<cel_cortex::Cortex>,
+}
+
+impl DaemonCortexPerception {
+    /// Wrap a (typically daemon-hosted) Cortex for brief perception.
+    pub fn new(cortex: Arc<cel_cortex::Cortex>) -> Self {
+        Self { cortex }
+    }
+
+    fn or_none(s: &str) -> &str {
+        if s.is_empty() {
+            "(none)"
+        } else {
+            s
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl cel_brief::PerceptionSnapshot for DaemonCortexPerception {
+    async fn as_ax_tree(&self) -> Result<String, cel_brief::PerceptionError> {
+        let model = self.cortex.model();
+        let guard = model.read().await;
+        let ctx = &guard.current_context;
+        let mut out = format!(
+            "App: {} · window: {} · {} elements",
+            Self::or_none(&ctx.app),
+            Self::or_none(&ctx.window),
+            ctx.elements.len()
+        );
+        // Bounded dense dump — one line per element, capped so a busy page
+        // can't blow the brief budget.
+        const MAX_ELEMENTS: usize = 200;
+        for el in ctx.elements.iter().take(MAX_ELEMENTS) {
+            out.push('\n');
+            out.push_str(&format!(
+                "- [{}] {}{}{}",
+                el.element_type,
+                el.id,
+                el.label
+                    .as_deref()
+                    .map(|l| format!(" \"{l}\""))
+                    .unwrap_or_default(),
+                el.value
+                    .as_deref()
+                    .map(|v| format!(" = {v}"))
+                    .unwrap_or_default(),
+            ));
+        }
+        if ctx.elements.len() > MAX_ELEMENTS {
+            out.push_str(&format!(
+                "\n… {} more elements omitted",
+                ctx.elements.len() - MAX_ELEMENTS
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn as_focus_only(&self) -> Result<String, cel_brief::PerceptionError> {
+        let model = self.cortex.model();
+        let guard = model.read().await;
+        let ctx = &guard.current_context;
+        let mut out = format!(
+            "App: {} · window: {}",
+            Self::or_none(&ctx.app),
+            Self::or_none(&ctx.window)
+        );
+        match &guard.focused_element {
+            Some(f) => out.push_str(&format!(
+                "\nFocused: {} ({})",
+                f.label.as_deref().unwrap_or("(unlabelled)"),
+                f.id
+            )),
+            None => out.push_str("\nFocused: (none)"),
+        }
+        // A short actionable sample so the model can target without the full
+        // tree.
+        const MAX_ACTIONABLE: usize = 12;
+        let actionable: Vec<_> = ctx
+            .elements
+            .iter()
+            .filter(|el| !el.actions.is_empty())
+            .take(MAX_ACTIONABLE)
+            .collect();
+        if !actionable.is_empty() {
+            out.push_str("\nActionable:");
+            for el in actionable {
+                out.push_str(&format!(
+                    "\n- {} {}",
+                    el.id,
+                    el.label.as_deref().unwrap_or("")
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn as_screen_summary(&self) -> Result<String, cel_brief::PerceptionError> {
+        let model = self.cortex.model();
+        let guard = model.read().await;
+        let ctx = &guard.current_context;
+        let actionable = ctx
+            .elements
+            .iter()
+            .filter(|el| !el.actions.is_empty())
+            .count();
+        Ok(format!(
+            "App: {} · window: {} · {} elements ({} actionable){}",
+            Self::or_none(&ctx.app),
+            Self::or_none(&ctx.window),
+            ctx.elements.len(),
+            actionable,
+            guard
+                .focused_element
+                .as_ref()
+                .map(|f| format!(
+                    " · focused: {}",
+                    f.label.as_deref().unwrap_or(f.id.as_str())
+                ))
+                .unwrap_or_default(),
+        ))
+    }
+}
 
 #[cfg(test)]
 mod tests {

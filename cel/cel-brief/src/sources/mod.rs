@@ -17,6 +17,7 @@
 //! [`crate::governance`] / [`crate::receipt`]; this module is sources only.
 
 pub mod history;
+pub mod receipt;
 pub mod system_prompt;
 pub mod tool_catalog;
 pub mod user_message;
@@ -28,6 +29,7 @@ pub mod memory;
 pub mod perception;
 
 pub use history::{HistoryEntry, HistorySource, HistoryStore};
+pub use receipt::ReceiptSource;
 pub use system_prompt::SystemPromptSource;
 pub use tool_catalog::ToolCatalogSource;
 pub use user_message::UserMessageSource;

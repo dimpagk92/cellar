@@ -45,7 +45,31 @@ pub mod subscriptions;
 pub mod sweeper;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// The daemon's single live Cortex (perception + execution), when hosted.
+///
+/// One daemon process = one Cortex — two would fight over the macOS AX tree and
+/// input focus (see `cellar-daemon-cortex.md`). Set once at boot when
+/// `CELLAR_DAEMON_CORTEX` is enabled; `None` otherwise (the default), in which
+/// case the daemon runs exactly as before. Later phases drive this Cortex from
+/// the app / CLI / MCP over IPC.
+static DAEMON_CORTEX: OnceLock<Arc<cel_cortex::Cortex>> = OnceLock::new();
+
+/// Store the daemon's hosted Cortex (first set wins).
+pub fn set_daemon_cortex(cortex: Arc<cel_cortex::Cortex>) {
+    let _ = DAEMON_CORTEX.set(cortex);
+}
+
+/// The daemon's Cortex handle, if one has been hosted.
+pub fn daemon_cortex() -> Option<Arc<cel_cortex::Cortex>> {
+    DAEMON_CORTEX.get().cloned()
+}
+
+/// Whether the daemon is currently hosting a live Cortex.
+pub fn cortex_running() -> bool {
+    DAEMON_CORTEX.get().is_some()
+}
 
 use cel_act_gateway::test_support::RecordingActuator;
 use cel_act_gateway::{

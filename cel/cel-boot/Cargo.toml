@@ -1,0 +1,20 @@
+[package]
+name = "cel-boot"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Shared 'boot a default Cortex' helper — builds the standard perception merger (AX + display + network + signals, optional vision/audio) + the default adapter set and starts the Cortex tick loop. One boot path for every host (cel-napi/MCP, cel-eval/benchmarks, the daemon) instead of per-host copies."
+
+[dependencies]
+cel-cortex = { workspace = true }
+cel-adapters = { workspace = true }
+cel-cdp = { workspace = true }
+cel-accessibility = { workspace = true }
+cel-display = { workspace = true }
+cel-network = { workspace = true }
+cel-signals = { workspace = true }
+cel-context = { workspace = true }
+cel-vision = { workspace = true }
+cel-audio = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

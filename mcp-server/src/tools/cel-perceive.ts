@@ -3,6 +3,8 @@ import type { Cel } from "@cellar/agent/runtime";
 import { normalizeCortexAnomalies, normalizeCortexModel } from "@cellar/agent/runtime";
 import { textResult, errorResult, sleep, axPermissionGuard } from "./shared.js";
 import { getFrontmost } from "../helpers/focus.js";
+import { readFileSync } from "node:fs";
+import { daemonCortex, daemonCortexKnown, daemonModel } from "../helpers/daemon.js";
 
 // ─── Schema ─────────────────────────────────────────────────────────────────
 
@@ -135,9 +137,87 @@ interface SessionState {
   totalReads: number;
   /** PR2 opt-in: when set, checkpoint + stop write a cortex memory under this workflow_id. */
   memoryWorkflowId?: string;
+  /** Run id scoping this session's execution receipts (Receipt-Backed Run
+   * Timeline). Set on start; used to surface the run's recent receipts on read. */
+  runId?: string;
 }
 
 let session: SessionState | null = null;
+
+/**
+ * Whether a Cortex is available to this session — the daemon-hosted one
+ * (Phase C proxy) or the in-process napi one.
+ */
+function cortexAvailable(cel: Cel): boolean {
+  return daemonCortexKnown() !== null || cel.isCortexRunning();
+}
+
+/**
+ * The current Cortex mental model, from whichever Cortex owns perception:
+ * the daemon-hosted one over IPC when proxying, else the in-process napi
+ * one. Returns null when neither is reachable.
+ */
+async function currentModel(cel: Cel): Promise<ReturnType<typeof normalizeCortexModel>> {
+  const daemon = daemonCortexKnown();
+  if (daemon) {
+    try {
+      return normalizeCortexModel(await daemonModel(daemon));
+    } catch {
+      return null;
+    }
+  }
+  if (!cel.isCortexRunning()) return null;
+  return normalizeCortexModel(cel.readCortexModel());
+}
+
+/**
+ * Pending anomalies, when the in-process Cortex owns perception. The daemon
+ * path doesn't expose anomaly consumption yet (Phase C limitation) — anomaly
+ * counts still surface via the model's `anomalyQueue`.
+ */
+function currentAnomalies(cel: Cel): ReturnType<typeof normalizeCortexAnomalies> {
+  if (daemonCortexKnown()) return [];
+  return normalizeCortexAnomalies(cel.consumeCortexAnomalies());
+}
+
+/**
+ * Recent execution receipts for the active run, read from the timeline file the
+ * cortex appends to (`~/.cellar/runs/<run_id>.jsonl`, Receipt-Backed Run
+ * Timeline). Returns the last `limit` as compact rows so the agent's next step
+ * is informed by its own recent actions + observed-effect verdicts. Best-effort:
+ * returns undefined when there's no file yet, so the field is simply omitted.
+ */
+function recentRunReceipts(
+  runId: string | undefined,
+  limit = 8,
+): Array<Record<string, unknown>> | undefined {
+  if (!runId) return undefined;
+  const home = process.env.HOME;
+  if (!home) return undefined;
+  // Mirror the cortex writer's filename sanitization (cel-cortex receipt.rs).
+  const safe = runId.replace(/[^A-Za-z0-9_-]/g, "_");
+  try {
+    const raw = readFileSync(`${home}/.cellar/runs/${safe}.jsonl`, "utf8");
+    const lines = raw.split("\n").filter((l) => l.trim().length > 0);
+    return lines.slice(-limit).map((l) => {
+      try {
+        const r = JSON.parse(l) as Record<string, any>;
+        return {
+          action: r.action_kind,
+          route: r.route?.route ?? null,
+          status: r.status,
+          effect: r.observed_effect?.status ?? null,
+          duration_ms: r.duration_ms,
+          target: r.target ?? null,
+        };
+      } catch {
+        return { raw: l };
+      }
+    });
+  } catch {
+    return undefined;
+  }
+}
 
 // ─── Constraint helpers ─────────────────────────────────────────────────────
 
@@ -202,12 +282,16 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
   try {
     switch (args.mode) {
       case "start": {
-        if (session && cel.isCortexRunning()) {
+        // Two-Cortex guard (cellar-daemon-cortex.md Phase C): when the daemon
+        // hosts the single live Cortex, the session drives it over IPC and the
+        // napi Cortex must NOT boot.
+        const daemon = await daemonCortex();
+        if (session && (daemon !== null || cel.isCortexRunning())) {
           return errorResult("A perception session is already active. Call stop first.");
         }
 
-        // Boot the Rust Cortex if not already running
-        if (!cel.isCortexRunning()) {
+        // Boot the in-process Rust Cortex only when no daemon hosts one.
+        if (daemon === null && !cel.isCortexRunning()) {
           cel.bootCortex();
         }
 
@@ -236,7 +320,19 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           memoryWorkflowId: enableMemory ? args.workflow_id : undefined,
         };
 
-        const model = normalizeCortexModel(cel.readCortexModel());
+        // Scope execution receipts emitted during this perception session to a
+        // run id so they group in the run timeline (Receipt-Backed Run Timeline)
+        // AND so `read` can surface this run's recent receipts back to the agent.
+        // Prefer the caller's workflow_id; fall back to a per-session id.
+        const runId = args.workflow_id ?? `perceive-${session.startTime}`;
+        session.runId = runId;
+        if (daemon) {
+          await daemon.call("cortex.perceive.start", { run_id: runId });
+        } else {
+          cel.cortexSetRunId(runId);
+        }
+
+        const model = await currentModel(cel);
         return textResult({
           success: true,
           initialContext: {
@@ -251,6 +347,20 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
       case "stop": {
         if (!session) {
           return errorResult("No active perception session to stop.");
+        }
+
+        // End the run scope — one-off actions after stop won't carry this run id.
+        {
+          const daemon = daemonCortexKnown();
+          if (daemon) {
+            try {
+              await daemon.call("cortex.perceive.stop");
+            } catch {
+              // Daemon went away mid-session — nothing to clear.
+            }
+          } else {
+            cel.cortexClearRunId();
+          }
         }
 
         const successfulActions = session.actionLog.filter((a) => a.landed).length;
@@ -301,18 +411,23 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           memory_id: finalMemoryId ?? null,
         };
 
-        cel.stopCortex();
+        // The napi Cortex belongs to this session — stop it. A daemon-hosted
+        // Cortex belongs to the daemon and keeps running; the session only
+        // ends its run scope (above).
+        if (daemonCortexKnown() === null) {
+          cel.stopCortex();
+        }
         session = null;
         return textResult(summary);
       }
 
       case "read": {
-        if (!session || !cel.isCortexRunning()) {
+        if (!session || !cortexAvailable(cel)) {
           return errorResult("No active perception session. Call start first.");
         }
         session.totalReads++;
 
-        const model = normalizeCortexModel(cel.readCortexModel());
+        const model = await currentModel(cel);
         if (!model) return errorResult("Failed to read Cortex model");
 
         const ctx = model.currentContext;
@@ -320,7 +435,7 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           (el: any) => el.state?.enabled && el.state?.visible && (el.actions?.length ?? 0) > 0,
         ).length;
 
-        const anomalies = normalizeCortexAnomalies(cel.consumeCortexAnomalies());
+        const anomalies = currentAnomalies(cel);
         const recentDiffs = model.recentDiffs ?? [];
         const latestDiff = recentDiffs.length > 0 ? recentDiffs[recentDiffs.length - 1] : null;
 
@@ -393,11 +508,15 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
             ? session.constraints.map((c) => ({ text: c.text, kind: c.kind, satisfied: c.satisfied }))
             : undefined,
           checkpointSummary,
+          // Receipt-Backed Run Timeline: the agent's own recent actions this
+          // run — real dispatch route + observed-effect verdict — so its next
+          // step is informed by what just happened (and whether it worked).
+          recentReceipts: recentRunReceipts(session.runId),
         });
       }
 
       case "feed": {
-        if (!session || !cel.isCortexRunning()) {
+        if (!session || !cortexAvailable(cel)) {
           return errorResult("No active perception session. Call start first.");
         }
 
@@ -406,7 +525,7 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
         // and these two disagree, it's strong evidence the event landed in a
         // different window than the cortex was tracking — almost always a
         // focus-race symptom worth surfacing structurally.
-        const preModel = normalizeCortexModel(cel.readCortexModel());
+        const preModel = await currentModel(cel);
         const expectedApp = preModel?.currentContext?.app ?? null;
         let actualApp: string | null = null;
         try {
@@ -415,14 +534,17 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           // osascript can fail in headless test envs — degrade silently.
         }
 
-        // Notify the Rust Cortex
-        cel.notifyCortexAction(args.action);
+        // Notify the Rust Cortex (napi-local model touch; the daemon-hosted
+        // Cortex sees activity through its own tick loop).
+        if (daemonCortexKnown() === null) {
+          cel.notifyCortexAction(args.action);
+        }
 
         // Wait for 3 ticks (600ms)
         await sleep(600);
 
-        const postModel = normalizeCortexModel(cel.readCortexModel());
-        const anomalies = normalizeCortexAnomalies(cel.consumeCortexAnomalies());
+        const postModel = await currentModel(cel);
+        const anomalies = currentAnomalies(cel);
 
         const latestDiff = (postModel?.recentDiffs ?? []).slice(-1)[0] ?? null;
         const actionLanded = latestDiff
@@ -461,10 +583,12 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
           checkConstraintSatisfaction(session.constraints, args.action, obs);
         }
 
-        if (actionLanded) {
-          cel.reportCortexActionSuccess();
-        } else {
-          cel.reportCortexActionFailure();
+        if (daemonCortexKnown() === null) {
+          if (actionLanded) {
+            cel.reportCortexActionSuccess();
+          } else {
+            cel.reportCortexActionFailure();
+          }
         }
 
         return textResult({
@@ -540,11 +664,11 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
       }
 
       case "status": {
-        if (!cel.isCortexRunning()) {
+        if (!cortexAvailable(cel)) {
           return textResult({ active: false, message: "No cortex is running. Call start to boot one." });
         }
 
-        const model = normalizeCortexModel(cel.readCortexModel());
+        const model = await currentModel(cel);
         const ctx = model?.currentContext;
         const actionableCount = (ctx?.elements ?? []).filter(
           (el: any) => el.state?.enabled && el.state?.visible && (el.actions?.length ?? 0) > 0,
@@ -571,6 +695,16 @@ export async function handleCelPerceive(cel: Cel, args: Input) {
       case "plan_view": {
         // Standalone — does not require a perception session, but does
         // require a booted cortex (boot it on demand if needed).
+        if (daemonCortexKnown()) {
+          // plan_view runs in-process against the napi Cortex; booting one
+          // alongside the daemon-hosted Cortex would violate the two-Cortex
+          // guard. IPC plan_view is a later phase.
+          return errorResult(
+            "plan_view is not available while the daemon hosts the live Cortex " +
+              "(it would boot a second in-process Cortex). Use cel_perceive read for " +
+              "the current model, or run without CELLAR_DAEMON_CORTEX.",
+          );
+        }
         if (!cel.isCortexRunning()) {
           cel.bootCortex();
         }

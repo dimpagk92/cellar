@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 cel-memory = { path = "../cel/cel-memory" }
+cel-contracts = { path = "../cel/cel-contracts" }
 cellar-types = { path = "../cellar-types" }
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

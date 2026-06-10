@@ -17,8 +17,8 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::error::{IpcError, IpcResult};
 use crate::params::{
-    agent, agent_actions, confirmation, events, fires, gateway, memory, rules, settings, system,
-    watchlists, webhooks,
+    agent, agent_actions, confirmation, cortex, events, fires, gateway, memory, rules, settings,
+    system, watchlists, webhooks,
 };
 use crate::results;
 use crate::results::{OkResult, SubscribeResult};
@@ -467,6 +467,52 @@ pub trait Handler: Send + Sync + 'static {
         params: gateway::GatewayInterceptParams,
     ) -> IpcResult<results::gateway::GatewayInterceptResult> {
         Err(IpcError::NotImplemented("gateway.intercept"))
+    }
+
+    // ───── cortex.* ─────
+    //
+    // Drive the daemon-hosted Cortex (Phase B of `cellar-daemon-cortex.md`).
+    // Daemons not hosting one return [`IpcError::CortexUnavailable`].
+
+    /// `cortex.see` — the current fused screen context from the hosted
+    /// Cortex (`cel-context` `ScreenContext` JSON).
+    #[method("cortex.see")]
+    async fn cortex_see(&self) -> IpcResult<results::cortex::CortexSeeResult> {
+        Err(IpcError::NotImplemented("cortex.see"))
+    }
+
+    /// `cortex.act` — execute one canonical action on the hosted Cortex.
+    /// The result mirrors the engine's `ActionResult`; the core-emitted
+    /// `ExecutionReceipt` rides on `data._cel_receipt`.
+    #[method("cortex.act")]
+    async fn cortex_act(
+        &self,
+        params: cortex::CortexActParams,
+    ) -> IpcResult<results::cortex::CortexActResult> {
+        Err(IpcError::NotImplemented("cortex.act"))
+    }
+
+    /// `cortex.perceive.start` — begin a run scope: execution receipts
+    /// emitted while active carry this `run_id` (Receipt-Backed Run
+    /// Timeline).
+    #[method("cortex.perceive.start")]
+    async fn cortex_perceive_start(
+        &self,
+        params: cortex::CortexPerceiveStartParams,
+    ) -> IpcResult<OkResult> {
+        Err(IpcError::NotImplemented("cortex.perceive.start"))
+    }
+
+    /// `cortex.perceive.read` — a snapshot of the Cortex mental model.
+    #[method("cortex.perceive.read")]
+    async fn cortex_perceive_read(&self) -> IpcResult<results::cortex::CortexPerceiveReadResult> {
+        Err(IpcError::NotImplemented("cortex.perceive.read"))
+    }
+
+    /// `cortex.perceive.stop` — end the run scope.
+    #[method("cortex.perceive.stop")]
+    async fn cortex_perceive_stop(&self) -> IpcResult<OkResult> {
+        Err(IpcError::NotImplemented("cortex.perceive.stop"))
     }
 
     // ───── agent.* ─────

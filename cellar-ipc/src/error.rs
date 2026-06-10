@@ -76,6 +76,10 @@ pub enum IpcError {
     /// `-32013` — RPC requires Tauri client (some RPCs may not be CLI-safe).
     #[error("Tauri not attached")]
     TauriNotAttached,
+    /// `-32014` — the daemon is not hosting a live Cortex (boot it with
+    /// `CELLAR_DAEMON_CORTEX=1` to enable the `cortex.*` methods).
+    #[error("cortex not hosted by this daemon: {0}")]
+    CortexUnavailable(&'static str),
 
     // ───── Subsystem stubs ─────
     /// `-32099` — method is recognised but its backing subsystem isn't wired
@@ -128,6 +132,7 @@ impl IpcError {
             IpcError::LlmProviderError(_) => -32011,
             IpcError::ExternalMcpDisabled => -32012,
             IpcError::TauriNotAttached => -32013,
+            IpcError::CortexUnavailable(_) => -32014,
             IpcError::NotImplemented(_) => -32099,
             // Transport errors don't have JSON-RPC codes; they should not be
             // serialized as errors over the wire (they happen *to* the wire).
@@ -171,6 +176,7 @@ mod tests {
         assert_eq!(IpcError::Parse(String::new()).code(), -32700);
         assert_eq!(IpcError::ShuttingDown.code(), -32000);
         assert_eq!(IpcError::RuleNotFound("x".into()).code(), -32004);
+        assert_eq!(IpcError::CortexUnavailable("x").code(), -32014);
         assert_eq!(IpcError::NotImplemented("x").code(), -32099);
     }
 

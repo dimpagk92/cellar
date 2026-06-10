@@ -7,6 +7,7 @@ import {
   getCanonicalCdpState,
   normalizeCortexModel,
 } from "@cellar/agent/runtime";
+import { daemonCortex, daemonCortexKnown, daemonModel } from "../helpers/daemon.js";
 import {
   sleep,
   buildUrlMap,
@@ -247,7 +248,18 @@ export async function handleCelSee(cel: Cel, args: Input) {
         let cortexConfidence: number | undefined;
         let cortexModel: ReturnType<typeof normalizeCortexModel> | null = null;
 
-        if (cel.isCortexRunning()) {
+        const daemon = await daemonCortex();
+        if (daemon) {
+          // The daemon hosts the live Cortex (cellar-daemon-cortex.md Phase C)
+          // — read its model over IPC instead of the napi one.
+          try {
+            cortexModel = normalizeCortexModel(await daemonModel(daemon));
+          } catch {
+            cortexModel = null;
+          }
+          ctx = cortexModel?.currentContext ?? cel.getContext();
+          cortexConfidence = cortexModel?.confidence;
+        } else if (cel.isCortexRunning()) {
           cortexModel = normalizeCortexModel(cel.readCortexModel());
           ctx = cortexModel?.currentContext ?? cel.getContext();
           cortexConfidence = cortexModel?.confidence;
@@ -667,7 +679,7 @@ export async function handleCelSee(cel: Cel, args: Input) {
       }
 
       case "watch": {
-        if (cel.isCortexRunning()) {
+        if (daemonCortexKnown() !== null || cel.isCortexRunning()) {
           return errorResult(
             "Cortex is active. Use cel_perceive read instead of cel_see watch.",
           );

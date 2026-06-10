@@ -6,8 +6,12 @@
 //! set-value JS builders, extraction expressions, and the injected JS constants
 //! (overlay dismissal, DOM snapshot, `<select>` patch).
 
-use super::dispatch::{action_dom_target, action_expect_after, wait_for_effect};
+use super::dispatch::{action_dom_target, action_expect_after, action_type_str, wait_for_effect};
+use super::receipt::{attach_receipt, current_run_id, new_receipt_id, now_ms, record_receipt};
 use super::*;
+use cel_contracts::{
+    DispatchRoute, ExecutionReceipt, ObservedEffect, ObservedStatus, ReceiptStatus,
+};
 
 /// Detect whether a selector-string entry is a raw JS expression
 /// (common prefixes the LLM uses) vs a bare CSS selector, and wrap
@@ -200,6 +204,10 @@ pub(crate) async fn try_cdp_dispatch(
         _ => return Ok(None),
     };
 
+    // Stamp the receipt clock here so timing covers the full CDP handling
+    // window (pre-dispatch snapshot + dispatch + effect wait).
+    let requested_at_ms = now_ms();
+
     // Capture a "before" page snapshot when `expect_after` is the
     // diff-based DomChanged variant. Has to happen BEFORE dispatch
     // because dispatch will mutate the very state we're comparing
@@ -275,17 +283,51 @@ pub(crate) async fn try_cdp_dispatch(
     // planner sees that immediately in next-turn history and can
     // retry / pivot without going through verify_done's screenshot
     // grader.
-    if !dispatch_result.success {
-        return Ok(Some(dispatch_result));
-    }
-    if let Some(expectation) = action_expect_after(action) {
+    let (result, observed) = if !dispatch_result.success {
+        // Dispatch itself failed — no effect verification was attempted.
+        (dispatch_result, ObservedEffect::not_checked())
+    } else if let Some(expectation) = action_expect_after(action) {
         match wait_for_effect(client, expectation, before_snapshot.as_deref()).await {
-            Ok(()) => Ok(Some(dispatch_result)),
-            Err(reason) => Ok(Some(crate::adapter::ActionResult::fail(reason))),
+            Ok(()) => (
+                dispatch_result,
+                ObservedEffect::selector_observed(expectation.clone()),
+            ),
+            Err(reason) => (
+                crate::adapter::ActionResult::fail(reason.clone()),
+                ObservedEffect::selector_timed_out(expectation.clone(), reason),
+            ),
         }
     } else {
-        Ok(Some(dispatch_result))
-    }
+        (dispatch_result, ObservedEffect::not_checked())
+    };
+
+    // Build the canonical execution receipt for this CDP-routed action. Read
+    // the Copy `status` before moving `observed` into the receipt.
+    let status = if result.success {
+        ReceiptStatus::Ok
+    } else if observed.status == ObservedStatus::TimedOut {
+        ReceiptStatus::TimedOut
+    } else {
+        ReceiptStatus::Failed
+    };
+    let completed_at_ms = now_ms();
+    let receipt = ExecutionReceipt {
+        receipt_id: new_receipt_id(),
+        run_id: current_run_id(),
+        trace_id: None,
+        action_kind: action_type_str(action).to_string(),
+        target: Some(target.to_string()),
+        route: DispatchRoute::Cdp,
+        observed_effect: observed,
+        evidence: Vec::new(),
+        requested_at_ms,
+        completed_at_ms,
+        duration_ms: completed_at_ms.saturating_sub(requested_at_ms),
+        status,
+        error: result.error.clone(),
+    };
+    record_receipt(&receipt);
+    Ok(Some(attach_receipt(result, receipt)))
 }
 
 pub(crate) fn check_cdp_ok(

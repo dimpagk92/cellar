@@ -47,6 +47,8 @@ mod cdp;
 mod dispatch;
 mod focus;
 mod numbers;
+mod receipt;
+pub use receipt::{clear_run_id, current_run_id, set_run_id};
 mod targets;
 #[cfg(test)]
 mod tests;

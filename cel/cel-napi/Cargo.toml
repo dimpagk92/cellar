@@ -35,6 +35,7 @@ adapter-common = { workspace = true }
 # are wired through the single shared `cel-adapters` registry, not registered
 # here. See `src/cortex.rs`.
 cel-adapters = { workspace = true }
+cel-boot = { workspace = true }
 cel-goal-runner = { workspace = true }
 cellar-worker = { path = "../../cellar-worker" }
 tokio = { workspace = true }

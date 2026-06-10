@@ -275,6 +275,8 @@ export interface CelNative {
   stopWatchdog(): void;
   // Cortex (Rust perception engine)
   bootCortex(): void;
+  cortexSetRunId?(runId?: string | null): void;
+  cortexClearRunId?(): void;
   readCortexModel(): string;
   notifyCortexAction(action: string): void;
   reportCortexActionFailure(): void;
@@ -1509,6 +1511,20 @@ export class Cel implements
   /** Boot the Rust Cortex — starts the 200ms perception tick loop. */
   bootCortex(): void {
     this.native?.bootCortex();
+  }
+
+  /**
+   * Scope subsequent cortex execution receipts to a run id (e.g. an MCP
+   * perceive session) so they group together in the run timeline. Pass null to
+   * clear. No-op on older native builds without the binding.
+   */
+  cortexSetRunId(runId: string | null): void {
+    this.native?.cortexSetRunId?.(runId);
+  }
+
+  /** Clear the cortex run scope (run ended). */
+  cortexClearRunId(): void {
+    this.native?.cortexClearRunId?.();
   }
 
   /**

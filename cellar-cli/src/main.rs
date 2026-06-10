@@ -28,6 +28,7 @@ mod doctor;
 mod eval;
 mod guide;
 mod mcp;
+mod timeline;
 mod workflow;
 
 use std::path::{Path, PathBuf};
@@ -96,6 +97,19 @@ enum Command {
     /// List CEL's surfaces: CLI verbs, native gateway actions, and MCP tools.
     /// No daemon needed (see `cellar capabilities` for daemon-advertised caps).
     Tools,
+
+    /// Render the execution-receipt timeline for a run — intent → dispatch
+    /// route → observed effect → evidence for each step. Reads
+    /// `~/.cellar/runs/<run_id>.jsonl` (written by the cortex during a
+    /// `cel_perceive` session). No daemon needed.
+    ///
+    ///   cellar timeline perceive-1718territory   # human table
+    ///   cellar timeline <run_id> --json          # raw receipts
+    Timeline {
+        /// The run id — a `cel_perceive` session's `workflow_id`, or the
+        /// auto-generated `perceive-<startTime>`.
+        run_id: String,
+    },
 
     /// Generate a shell-completion script (bash, zsh, fish, elvish,
     /// powershell) for the `cellar` CLI. Prints to stdout — no daemon needed.
@@ -803,6 +817,11 @@ async fn main() -> Result<()> {
         return guide::tools(json);
     }
 
+    // `timeline` reads a run's receipt log from disk — no daemon needed.
+    if let Command::Timeline { run_id } = &cli.cmd {
+        return timeline::show(run_id, json);
+    }
+
     // `run --dry-run` validates a workflow script and prints the plan offline —
     // no daemon, no actions dispatched. (A live `run` connects, below.)
     if let Command::Run {
@@ -986,6 +1005,7 @@ async fn main() -> Result<()> {
         Command::Completions { .. } => unreachable!("completions is handled above"),
         Command::Learn => unreachable!("learn is handled above"),
         Command::Tools => unreachable!("tools is handled above"),
+        Command::Timeline { .. } => unreachable!("timeline is handled above"),
         // `run --dry-run` is handled above (offline); a live `run` dispatches
         // each step through the gateway here.
         Command::Run {

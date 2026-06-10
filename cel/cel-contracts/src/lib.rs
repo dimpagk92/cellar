@@ -12,6 +12,7 @@
 pub mod actions;
 pub mod canonical;
 pub mod producer;
+pub mod receipt;
 pub mod view;
 
 pub use actions::{CellWrite, EffectExpectation, PlannedAction};
@@ -20,6 +21,9 @@ pub use canonical::{
     StepResult,
 };
 pub use producer::{DoneVerdict, NextActionHint, PlanProducer};
+pub use receipt::{
+    DispatchRoute, ExecutionReceipt, ObservedEffect, ObservedKind, ObservedStatus, ReceiptStatus,
+};
 pub use view::{
     AdapterActionRef, AdapterFactRef, AnomalyRef, Blocker, CapabilityRef, EventRef, EvidenceRef,
     KnowledgeRef, MemoryRef, OmittedCounts, PlanningBudget, PlanningElement, PlanningElementState,

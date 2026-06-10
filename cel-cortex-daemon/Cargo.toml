@@ -11,7 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 cel-act-gateway = { path = "../cel-act-gateway" }
-cel-brief = { path = "../cel/cel-brief", features = ["memory"] }
+cel-cortex = { path = "../cel/cel-cortex" }
+cel-boot = { path = "../cel/cel-boot" }
+cel-contracts = { path = "../cel/cel-contracts" }
+cel-brief = { path = "../cel/cel-brief", features = ["memory", "perception"] }
 cel-memory = { path = "../cel/cel-memory" }
 cel-memory-sqlite = { path = "../cel/cel-memory-sqlite" }
 cel-summarizer = { path = "../cel/cel-summarizer" }

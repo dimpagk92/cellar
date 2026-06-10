@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Cel } from "@cellar/agent/runtime";
 import { sleep, resolveCoords, contextReferenceSchema, textResult, errorResult, axPermissionGuard } from "./shared.js";
 import { ensureFrontmost } from "../helpers/focus.js";
+import { daemonAct, daemonCortex } from "../helpers/daemon.js";
 
 const actionTypes = [
   "click",
@@ -521,6 +522,14 @@ type ActionReceipt = {
   evidence: Array<{ kind: string; value?: unknown }>;
   summary: string;
   error?: string;
+  /**
+   * The canonical, core-emitted execution receipt (cel-contracts), when the
+   * cortex dispatch path produced one. Present for canonical routes (navigate,
+   * cells, adapter, `dom:*` ax_action/set_value); absent for raw native
+   * primitives that bypass `cortex.execute`. When present, `dispatch_path`
+   * above reflects its real `route` rather than the static guess.
+   */
+  core?: CoreReceipt;
 };
 
 let receiptCounter = 0;
@@ -651,26 +660,94 @@ function evidenceForAction(action: SingleAction): ActionReceipt["evidence"] {
   return evidence;
 }
 
+/**
+ * The canonical, core-emitted ExecutionReceipt (cel-contracts), transported on
+ * `StepResult.data._cel_receipt` by the cortex dispatch path (PR #163/#164).
+ * Typed loosely here — the MCP server forwards it verbatim; the Rust crate owns
+ * the shape.
+ */
+type CoreReceipt = Record<string, unknown>;
+
+/** A dispatched action's human summary plus the core receipt when one was emitted. */
+type ActionExec = { summary: string; receipt: CoreReceipt | null };
+
+/**
+ * Pull the core receipt out of a canonical `StepResult.data`, separating it
+ * from the action's own payload so summaries that dump `data` stay clean.
+ */
+function splitReceipt(step: { data?: unknown } | null | undefined): {
+  data: unknown;
+  receipt: CoreReceipt | null;
+} {
+  const data = step?.data;
+  if (data && typeof data === "object" && "_cel_receipt" in data) {
+    const { _cel_receipt, ...rest } = data as Record<string, unknown>;
+    return { data: rest, receipt: (_cel_receipt as CoreReceipt) ?? null };
+  }
+  return { data: data ?? {}, receipt: null };
+}
+
+/** Extract just the core receipt (summary built from named fields, not a dump). */
+function receiptOf(step: { data?: unknown } | null | undefined): CoreReceipt | null {
+  return splitReceipt(step).receipt;
+}
+
+/** Map the core receipt's real `route` to the MCP dispatch-path vocabulary. */
+function coreRouteToDispatchPath(receipt: CoreReceipt | null): ActionDispatchPath | null {
+  const route = receipt?.route as { route?: string } | undefined;
+  switch (route?.route) {
+    case "cdp":
+      return "cdp";
+    case "accessibility":
+      return "accessibility";
+    case "native_input":
+      return "native_input";
+    case "adapter":
+      return "adapter";
+    case "focus":
+      return "focus";
+    default:
+      return null;
+  }
+}
+
 function buildReceipt(
   action: SingleAction,
   requestedAtMs: number,
   status: ActionReceiptStatus,
   summary: string,
   error?: string,
+  coreReceipt?: CoreReceipt | null,
 ): ActionReceipt {
+  const core = coreReceipt ?? null;
+  // When the core emitted a receipt, its `route` is the REAL dispatch path and
+  // overrides the static `dispatchPathForAction` guess (which mislabels e.g. a
+  // `dom:*` set_value, routed via CDP, as "accessibility").
+  const corePath = coreRouteToDispatchPath(core);
+  const evidence = evidenceForAction(action);
+  if (core) {
+    if (typeof core.receipt_id === "string") {
+      evidence.push({ kind: "core_receipt_id", value: core.receipt_id });
+    }
+    const observed = core.observed_effect as { status?: string } | undefined;
+    if (observed?.status) {
+      evidence.push({ kind: "observed_effect", value: observed.status });
+    }
+  }
   return {
     id: nextReceiptId(action.action),
     action: action.action,
     requested_at: new Date(requestedAtMs).toISOString(),
     completed_at: new Date().toISOString(),
     status,
-    dispatch_path: dispatchPathForAction(action),
+    dispatch_path: corePath ?? dispatchPathForAction(action),
     mutates_state: mutatesState(action),
     requires_verification: requiresVerification(action),
     verification: verificationMode(action),
-    evidence: evidenceForAction(action),
+    evidence,
     summary,
     ...(error ? { error } : {}),
+    ...(core ? { core } : {}),
   };
 }
 
@@ -867,16 +944,45 @@ function executeSingle(cel: Cel, action: SingleAction): string {
 }
 
 async function ensureCortexForCanonicalAction(cel: Cel): Promise<void> {
+  // Two-Cortex guard (cellar-daemon-cortex.md Phase C): when the daemon hosts
+  // the single live Cortex, canonical actions proxy to it over IPC and the
+  // napi Cortex must NOT boot — two Cortexes would fight over one AX tree
+  // and input focus.
+  if (await daemonCortex()) {
+    return;
+  }
   if (!cel.isCortexRunning()) {
     cel.bootCortex();
     await sleep(700);
   }
 }
 
+/**
+ * Route a canonical step to whichever Cortex owns execution: the
+ * daemon-hosted one over IPC (`cortex.act`) when available, else the
+ * in-process napi Cortex (`canonicalExecuteStep`). Both paths return the
+ * engine's `ActionResult` shape with the core-emitted `ExecutionReceipt`
+ * riding on `data._cel_receipt`, so receipt handling downstream is
+ * transport-agnostic.
+ */
+async function canonicalStep(
+  cel: Cel,
+  step: { purpose: string; kind: string; action: Record<string, unknown> },
+): Promise<{ status: string; data?: unknown; message?: string }> {
+  const daemon = await daemonCortex();
+  if (daemon) {
+    const res = await daemonAct(daemon, step.action);
+    return res.success
+      ? { status: "ok", data: res.data ?? {} }
+      : { status: "err", message: res.error ?? "cortex.act failed" };
+  }
+  return cel.canonicalExecuteStep(step as Parameters<Cel["canonicalExecuteStep"]>[0]);
+}
+
 async function executeSpreadsheetAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "write_cells" | "read_cells" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
   const canonicalAction = action.action === "write_cells"
     ? {
@@ -895,7 +1001,7 @@ async function executeSpreadsheetAction(
         cell_refs: action.cell_refs,
       };
 
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose:
       action.action === "write_cells"
         ? "Write spreadsheet cells through the deterministic Numbers backend"
@@ -907,7 +1013,8 @@ async function executeSpreadsheetAction(
   if (result.status !== "ok") {
     throw new Error(result.message);
   }
-  return JSON.stringify(result.data ?? {}, null, 2);
+  const { data, receipt } = splitReceipt(result);
+  return { summary: JSON.stringify(data, null, 2), receipt };
 }
 
 /**
@@ -923,9 +1030,9 @@ async function executeSpreadsheetAction(
 async function executeNavigateAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "navigate" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: `Navigate the focused browser tab to ${action.url}`,
     kind: "deterministic",
     action: {
@@ -947,7 +1054,10 @@ async function executeNavigateAction(
   };
   const finalUrl = data.final_url ?? action.url;
   const loadMs = typeof data.load_ms === "number" ? data.load_ms : 0;
-  return `Navigated to ${action.url} (final: ${finalUrl}, ${loadMs}ms)`;
+  return {
+    summary: `Navigated to ${action.url} (final: ${finalUrl}, ${loadMs}ms)`,
+    receipt: receiptOf(result),
+  };
 }
 
 /**
@@ -958,9 +1068,9 @@ async function executeNavigateAction(
 async function executeWindowAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "window" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: action.preset ? `Window preset ${action.preset}` : `Window ${action.op ?? "op"}`,
     kind: "deterministic",
     action: {
@@ -989,11 +1099,11 @@ async function executeWindowAction(
     minimized?: boolean;
   };
   const what = action.preset ? `preset ${action.preset}` : (action.op ?? "op");
-  return (
+  const summary =
     `Window ${what} → ${Math.round(g.x ?? 0)},${Math.round(g.y ?? 0)} ` +
     `${Math.round(g.width ?? 0)}×${Math.round(g.height ?? 0)}` +
-    (g.minimized ? " (minimized)" : "")
-  );
+    (g.minimized ? " (minimized)" : "");
+  return { summary, receipt: receiptOf(result) };
 }
 
 /**
@@ -1003,9 +1113,9 @@ async function executeWindowAction(
 async function executeDialogAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "dialog" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: `Dialog ${action.op}${action.button ? ` "${action.button}"` : ""}`,
     kind: "deterministic",
     action: {
@@ -1021,9 +1131,15 @@ async function executeDialogAction(
   }
   if (action.op === "list") {
     const d = (result.data ?? {}) as { buttons?: string[]; fields?: string[] };
-    return `Dialog: buttons [${(d.buttons ?? []).join(", ")}]; fields [${(d.fields ?? []).join(" | ")}]`;
+    return {
+      summary: `Dialog: buttons [${(d.buttons ?? []).join(", ")}]; fields [${(d.fields ?? []).join(" | ")}]`,
+      receipt: receiptOf(result),
+    };
   }
-  return `Dialog ${action.op}${action.button ? ` "${action.button}"` : ""} ok`;
+  return {
+    summary: `Dialog ${action.op}${action.button ? ` "${action.button}"` : ""} ok`,
+    receipt: receiptOf(result),
+  };
 }
 
 /**
@@ -1033,9 +1149,9 @@ async function executeDialogAction(
 async function executeDockAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "dock" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: `Dock ${action.op}${action.name ? ` "${action.name}"` : ""}`,
     kind: "deterministic",
     action: {
@@ -1049,9 +1165,15 @@ async function executeDockAction(
   }
   if (action.op === "list") {
     const d = (result.data ?? {}) as { items?: string[] };
-    return `Dock items: [${(d.items ?? []).join(", ")}]`;
+    return {
+      summary: `Dock items: [${(d.items ?? []).join(", ")}]`,
+      receipt: receiptOf(result),
+    };
   }
-  return `Dock ${action.op}${action.name ? ` "${action.name}"` : ""} ok`;
+  return {
+    summary: `Dock ${action.op}${action.name ? ` "${action.name}"` : ""} ok`,
+    receipt: receiptOf(result),
+  };
 }
 
 /**
@@ -1061,9 +1183,9 @@ async function executeDockAction(
 async function executeMenuExtraAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "menu_extra" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: `MenuExtra ${action.op}${action.name ? ` "${action.name}"` : ""}`,
     kind: "deterministic",
     action: {
@@ -1077,9 +1199,15 @@ async function executeMenuExtraAction(
   }
   if (action.op === "list") {
     const d = (result.data ?? {}) as { items?: string[] };
-    return `Menu extras: [${(d.items ?? []).join(", ")}]`;
+    return {
+      summary: `Menu extras: [${(d.items ?? []).join(", ")}]`,
+      receipt: receiptOf(result),
+    };
   }
-  return `MenuExtra ${action.op}${action.name ? ` "${action.name}"` : ""} ok`;
+  return {
+    summary: `MenuExtra ${action.op}${action.name ? ` "${action.name}"` : ""} ok`,
+    receipt: receiptOf(result),
+  };
 }
 
 /**
@@ -1095,10 +1223,10 @@ async function executeMenuExtraAction(
 async function executeAdapterAction(
   cel: Cel,
   action: Extract<SingleAction, { action: "adapter_action" }>,
-): Promise<string> {
+): Promise<ActionExec> {
   await ensureCortexForCanonicalAction(cel);
   const params = (action.params ?? {}) as Record<string, unknown>;
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: `Adapter ${action.adapter}.${action.adapter_op}`,
     kind: "deterministic",
     action: {
@@ -1111,7 +1239,8 @@ async function executeAdapterAction(
   if (result.status !== "ok") {
     throw new Error(result.message);
   }
-  return JSON.stringify(result.data ?? {}, null, 2);
+  const { data, receipt } = splitReceipt(result);
+  return { summary: JSON.stringify(data, null, 2), receipt };
 }
 
 /**
@@ -1132,7 +1261,7 @@ async function executeAdapterAction(
 async function tryRouteDomViaCanonical(
   cel: Cel,
   action: SingleAction,
-): Promise<string | null> {
+): Promise<ActionExec | null> {
   if (action.action !== "ax_action" && action.action !== "set_value") {
     return null;
   }
@@ -1157,7 +1286,7 @@ async function tryRouteDomViaCanonical(
         label: null,
         role_hint: null,
       };
-  const result = await cel.canonicalExecuteStep({
+  const result = await canonicalStep(cel, {
     purpose: `${action.action} on ${action.element_id} via CDP`,
     kind: "deterministic",
     action: canonicalAction,
@@ -1165,12 +1294,13 @@ async function tryRouteDomViaCanonical(
   if (result.status !== "ok") {
     throw new Error(result.message);
   }
-  return action.action === "set_value"
+  const summary = action.action === "set_value"
     ? `Set value "${action.value}" on element ${action.element_id} (via CDP)`
     : `Performed ${action.ax_action} on element ${action.element_id} (via CDP)`;
+  return { summary, receipt: receiptOf(result) };
 }
 
-async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
+async function executeAction(cel: Cel, action: SingleAction): Promise<ActionExec> {
   if (action.action === "focus_lock") {
     const focus = await ensureFrontmost(action.app_name, action.timeout_ms);
     if (!focus.matchesTarget) {
@@ -1184,19 +1314,25 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
     const replacedSuffix = previous && previous !== action.app_name
       ? `, replaced previous lock on ${previous}`
       : "";
-    return focus.activated
-      ? `Focus locked to ${action.app_name} (activated in ${focus.elapsedMs}ms, was ${focus.previousFrontmost}${replacedSuffix})`
-      : `Focus locked to ${action.app_name} (was already frontmost${replacedSuffix})`;
+    return {
+      summary: focus.activated
+        ? `Focus locked to ${action.app_name} (activated in ${focus.elapsedMs}ms, was ${focus.previousFrontmost}${replacedSuffix})`
+        : `Focus locked to ${action.app_name} (was already frontmost${replacedSuffix})`,
+      receipt: null,
+    };
   }
   if (action.action === "focus_release") {
     const previous = focusLock?.appName ?? null;
     focusLock = null;
-    return previous ? `Focus released (was locked to ${previous})` : "Focus released (no active lock)";
+    return {
+      summary: previous ? `Focus released (was locked to ${previous})` : "Focus released (no active lock)",
+      receipt: null,
+    };
   }
   if (action.action === "cdp_eval") {
     const result = await cel.cdpEvaluate(action.expression);
     const resultStr = result === undefined || result === null ? "void" : JSON.stringify(result);
-    return `CDP eval result: ${resultStr}`;
+    return { summary: `CDP eval result: ${resultStr}`, receipt: null };
   }
   if (action.action === "navigate") {
     return executeNavigateAction(cel, action);
@@ -1250,7 +1386,10 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
       if (pid != null) {
         const bg = executeSingleBackground(cel, action, pid);
         if (bg != null) {
-          return `${bg} (focus: background → ${effectiveTarget} pid ${pid}, not activated)`;
+          return {
+            summary: `${bg} (focus: background → ${effectiveTarget} pid ${pid}, not activated)`,
+            receipt: null,
+          };
         }
       }
       // pid unresolved or no background variant → fall through to foreground.
@@ -1261,12 +1400,18 @@ async function executeAction(cel: Cel, action: SingleAction): Promise<string> {
       const result = executeSingle(cel, action);
       const source = explicitTarget ? "target_app" : "focus_lock";
       if (focus?.activated) {
-        return `${result} (focus[${source}]: activated ${focus.frontmost} in ${focus.elapsedMs}ms, was ${focus.previousFrontmost})`;
+        return {
+          summary: `${result} (focus[${source}]: activated ${focus.frontmost} in ${focus.elapsedMs}ms, was ${focus.previousFrontmost})`,
+          receipt: null,
+        };
       }
-      return `${result} (focus[${source}]: ${focus?.frontmost} already frontmost)`;
+      return {
+        summary: `${result} (focus[${source}]: ${focus?.frontmost} already frontmost)`,
+        receipt: null,
+      };
     }
   }
-  return executeSingle(cel, action);
+  return { summary: executeSingle(cel, action), receipt: null };
 }
 
 export async function handleCelAct(cel: Cel, rawArgs: unknown) {
@@ -1287,9 +1432,9 @@ export async function handleCelAct(cel: Cel, rawArgs: unknown) {
       const action = args.actions[i];
       const requestedAtMs = Date.now();
       try {
-        const result = await executeAction(cel, action);
-        results.push(result);
-        receipts.push(buildReceipt(action, requestedAtMs, "ok", result));
+        const exec = await executeAction(cel, action);
+        results.push(exec.summary);
+        receipts.push(buildReceipt(action, requestedAtMs, "ok", exec.summary, undefined, exec.receipt));
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         receipts.push(buildReceipt(action, requestedAtMs, "error", error, error));
@@ -1305,11 +1450,11 @@ export async function handleCelAct(cel: Cel, rawArgs: unknown) {
   const action = args as SingleAction;
   const requestedAtMs = Date.now();
   try {
-    const result = await executeAction(cel, action);
+    const exec = await executeAction(cel, action);
     return textResult({
       success: true,
-      result,
-      receipt: buildReceipt(action, requestedAtMs, "ok", result),
+      result: exec.summary,
+      receipt: buildReceipt(action, requestedAtMs, "ok", exec.summary, undefined, exec.receipt),
     });
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);

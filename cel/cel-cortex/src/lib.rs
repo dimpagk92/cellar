@@ -71,7 +71,7 @@ pub use adapter::{
     AdapterDriver, AdapterError, AdapterManifest, AdapterState, ContextDeclaration,
     RegisteredAdapter,
 };
-pub use cortex::{Cortex, CortexError, TargetValidation};
+pub use cortex::{clear_run_id, current_run_id, set_run_id, Cortex, CortexError, TargetValidation};
 pub use manager::CortexManager;
 pub use memory::{Memory, MemoryEntry, MemoryError, MemoryLenses};
 pub use model::{

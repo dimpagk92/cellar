@@ -34,6 +34,7 @@ pub mod cooldown;
 pub mod decision;
 pub mod error;
 pub mod gateway;
+mod receipt;
 pub mod test_support;
 pub mod traits;
 

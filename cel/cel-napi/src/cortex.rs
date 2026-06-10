@@ -89,6 +89,20 @@ pub(crate) fn get_cortex_handle() -> Option<Arc<cel_cortex::Cortex>> {
     state.cortex.clone()
 }
 
+/// Set the cortex's current run id so receipts emitted during the run group
+/// under it in the timeline. Pass `null` to clear. The MCP perceive session
+/// uses this to scope a run.
+#[napi]
+pub fn cortex_set_run_id(run_id: Option<String>) {
+    cel_cortex::set_run_id(run_id);
+}
+
+/// Clear the cortex's current run id (run ended).
+#[napi]
+pub fn cortex_clear_run_id() {
+    cel_cortex::clear_run_id();
+}
+
 /// Boot the Rust Cortex — starts the always-on 200ms perception tick loop.
 #[napi]
 pub fn boot_cortex() -> napi::Result<()> {
@@ -108,66 +122,21 @@ pub fn boot_cortex() -> napi::Result<()> {
         return Err(napi::Error::from_reason("Cortex already running"));
     }
 
-    // One-shot AX-trust check. Without this permission, every cortex tick
-    // emits the same `Accessibility tree unavailable` WARN — easy to drown
-    // in. Surfacing it once here, with the fix path, makes the failure
-    // diagnosable without grepping logs.
-    #[cfg(target_os = "macos")]
-    if !cel_accessibility::ax_is_process_trusted() {
-        tracing::warn!(
-            target: "cel_napi::cortex",
-            "macOS Accessibility permission missing for the host process. \
-             AX-element observations will be empty until granted. \
-             Fix: System Settings → Privacy & Security → Accessibility, \
-             then enable the host (Terminal / Claude Desktop / Claude Code / \
-             Cursor / etc.) and restart it. \
-             CDP browser perception and adapter-driven app truth (Numbers, \
-             Excel, …) work without AX trust."
-        );
-    }
-
-    let a11y = cel_accessibility::create_tree();
-    let display = cel_display::create_capture();
-    let network = cel_network::create_monitor();
-    let signals = cel_signals::create_signal_bus();
-    let mut merger =
-        cel_context::ContextMerger::with_all(a11y, display, network).with_signals(signals);
-    if let Ok(vision) = cel_vision::create_provider_from_env() {
-        merger = merger.with_vision(vision).with_runtime(handle.clone());
-    }
-    let mut stream_status = merger.stream_status();
-    let observer = cel_accessibility::create_tree();
-
-    // MCP server runs on the user's machine when they explicitly invoke it
-    // — opt into native input. Browser actions still route through CDP
-    // automatically when a CDP target is bound; this is the fallback for
-    // desktop apps.
-    let mut cortex = cel_cortex::Cortex::new("mcp-default".into()).with_native_input_unsafe();
-    if let Some((capture, config)) = default_audio_capture() {
-        cortex = cortex.with_audio(capture, config);
-        stream_status.audio_capture = true;
-    }
-
-    // Wire the default adapter set through the single shared registry:
-    // in-process Numbers / Notes (macOS) + the native Browser adapter, plus
-    // the process-driver discover scan for Mail / Calendar / Reminders /
-    // Messages and any user-installed adapter under `adapters/` or
-    // `~/.cellar/adapters/`. `None` = ambient CDP discovery: the browser
-    // adapter self-activates when `cel_cdp::connect_to_focused_app()` finds a
-    // target. Adding a new in-process adapter is a one-line change in
-    // `cel-adapters`, inherited by every host — no edits here.
-    cel_adapters::register_default_adapters(&mut cortex, None);
-
-    handle
-        .block_on(async { cortex.boot(merger, observer).await })
-        .map_err(|e| napi::Error::from_reason(format!("Cortex boot failed: {}", e)))?;
-
-    let cortex = Arc::new(cortex);
-    handle.block_on(async {
-        let model_handle = cortex.model();
-        let mut model = model_handle.write().await;
-        model.stream_status = stream_status;
-    });
+    // Boot the Cortex via the shared helper (cel-boot) — the single boot path
+    // shared with cel-eval and the daemon. MCP runs on the user's machine on
+    // explicit invocation, so native input is on; ambient CDP discovery binds
+    // the browser adapter when a target appears; vision + audio are wired when
+    // available. The helper does the AX-trust check + stream_status itself.
+    let cortex = handle
+        .block_on(cel_boot::boot_default_cortex(cel_boot::BootOpts {
+            id: "mcp-default".into(),
+            native_input: true,
+            cdp_client: None,
+            vision: true,
+            runtime: Some(handle.clone()),
+            audio: default_audio_capture(),
+        }))
+        .map_err(napi::Error::from_reason)?;
     state.model_handle = Some(cortex.model());
     state.cortex = Some(cortex);
     Ok(())

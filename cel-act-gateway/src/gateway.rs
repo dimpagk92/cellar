@@ -392,6 +392,12 @@ where
                 )
             }
         };
+        // Receipt-Backed Run Timeline: emit a canonical ExecutionReceipt for
+        // this governed dispatch (the gateway is the daemon's chokepoint) →
+        // run timeline file + the memory chunk below.
+        let receipt = crate::receipt::build_receipt(action, outcome);
+        crate::receipt::record_receipt(&receipt);
+
         let chunk = NewMemoryChunk {
             kind: ChunkKind::Action,
             source: ChunkSource::Gateway,
@@ -404,6 +410,7 @@ where
                 "action_args": action.action_args,
                 "outcome": serde_json::to_value(outcome)
                     .unwrap_or(Value::Null),
+                "receipt": serde_json::to_value(&receipt).unwrap_or(Value::Null),
             }),
             importance: Some(if outcome.executed() { 0.5 } else { 0.7 }),
             shareable: false,

@@ -756,6 +756,7 @@ name = "cel-act-gateway"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cel-contracts",
  "cel-memory",
  "cellar-types",
  "chrono",
@@ -814,6 +815,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "cel-boot"
+version = "0.1.0"
+dependencies = [
+ "cel-accessibility",
+ "cel-adapters",
+ "cel-audio",
+ "cel-cdp",
+ "cel-context",
+ "cel-cortex",
+ "cel-display",
+ "cel-network",
+ "cel-signals",
+ "cel-vision",
+ "tokio",
  "tracing",
 ]
 
@@ -911,7 +930,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cel-act-gateway",
+ "cel-boot",
  "cel-brief",
+ "cel-contracts",
+ "cel-cortex",
  "cel-memory",
  "cel-memory-sqlite",
  "cel-signals",
@@ -1058,6 +1080,7 @@ dependencies = [
  "cel-accessibility",
  "cel-adapters",
  "cel-audio",
+ "cel-boot",
  "cel-cdp",
  "cel-context",
  "cel-contracts",

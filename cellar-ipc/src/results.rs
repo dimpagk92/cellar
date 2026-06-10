@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod confirmation;
+pub mod cortex;
 pub mod daemon;
 pub mod gateway;
 pub mod memory;

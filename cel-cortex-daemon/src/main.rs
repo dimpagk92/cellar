@@ -71,6 +71,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&memory),
     );
 
+    // Phase A1 (cellar-daemon-cortex.md): optionally host the single live Cortex
+    // in the daemon, via the shared cel-boot helper. Gated + default OFF, so the
+    // daemon is byte-for-byte unchanged unless explicitly enabled. Native input
+    // is separately gated (off by default). Later phases drive this Cortex from
+    // the app / CLI / MCP over IPC.
+    if std::env::var("CELLAR_DAEMON_CORTEX")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        let native_input = std::env::var("CELLAR_DAEMON_NATIVE_INPUT")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        let mut opts = cel_boot::BootOpts::new("daemon");
+        opts.native_input = native_input;
+        match cel_boot::boot_default_cortex(opts).await {
+            Ok(cortex) => {
+                cel_cortex_daemon::set_daemon_cortex(cortex);
+                tracing::info!(native_input, "daemon Cortex hosted (CELLAR_DAEMON_CORTEX)");
+            }
+            Err(e) => tracing::error!(error = %e, "daemon Cortex boot failed"),
+        }
+    }
+
     let stats = daemon.memory.stats().await?;
     tracing::info!(?stats, "memory subsystem wired");
     let initial_rules = daemon.rules_store.list_rules().len();

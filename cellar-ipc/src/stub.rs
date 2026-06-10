@@ -115,6 +115,7 @@ impl Handler for StubHandler {
             memory_mb: 0.0,
             cpu_pct: 0.0,
             memory: None,
+            cortex_running: false,
         })
     }
 

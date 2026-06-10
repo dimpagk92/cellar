@@ -30,6 +30,11 @@ pub struct DaemonStatusResult {
     /// cleanly; clients should treat the absence as "unknown".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryCorpusStats>,
+    /// Whether the daemon is currently hosting a live Cortex (perception +
+    /// execution). `false` on daemons that don't host one. Optional/default so
+    /// older daemons (and clients) deserialise cleanly.
+    #[serde(default)]
+    pub cortex_running: bool,
 }
 
 /// Rule count breakdown.

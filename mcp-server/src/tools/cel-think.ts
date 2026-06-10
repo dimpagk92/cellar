@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { Cel, PlannerStepRecord, PlannedAction, ScreenContext } from "@cellar/agent/runtime";
 import { textResult, errorResult } from "./shared.js";
 import { ensureCdpChrome } from "../server.js";
+import { daemonCortexKnown } from "../helpers/daemon.js";
 
 export const celThinkSchema = z.discriminatedUnion("mode", [
   // --- plan ---
@@ -412,6 +413,17 @@ export async function handleCelThink(cel: Cel, args: Input) {
         // CanonicalGoalRunner::run. No legacy flags, no per-invocation
         // routing decisions — the canonical agent is one shape for
         // every caller. See docs/canonical-agent-plan.md.
+        if (daemonCortexKnown() !== null) {
+          // run_goal drives the in-process canonical runner against the napi
+          // Cortex; booting one alongside the daemon-hosted Cortex would
+          // violate the two-Cortex guard. Goal runs proxy to the daemon's
+          // agent in a later phase (`agent.run`).
+          return errorResult(
+            "run_goal is not available while the daemon hosts the live Cortex. " +
+              "Drive actions via cel_act (proxied to the daemon), or run without " +
+              "CELLAR_DAEMON_CORTEX.",
+          );
+        }
         if (!cel.isCortexRunning()) {
           cel.bootCortex();
         }

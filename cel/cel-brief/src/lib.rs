@@ -81,8 +81,8 @@ pub use receipt::{
 };
 pub use source::{Contribution, ContributionContent, Source, SourceError};
 pub use sources::{
-    HistoryEntry, HistorySource, HistoryStore, SystemPromptSource, ToolCatalogSource,
-    UserMessageSource,
+    HistoryEntry, HistorySource, HistoryStore, ReceiptSource, SystemPromptSource,
+    ToolCatalogSource, UserMessageSource,
 };
 #[cfg(feature = "memory")]
 pub use sources::{MemoryQueryStrategy, MemorySource};

@@ -252,7 +252,7 @@ fn action_requires_native_input(action: &PlannedAction) -> bool {
     }
 }
 
-fn action_type_str(action: &PlannedAction) -> &str {
+pub(crate) fn action_type_str(action: &PlannedAction) -> &str {
     match action {
         PlannedAction::Click { .. } => "click",
         PlannedAction::Type { .. } => "type",
@@ -602,7 +602,39 @@ impl Cortex {
     ///
     /// This is the first migration slice: native/non-browser actions are owned
     /// by Rust. Adapter-dispatched execution can be layered in afterward.
+    /// Public dispatch entry. Runs the action, then stamps a canonical
+    /// [`cel_contracts::ExecutionReceipt`] onto the result when one isn't
+    /// already present: the CDP path (`try_cdp_dispatch`) stamps its own;
+    /// native / AX / adapter / focus dispatches get theirs here. Control and
+    /// data actions (Wait, Done, Extract, Batch, …) are not device dispatches
+    /// and carry no receipt. Additive: the receipt rides in `ActionResult.data`
+    /// under `_cel_receipt` (see `super::receipt`).
     pub async fn execute(
+        &self,
+        action: &PlannedAction,
+        context: &ScreenContext,
+    ) -> Result<crate::adapter::ActionResult, CortexError> {
+        let requested_at_ms = super::receipt::now_ms();
+        let result = self.execute_inner(action, context).await?;
+        if super::receipt::has_receipt(&result) {
+            return Ok(result);
+        }
+        let Some(route) = super::receipt::native_route_for(action) else {
+            return Ok(result);
+        };
+        let completed_at_ms = super::receipt::now_ms();
+        let receipt = super::receipt::build_native_receipt(
+            action,
+            route,
+            requested_at_ms,
+            completed_at_ms,
+            &result,
+        );
+        super::receipt::record_receipt(&receipt);
+        Ok(super::receipt::attach_receipt(result, receipt))
+    }
+
+    async fn execute_inner(
         &self,
         action: &PlannedAction,
         context: &ScreenContext,

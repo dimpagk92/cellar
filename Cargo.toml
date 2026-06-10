@@ -20,6 +20,7 @@ members = [
     "cel/cel-cortex",
     "cel/cel-adapter-sdk",
     "cel/cel-adapters",
+    "cel/cel-boot",
     "cel/cel-goal-runner",
     "cel/cel-memory",
     "cel/cel-memory-sqlite",
@@ -89,6 +90,7 @@ cel-planner = { path = "cel/cel-planner" }
 cel-cortex = { path = "cel/cel-cortex" }
 cel-adapter-sdk = { path = "cel/cel-adapter-sdk" }
 cel-adapters = { path = "cel/cel-adapters" }
+cel-boot = { path = "cel/cel-boot" }
 cel-goal-runner = { path = "cel/cel-goal-runner" }
 cel-cdp = { path = "cel/cel-cdp" }
 cel-memory = { path = "cel/cel-memory" }

@@ -19,15 +19,16 @@ use async_trait::async_trait;
 use cellar_ipc::error::{IpcError, IpcResult};
 use cellar_ipc::handler::FrameSink;
 use cellar_ipc::params::{
-    agent as agent_params, confirmation as cf_params, events as ev_params, fires as fi_params,
-    memory as mem_params, rules as rules_params, system, watchlists as wl_params,
-    webhooks as wh_params,
+    agent as agent_params, confirmation as cf_params, cortex as cortex_params, events as ev_params,
+    fires as fi_params, memory as mem_params, rules as rules_params, system,
+    watchlists as wl_params, webhooks as wh_params,
 };
 use cellar_ipc::results::agent::{
     AgentMessage, AgentMessageResult, AgentRunResult, AgentSessionMetadata,
     AgentSessionsCreateResult, AgentSessionsGetResult, AgentSessionsListResult,
 };
 use cellar_ipc::results::confirmation::{ConfirmationListPendingResult, ConfirmationResolveResult};
+use cellar_ipc::results::cortex::{CortexActResult, CortexPerceiveReadResult, CortexSeeResult};
 use cellar_ipc::results::daemon::{
     DaemonStatusResult, MemoryCorpusStats, RuleStats, WatchlistStats,
 };
@@ -591,7 +592,84 @@ impl Handler for DaemonIpcHandler {
             memory_mb,
             cpu_pct,
             memory: memory_corpus,
+            cortex_running: crate::cortex_running(),
         })
+    }
+
+    // ───── cortex.* ─────
+    //
+    // Drive the daemon-hosted Cortex (Phase B of `cellar-daemon-cortex.md`).
+    // Every method returns the typed `CortexUnavailable` error when the
+    // daemon was started without `CELLAR_DAEMON_CORTEX`.
+
+    async fn cortex_see(&self) -> IpcResult<CortexSeeResult> {
+        let cortex = crate::daemon_cortex().ok_or(IpcError::CortexUnavailable("cortex.see"))?;
+        let context = {
+            let model = cortex.model();
+            let guard = model.read().await;
+            guard.current_context.clone()
+        };
+        let context = serde_json::to_value(&context)
+            .map_err(|e| IpcError::Internal(format!("context serialization failed: {e}")))?;
+        Ok(CortexSeeResult { context })
+    }
+
+    async fn cortex_act(
+        &self,
+        params: cortex_params::CortexActParams,
+    ) -> IpcResult<CortexActResult> {
+        let cortex = crate::daemon_cortex().ok_or(IpcError::CortexUnavailable("cortex.act"))?;
+        let action: cel_contracts::PlannedAction = serde_json::from_value(params.action)
+            .map_err(|e| IpcError::InvalidParams(format!("not a canonical action: {e}")))?;
+        // Execute against the cortex's current fused context — same shape the
+        // in-process canonical executor uses. The core-emitted ExecutionReceipt
+        // rides back on `data._cel_receipt`.
+        let context = {
+            let model = cortex.model();
+            let guard = model.read().await;
+            guard.current_context.clone()
+        };
+        let result = cortex
+            .execute(&action, &context)
+            .await
+            .map_err(|e| IpcError::Internal(format!("cortex execute failed: {e}")))?;
+        Ok(CortexActResult {
+            success: result.success,
+            error: result.error,
+            data: result.data,
+        })
+    }
+
+    async fn cortex_perceive_start(
+        &self,
+        params: cortex_params::CortexPerceiveStartParams,
+    ) -> IpcResult<OkResult> {
+        if crate::daemon_cortex().is_none() {
+            return Err(IpcError::CortexUnavailable("cortex.perceive.start"));
+        }
+        cel_cortex::set_run_id(Some(params.run_id));
+        Ok(OkResult {})
+    }
+
+    async fn cortex_perceive_read(&self) -> IpcResult<CortexPerceiveReadResult> {
+        let cortex =
+            crate::daemon_cortex().ok_or(IpcError::CortexUnavailable("cortex.perceive.read"))?;
+        let model = {
+            let handle = cortex.model();
+            let guard = handle.read().await;
+            guard.clone()
+        };
+        let model = serde_json::to_value(&model)
+            .map_err(|e| IpcError::Internal(format!("model serialization failed: {e}")))?;
+        Ok(CortexPerceiveReadResult { model })
+    }
+
+    async fn cortex_perceive_stop(&self) -> IpcResult<OkResult> {
+        if crate::daemon_cortex().is_none() {
+            return Err(IpcError::CortexUnavailable("cortex.perceive.stop"));
+        }
+        cel_cortex::clear_run_id();
+        Ok(OkResult {})
     }
 
     // ───── rules.* ─────
@@ -2009,6 +2087,42 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, IpcError::WatchlistNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn cortex_methods_without_hosted_cortex_yield_typed_error() {
+        // The lib test binary never sets the process-global daemon cortex
+        // (the hosted-cortex happy path lives in tests/cortex_ipc.rs, its own
+        // process), so every cortex.* method must return CortexUnavailable.
+        let h = handler();
+        assert!(matches!(
+            h.cortex_see().await.unwrap_err(),
+            IpcError::CortexUnavailable(_)
+        ));
+        assert!(matches!(
+            h.cortex_act(cellar_ipc::params::cortex::CortexActParams {
+                action: json!({"type": "wait", "ms": 1}),
+            })
+            .await
+            .unwrap_err(),
+            IpcError::CortexUnavailable(_)
+        ));
+        assert!(matches!(
+            h.cortex_perceive_start(cellar_ipc::params::cortex::CortexPerceiveStartParams {
+                run_id: "r".into(),
+            })
+            .await
+            .unwrap_err(),
+            IpcError::CortexUnavailable(_)
+        ));
+        assert!(matches!(
+            h.cortex_perceive_read().await.unwrap_err(),
+            IpcError::CortexUnavailable(_)
+        ));
+        assert!(matches!(
+            h.cortex_perceive_stop().await.unwrap_err(),
+            IpcError::CortexUnavailable(_)
+        ));
     }
 
     #[tokio::test]

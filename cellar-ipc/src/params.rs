@@ -9,6 +9,7 @@
 pub mod agent;
 pub mod agent_actions;
 pub mod confirmation;
+pub mod cortex;
 pub mod daemon;
 pub mod events;
 pub mod fires;

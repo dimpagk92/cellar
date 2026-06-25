@@ -17,13 +17,17 @@ built on these contracts.
 
 ## OSS Crates
 
-| Crate | Role | Start here |
-|---|---|---|
-| `cel-context` | Canonical `ContextElement` / `ScreenContext` snapshot model and merge mechanics | [docs/concepts/context.md](docs/concepts/context.md) |
-| `cel-memory` | Durable memory trait, value types, sessions, scopes, write hooks | [docs/concepts/memory.md](docs/concepts/memory.md) |
-| `cel-memory-sqlite` | Local-first SQLite + vector + FTS backend for `cel-memory` | [docs/concepts/memory.md](docs/concepts/memory.md) |
-| `cel-brief` | Per-turn model briefing, budgeting, governance, and `BriefReceipt` | [docs/concepts/brief.md](docs/concepts/brief.md) |
-| `cel-contracts` | Shared action, planning, and execution receipt contracts used at runtime boundaries | [docs/concepts/receipts.md](docs/concepts/receipts.md) |
+Each crate is published on [crates.io](https://crates.io/) and maintained in a
+standalone repository. This workspace (`cellar-oss`) mirrors them for integrated
+examples and shared docs.
+
+| Crate | Repository | Role | Start here |
+|---|---|---|---|
+| [`cel-context`](https://github.com/dimpagk92/cel-context) | [crates.io](https://crates.io/crates/cel-context) | `ContextElement` / `ContextSnapshot` model and merge mechanics | [docs/concepts/context.md](docs/concepts/context.md) |
+| [`cel-memory`](https://github.com/dimpagk92/cel-memory) | [crates.io](https://crates.io/crates/cel-memory) | Memory trait, sessions, scopes, write hooks | [docs/concepts/memory.md](docs/concepts/memory.md) · [BACKENDS.md](https://github.com/dimpagk92/cel-memory/blob/main/BACKENDS.md) |
+| [`cel-memory-sqlite`](https://github.com/dimpagk92/cel-memory-sqlite) | [crates.io](https://crates.io/crates/cel-memory-sqlite) | Local SQLite + vector + FTS backend | [docs/concepts/memory.md](docs/concepts/memory.md) |
+| [`cel-brief`](https://github.com/dimpagk92/cel-brief) | [crates.io](https://crates.io/crates/cel-brief) | Brief assembly, budgeting, governance, receipts | [docs/concepts/brief.md](docs/concepts/brief.md) |
+| [`cel-contracts`](https://github.com/dimpagk92/cel-contracts) | [crates.io](https://crates.io/crates/cel-contracts) | Action, planning, and execution receipt schemas | [docs/concepts/receipts.md](docs/concepts/receipts.md) |
 
 See [docs/crates.md](docs/crates.md) for the full crate matrix.
 
@@ -46,13 +50,21 @@ See [docs/crates.md](docs/crates.md) for the full crate matrix.
 
 ## Quickstart
 
-Use the OSS contracts without the full runtime:
+Use the OSS contracts without the full runtime. Clone a standalone crate repo, or
+run from this workspace:
 
 ```sh
+# standalone repo (from repo root)
+cargo run --example context_snapshot -- --json
+cargo run --example basic
+cargo run --example standalone
+cargo run --features memory --example with_memory
+
+# this workspace
 cargo run -p cel-context --example context_snapshot -- --json
 cargo run -p cel-memory --example basic
 cargo run -p cel-memory-sqlite --example basic
-cargo run -p cel-brief --example no_cellar
+cargo run -p cel-brief --example standalone
 cargo run -p cel-brief --features memory --example with_memory
 ```
 
@@ -62,7 +74,7 @@ For a guided path, read [docs/quickstart.md](docs/quickstart.md).
 
 The top-level examples are organized by job-to-be-done:
 
-- [examples/merge-context](examples/merge-context) — emit or capture multiple sources into one `ScreenContext`.
+- [examples/merge-context](examples/merge-context) — emit or capture multiple sources into one `ContextSnapshot`.
 - [examples/memory-provider](examples/memory-provider) — store and retrieve memory through the `MemoryProvider` trait.
 - [examples/build-brief](examples/build-brief) — build a governed prompt bundle and inspect its receipt.
 - [examples/receipt-inspection](examples/receipt-inspection) — understand action and brief receipts.

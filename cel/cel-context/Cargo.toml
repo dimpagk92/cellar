@@ -3,22 +3,12 @@ name = "cel-context"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CEL unified context API — merges all five streams into a structured world model"
+repository.workspace = true
+description = "Portable context snapshots for AI agents. Normalize any stream into reusable elements and point-in-time snapshots."
+keywords = ["ai", "agent", "context", "ui", "automation"]
+categories = ["data-structures", "asynchronous"]
+readme = "README.md"
 
 [dependencies]
-cel-display = { workspace = true }
-cel-input = { workspace = true }
-cel-accessibility = { workspace = true }
-cel-vision = { workspace = true }
-cel-ocr = { workspace = true }
-cel-network = { workspace = true }
-cel-signals = { workspace = true }
-async-trait = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

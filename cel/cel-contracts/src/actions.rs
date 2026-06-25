@@ -1,6 +1,6 @@
-//! Action contract — what a planner can ask the runtime to do.
+//! Action contract — what a planner can ask a runtime to do.
 //!
-//! Lives at the cortex/planner boundary so neither side has to depend on the
+//! Lives at the planner/runtime boundary so neither side has to depend on the
 //! other to talk about actions.
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -22,9 +22,9 @@ where
 /// What the runtime should observe after an action lands to confirm the
 /// side-effect actually materialised.
 ///
-/// Cortex polls the page (via CDP `Runtime.evaluate`) until the
-/// expectation holds or the timeout fires. The result is reported back
-/// in the action's `ActionResult` so the planner sees not just
+/// A runtime can poll the page (for example via CDP `Runtime.evaluate`) until
+/// the expectation holds or the timeout fires. The result is reported back in
+/// the action result so the planner sees not just
 /// "dispatched ok" but "dispatched ok AND observed the expected change".
 ///
 /// Closes the "click reported ok but page didn't react" gap:
@@ -103,20 +103,18 @@ fn default_effect_timeout_ms() -> u64 {
 
 /// How a native-input action delivers its event relative to app focus.
 ///
-/// `Foreground` is the historical CEL behavior: the dispatcher brings the
-/// target app to the front (`activate_app` / `ensure_target_app_focus`) and
-/// then posts a session-wide CGEvent at whatever is frontmost. Robust, but
-/// it steals the user's focus and is the root cause of the focus-sensitive
-/// `hybrid`-suite constraint.
+/// `Foreground` means the dispatcher brings the target app to the front and
+/// then posts a session-wide input event at whatever is frontmost. Robust, but
+/// it steals the user's focus.
 ///
 /// `Background` posts the event directly to the target process via
-/// `CGEventPostToPid` without activating it (see `cel_input::background`),
-/// so the user's active window keeps focus. Not every macOS app honors
+/// `CGEventPostToPid` without activating it, so the user's active window keeps
+/// focus. Not every macOS app honors
 /// background-delivered events, so the dispatcher falls back to `Foreground`
 /// when no target PID resolves or the background post is rejected.
 ///
 /// Defaults to `Foreground` so existing plans and serialized payloads are
-/// unchanged. WS1 of the Peekaboo-parity plan.
+/// unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
@@ -201,7 +199,7 @@ pub enum PlannedAction {
     Batch {
         actions: Vec<PlannedAction>,
     },
-    /// Natural language action — CEL resolves the instruction to the best matching element.
+    /// Natural language action — a runtime resolves the instruction to the best matching element.
     Act {
         instruction: String,
     },
@@ -223,7 +221,7 @@ pub enum PlannedAction {
     AxAction {
         /// AX hash id from the same perception snapshot that produced
         /// the plan. May be missing (empty / null) when the planner
-        /// only knows the visible label — the cortex falls back to
+        /// only knows the visible label — the runtime can fall back to
         /// `label` + `role_hint` resolution in that case.
         ///
         /// Lenient deserialization accepts `null` from the LLM (some
@@ -239,7 +237,7 @@ pub enum PlannedAction {
         action: String,
         /// Label hint for fallback element resolution. AX IDs are hashes
         /// that include bounds + depth and therefore change whenever the
-        /// UI mutates between plan time and dispatch time. If the cortex
+        /// UI mutates between plan time and dispatch time. If the runtime
         /// can't find `target_id` in the live AX tree (or `target_id`
         /// is missing entirely), it falls back to searching for the
         /// first visible element whose role matches `role_hint` (if
@@ -295,10 +293,9 @@ pub enum PlannedAction {
         /// JavaScript expression to evaluate in the page context.
         expression: String,
     },
-    /// Canonical navigation action. The cortex routes this through the
-    /// browser adapter (Playwright) when one is registered + active, and
-    /// otherwise falls back to in-cortex `cel_cdp::Page.navigate` plus a
-    /// `document.readyState` poll keyed by `wait_until`.
+    /// Canonical navigation action. A runtime may route this through a browser
+    /// adapter, CDP, WebDriver, or another navigation backend and then wait
+    /// according to `wait_until`.
     ///
     /// All three control fields are optional with sensible defaults so
     /// the legacy `{"type":"navigate","url":"..."}` payload still parses
@@ -314,11 +311,8 @@ pub enum PlannedAction {
         /// Upper bound for the lifecycle wait. Default: 30_000 ms.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_ms: Option<u64>,
-        /// When true (default), the cortex fallback runs a best-effort
-        /// cookie-banner / overlay-dismiss script after the page loads.
-        /// The TS browser adapter does this unconditionally inside its
-        /// own navigate handler (process-driver.ts) so this flag only
-        /// affects the in-cortex fallback path.
+        /// When true (default), the runtime may run a best-effort cookie-banner
+        /// / overlay-dismiss script after the page loads.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dismiss_overlays: Option<bool>,
     },
@@ -420,10 +414,10 @@ pub enum PlannedAction {
         #[serde(alias = "refs", alias = "cells", alias = "addresses")]
         cell_refs: Vec<String>,
     },
-    /// Native window management (WS2) — move/resize/minimize/maximize/focus a
-    /// macOS window resolved by `app` + `window_index`. The cortex routes this
-    /// to `cel_accessibility::perform_window_op` and reads geometry back into
-    /// the receipt. `op` is one of: `"move"`, `"resize"`, `"set_bounds"`,
+    /// Native window management — move/resize/minimize/maximize/focus a macOS
+    /// window resolved by `app` + `window_index`. A runtime executes the
+    /// operation and reads geometry back into the receipt. `op` is one of:
+    /// `"move"`, `"resize"`, `"set_bounds"`,
     /// `"minimize"`, `"unminimize"`, `"maximize"`, `"focus"`. A `preset`
     /// (WS2.3 tiling, e.g. `"left_half"`) overrides `op` + geometry when set.
     Window {
@@ -452,7 +446,7 @@ pub enum PlannedAction {
     },
     /// Native dialog / sheet driver (WS5) — list, click a button by title, set
     /// a text field, or dismiss the frontmost macOS Open/Save/Print sheet or
-    /// alert. The cortex resolves the dialog's controls via the accessibility
+    /// alert. The runtime resolves the dialog's controls via the accessibility
     /// tree. `op` is one of: `"list"`, `"click"`, `"set_field"`, `"dismiss"`.
     Dialog {
         op: String,
@@ -512,7 +506,7 @@ fn default_parse_as() -> String {
 
 impl PlannedAction {
     /// Target element IDs this action depends on, if any. Used by the runner
-    /// to pre-validate that planned elements still exist in the fresh Cortex
+    /// to pre-validate that planned elements still exist in the fresh runtime
     /// context before dispatch — missing targets trigger a replan instead of
     /// silent misfire.
     ///
@@ -839,8 +833,8 @@ mod target_ids_tests {
         // (`invalid type: null, expected a string`), killing the
         // entire turn before the label-fallback dispatcher could
         // run. Lenient deserialization converts null to an empty
-        // string; the cortex dispatcher already handles empty
-        // target_id by going straight to label resolution.
+        // string; runtimes can handle empty target_id by going straight to
+        // label resolution.
         let raw = r#"{
             "type": "ax_action",
             "target_id": null,

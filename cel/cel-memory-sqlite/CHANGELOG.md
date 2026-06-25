@@ -5,8 +5,8 @@ All notable changes to `cel-memory-sqlite` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Pre-`0.1.0` versions develop in-workspace as part of the Cellar project; the
-first published release on crates.io will be `0.1.0`.
+Pre-`0.1.0` versions developed in-workspace; the first published crates.io
+release is `0.1.0`.
 
 ## [Unreleased]
 
@@ -15,7 +15,7 @@ first published release on crates.io will be `0.1.0`.
 ### Added
 - `SqliteMemoryProvider` — SQLite + [`sqlite-vec`](https://github.com/asg017/sqlite-vec)
   implementation of `cel_memory::MemoryProvider`. One file on disk, no
-  separate vector daemon. Writes, gets, deletes, sessions, pinning,
+  separate vector service. Writes, gets, deletes, sessions, pinning,
   purge, stats, aging sweep, batched writes, exports, importance updates,
   superseding, access logging — all real.
 - `Embedder` trait + `MockEmbedder` (always available, deterministic
@@ -35,6 +35,5 @@ first published release on crates.io will be `0.1.0`.
 ### Notes
 - Imports only `cel-memory` from the workspace — verified by
   `scripts/lint-guard-extraction-crates.sh` (added 2026-05-23).
-- Dev-deps on daemon-only crates are deliberately absent here, so the crate
-  stays standalone-testable. Daemon-level integration tests that need them
-  live in the downstream Cellar daemon.
+- Runtime-only dev-deps are deliberately absent here, so the crate stays
+  standalone-testable.

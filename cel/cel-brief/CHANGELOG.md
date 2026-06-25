@@ -5,8 +5,8 @@ All notable changes to `cel-brief` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Pre-`0.1.0` versions develop in-workspace as part of the Cellar project; the
-first published release on crates.io will be `0.1.0`.
+Pre-`0.1.0` versions developed in-workspace; the first published crates.io
+release is `0.1.0`.
 
 ## [Unreleased]
 
@@ -23,12 +23,12 @@ first published release on crates.io will be `0.1.0`.
   `apply_budget` helper that honours per-priority floors with a borrow pass
   ("higher priority can borrow from a lower floor when over budget").
 - `Governance` trait + `NoOpGovernance` default; `GovernanceVerdict` with
-  `Allow` / `Redacted` / `Rejected` arms. A concrete rules-engine
-  implementation lives in the downstream Cellar daemon, not in this crate.
+  `Allow` / `Redacted` / `Rejected` arms. Concrete policy implementations live
+  downstream, not in this crate.
 - Full `BriefReceipt` populated by the builder: per-source `SourceStats`,
   `DroppedContribution` records, redactions, and per-phase `Timings`
   (`fanout`, `tokenize`, `prune`, `governance`, `total`).
-- `examples/no_cellar.rs` rewritten on top of `BriefBuilder` with four
+- `examples/standalone.rs` rewritten on top of `BriefBuilder` with four
   pluggable sources (system prompt, user message, fake memory, tool
   catalog), a tight budget that exercises pruning, and a printed receipt +
   full Brief JSON. Imports nothing from outside `cel-brief` (per OSS proof
@@ -47,7 +47,7 @@ first published release on crates.io will be `0.1.0`.
   `receipt`. Bodies remain stubs — Phase 1+ implementation landed in the
   releases above.
 - `BriefError` placeholder type with `Result` alias.
-- `examples/no_cellar.rs` placeholder. Builds end-to-end once Phase 2
+- `examples/standalone.rs` placeholder. Builds end-to-end once Phase 2
   (`BriefBuilder` + default `ImportanceFirst` pruning) lands.
 - `memory` feature — opt-in dependency on `cel-memory` (the trait crate
   only; `cel-memory-sqlite` stays out of `cel-brief`'s graph).

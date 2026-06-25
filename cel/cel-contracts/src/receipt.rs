@@ -1,10 +1,9 @@
 //! Execution receipt — the canonical, core-emitted record of one dispatched
 //! action: `intent → dispatch route → observed effect → evidence`.
 //!
-//! This is the spine of CEL's trust loop. The cortex dispatch path builds an
-//! [`ExecutionReceipt`] for every canonical action it executes; surfaces
-//! (MCP / CLI / IPC / N-API) propagate it unflattened; the run timeline
-//! appends it; the next brief + memory consume it.
+//! A runtime can emit an [`ExecutionReceipt`] for every action it dispatches.
+//! Surfaces can propagate it unflattened, timelines can append it, and later
+//! prompts or memory systems can consume it.
 //!
 //! Before this type, the only "receipt" with route/verification detail was the
 //! MCP `ActionReceipt`, *reconstructed at the surface* from a static switch on
@@ -13,7 +12,7 @@
 //! observed-effect verdict are recorded by the code that actually did the work.
 //!
 //! **Contracts policy:** types + serde only. Id / timestamp generation is a
-//! runtime concern and lives at the emission site (cortex), not here.
+//! runtime concern and lives at the emission site, not here.
 
 use crate::actions::EffectExpectation;
 use crate::view::EvidenceRef;
@@ -120,9 +119,9 @@ pub enum ReceiptStatus {
 
 /// Canonical, core-emitted record of one dispatched action.
 ///
-/// One receipt per canonical action the cortex executes. Carries the intent
-/// (action kind + target), the ACTUAL dispatch route, the observed effect,
-/// evidence references, timing, and terminal status.
+/// One receipt per action the runtime executes. Carries the intent (action kind
+/// + target), the actual dispatch route, the observed effect, evidence
+/// references, timing, and terminal status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionReceipt {
     /// Process-unique id, assigned at the emission site.

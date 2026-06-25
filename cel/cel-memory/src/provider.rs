@@ -1,13 +1,11 @@
 //! The [`MemoryProvider`] trait — the durable cross-turn memory contract.
 //!
 //! This is the single trait every memory backend implements and every caller
-//! depends on. In Cellar that means the embedded agent runtime, the NL rule
-//! compiler, the `cel_act` gateway, the rule-matcher post-fire hook, the
-//! Activity / Memory tabs, and the MCP `cel_remember` / `cel_recall` /
-//! `cel_forget` handlers — but the trait itself is runtime-agnostic.
+//! depends on. Agents, CLIs, servers, desktop apps, and evaluation harnesses can
+//! compile against this trait while swapping persistence backends underneath.
 //! [`crate::BasicMemoryProvider`] is the in-crate reference backend; a full
-//! storage backend (e.g. the `cel-memory-sqlite` crate) drops in later behind
-//! the same surface without caller churn.
+//! storage backend (e.g. the `cel-memory-sqlite` crate) drops in behind the same
+//! surface without caller churn.
 
 use async_trait::async_trait;
 use chrono::NaiveDate;

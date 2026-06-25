@@ -13,10 +13,9 @@
 //!   [`crate::error::BriefError::Rejected`] to the caller.
 //!
 //! `cel-brief` does **not** ship a rules implementation. The default
-//! [`NoOpGovernance`] always returns `Allow`. Concrete governance — e.g. a
-//! rules-engine implementation wired to a downstream runtime's policy store —
-//! lives in that runtime (such as the Cellar daemon), which keeps the brief
-//! layer free of any runtime-specific dependencies.
+//! [`NoOpGovernance`] always returns `Allow`. Concrete governance can live in a
+//! downstream runtime, service, or application, keeping this crate free of
+//! runtime-specific dependencies.
 
 use async_trait::async_trait;
 use thiserror::Error;

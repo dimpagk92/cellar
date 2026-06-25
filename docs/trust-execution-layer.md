@@ -1,12 +1,12 @@
-# CEL as the Trust and Execution Layer
+# CEL as the Context and Trust Layer
 
 Date: May 14, 2026
 
 ## Thesis
 
-CEL is the trust and execution layer for AI-operated computers. Agents bring intent and planning; CEL turns that intent into reliable device observations, routed actions, verification signals, and receipts that can be audited later.
+CEL is the context and trust layer for AI-operated software. Agents bring intent and planning; CEL defines the context, memory, brief, transport, and receipt contracts that let a runtime turn intent into reliable observations, governed actions, verification signals, and audit evidence.
 
-The durable platform value is not one planner. It is the substrate that lets many planners act on a real computer without guessing whether the screen, browser, app model, or input route can be trusted.
+The durable OSS value is not one planner and not a proprietary live engine. It is the data plane that lets many planners speak the same language about what was seen, what persisted, what the model received, what was dispatched, and what evidence remains. The commercial Cellar/Dilipod runtime operates that data plane continuously through cortex, policy, monitoring, and compliance workflows.
 
 ## Trust Loop
 
@@ -17,20 +17,27 @@ intent -> observation -> dispatch -> observed effect -> evidence -> receipt
 ```
 
 - **Intent**: the agent states what it is trying to do.
-- **Observation**: CEL provides fused context from AX, CDP, screenshots, signals, and adapters.
-- **Dispatch**: CEL routes the action through the safest available substrate: adapter, CDP, AX, or native input.
-- **Observed effect**: CEL or the agent re-checks the state after the action.
+- **Observation**: CEL-shaped context provides fused data from AX, CDP, screenshots, signals, adapters, logs, and other sources.
+- **Dispatch**: a runtime routes the action through the safest available substrate: adapter, CDP, AX, native input, or another implementation path.
+- **Observed effect**: the runtime or agent re-checks the state after the action.
 - **Evidence**: adapter readback, CDP/AX state, screenshot, or Cortex diff supports the claim.
 - **Receipt**: CEL returns a structured record of what was dispatched and what verification is still required.
 
-## What CEL Owns
+## What The OSS Contracts Own
 
-- Context fusion across AX, CDP, vision, signals, network, audio, and adapters.
+- Context snapshot and merge contracts (`ContextElement`, `ScreenContext`, source metadata, confidence, references).
+- Durable memory contracts (`cel-memory`) and local backend (`cel-memory-sqlite`).
+- Governed model briefing (`cel-brief`) and brief receipts.
+- Transport and action/receipt schemas for MCP, CLI, SDK, and N-API consumers.
+- The distinction between dispatch proof, model-input proof, and completion proof.
+
+## What The Commercial Runtime Owns
+
+- Continuous cortex operation: freshness, diffs, anomalies, source prioritization, and live mental models.
 - Runtime capability reporting, including whether a trusted input/perception path is actually available.
-- Adapter lifecycle, adapter routing, and app-specific structured truth.
-- Canonical action execution and dispatch path selection.
-- Action receipts: dispatch path, timing, verification requirement, and evidence hints.
-- Stable MCP, CLI, SDK, and N-API surfaces that any agent can drive.
+- Adapter lifecycle, adapter routing, and app-specific structured truth in production sessions.
+- Canonical action execution, dispatch path selection, and policy enforcement.
+- Audit timelines, retention, alerting, compliance exports, and governance workflows.
 
 ## What Agents Own
 

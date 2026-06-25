@@ -1,14 +1,13 @@
-//! Minimal `cel-brief` example using zero other Cellar crates.
+//! Minimal `cel-brief` example using only generic in-file sources.
 //!
-//! Wires the real Phase 2 [`cel_brief::BriefBuilder`] against four pluggable
-//! sources, applies a token budget tight enough to force pruning, and prints
-//! the assembled [`cel_brief::Brief`] plus the full [`cel_brief::BriefReceipt`].
+//! Wires the real [`cel_brief::BriefBuilder`] against four pluggable sources,
+//! applies a token budget tight enough to force pruning, and prints the
+//! assembled [`cel_brief::Brief`] plus the full [`cel_brief::BriefReceipt`].
 //!
-//! This file exists as the OSS-pluggability proof: if it ever needs to import
-//! something from `cel-cortex`, `cel-context`, or any other Cellar crate, the
-//! abstraction has leaked.
+//! This file exists as a pluggability proof: prompt assembly should work with
+//! any source that implements the `Source` trait.
 //!
-//! Run with: `cargo run -p cel-brief --example no_cellar`.
+//! Run with: `cargo run -p cel-brief --example standalone`.
 
 use std::sync::Arc;
 
@@ -66,9 +65,9 @@ impl Source for UserMessageEcho {
     }
 }
 
-/// Stand-in "memory" source — emits a handful of fake recollections with
-/// varying importance scores. Demonstrates that the builder's pruning kicks
-/// in when the budget is tight.
+/// Stand-in memory source — emits fake recollections with varying importance
+/// scores. Demonstrates that the builder prunes lower-value inputs when the
+/// budget is tight.
 struct FakeMemory;
 
 #[async_trait]
@@ -88,10 +87,7 @@ impl Source for FakeMemory {
                 "Last week's incident summary: deploy stuck on migration 119.",
                 0.7,
             ),
-            (
-                "Mentioned cellar-app v1 in conversation on 2026-05-22.",
-                0.5,
-            ),
+            ("Prefers deployment summaries before detailed logs.", 0.5),
             ("Owns a mechanical keyboard.", 0.2),
         ];
         Ok(entries
@@ -147,16 +143,14 @@ impl Source for ToolCatalog {
 async fn main() {
     let ctx = BriefContext::new(TokenBudget::default())
         .with_turn(1)
-        .with_goal("ship cel-brief phase 2")
-        .with_user_message("Hello cel-brief — what do you remember about me?");
+        .with_goal("prepare a deployment status reply")
+        .with_user_message("What should I know before replying to the deploy thread?");
 
-    // Tight budget so pruning actually engages — see the `dropped` list in
-    // the receipt below.
     let budget = TokenBudget::new(80, 16);
 
     let builder = BriefBuilder::new()
         .source(Arc::new(StaticSystemPrompt {
-            text: "You are a helpful assistant grounded in the Cellar device.",
+            text: "You are a helpful assistant grounded in provided sources.",
         }))
         .source(Arc::new(UserMessageEcho))
         .source(Arc::new(FakeMemory))
@@ -171,7 +165,7 @@ async fn main() {
         }
     };
 
-    println!("--- assembled Brief (Phase 2 BriefBuilder) ---");
+    println!("--- assembled Brief ---");
     if let Some(system) = &brief.system {
         println!("system: {system}");
     } else {
@@ -185,17 +179,13 @@ async fn main() {
                 role,
                 content,
                 source,
-            } => {
-                println!("  [{idx}] text role={role:?} src={source}: {content}");
-            }
+            } => println!("  [{idx}] text role={role:?} src={source}: {content}"),
             BriefMessage::Image { role, source, .. } => {
                 println!("  [{idx}] image role={role:?} src={source}");
             }
             BriefMessage::ToolCall {
                 id, name, source, ..
-            } => {
-                println!("  [{idx}] tool_call id={id} name={name} src={source}");
-            }
+            } => println!("  [{idx}] tool_call id={id} name={name} src={source}"),
             BriefMessage::ToolResult { id, source, .. } => {
                 println!("  [{idx}] tool_result id={id} src={source}");
             }
@@ -225,16 +215,6 @@ async fn main() {
         );
     }
 
-    println!("\ntimings:");
-    let t = &brief.receipt.timings;
-    println!("  fanout     : {:?}", t.fanout);
-    println!("  tokenize   : {:?}", t.tokenize);
-    println!("  prune      : {:?}", t.prune);
-    println!("  governance : {:?}", t.governance);
-    println!("  total      : {:?}", t.total);
-
-    // Final hand-off: print the whole Brief as JSON so the example also
-    // demonstrates the structured output contract (serde-friendly).
     println!("\n--- Brief (JSON) ---");
     match serde_json::to_string_pretty(&brief) {
         Ok(s) => println!("{s}"),

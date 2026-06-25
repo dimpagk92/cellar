@@ -1,6 +1,6 @@
 //! Reference resolution — find elements by multi-signal matching.
 
-use crate::element::{ContextElement, ContextReference, ScreenContext};
+use crate::element::{ContextElement, ContextReference, ContextSnapshot};
 
 /// Minimum score required for a match to be returned.
 const MATCH_THRESHOLD: f64 = 0.55;
@@ -19,7 +19,7 @@ const W_VALUE: f64 = 0.10;
 /// Resolve a reference against a screen context snapshot.
 /// Returns the best-matching element if its score exceeds the threshold.
 pub fn resolve_reference<'a>(
-    context: &'a ScreenContext,
+    context: &'a ContextSnapshot,
     reference: &ContextReference,
 ) -> Option<&'a ContextElement> {
     let mut best: Option<(&ContextElement, f64)> = None;
@@ -60,7 +60,7 @@ fn build_ancestor_path(el: &ContextElement, all_elements: &[ContextElement]) -> 
 fn score_element(
     el: &ContextElement,
     reference: &ContextReference,
-    context: &ScreenContext,
+    context: &ContextSnapshot,
 ) -> f64 {
     // Type must match exactly — it's a hard requirement.
     if el.element_type != reference.element_type {
@@ -151,7 +151,7 @@ fn score_element(
 mod tests {
     use super::*;
     use crate::element::{ContentRole, ContextSource};
-    use cel_accessibility::{Bounds, ElementState};
+    use crate::{Bounds, ElementState};
 
     fn make_element(id: &str, etype: &str, label: Option<&str>) -> ContextElement {
         ContextElement {
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_exact_match() {
-        let ctx = ScreenContext {
+        let ctx = ContextSnapshot {
             app: "Test".into(),
             window: "Test Window".into(),
             elements: vec![
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_no_match_wrong_type() {
-        let ctx = ScreenContext {
+        let ctx = ContextSnapshot {
             app: "Test".into(),
             window: "Test Window".into(),
             elements: vec![make_element("1", "button", Some("Submit"))],
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_fuzzy_label_match() {
-        let ctx = ScreenContext {
+        let ctx = ContextSnapshot {
             app: "Test".into(),
             window: "Test Window".into(),
             elements: vec![make_element("1", "button", Some("Submit Form"))],

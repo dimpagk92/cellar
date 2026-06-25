@@ -1,13 +1,12 @@
-//! CEL boundary contracts.
+//! Shared AI agent boundary contracts.
 //!
-//! This crate holds the types that span the cortex/planner boundary so neither
-//! side depends on the other. Cortex builds and executes these contract types;
-//! planners produce them as output.
+//! This crate holds the data types that span the planner/runtime boundary so
+//! neither side needs to depend on the other's implementation. Planners produce
+//! these contract types; runtimes execute them and emit receipts.
 //!
 //! **Strict policy:** depends only on `cel-context`, `serde`, `serde_json`, and
 //! `async-trait`. No runtime, no prompt logic, no LLM dependencies. Anything
-//! that needs more belongs in `cel-planner` (planner-side) or `cel-cortex`
-//! (cortex-side).
+//! that needs more belongs in a downstream planner or runtime crate.
 
 pub mod actions;
 pub mod canonical;

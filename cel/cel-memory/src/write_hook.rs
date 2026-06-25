@@ -1,4 +1,4 @@
-//! The [`MemoryWriteHook`] trait — the per-write governance seam.
+//! The [`MemoryWriteHook`] trait — per-write governance for memory backends.
 //!
 //! Memory writes are themselves governable events. Before a provider
 //! persists a chunk, it calls `MemoryWriteHook::before_write(chunk)`. The
@@ -12,14 +12,9 @@
 //!   Used to honor `redact_memory` rules.
 //! - return `Err(_)` — the write surfaces as a hard error to the caller.
 //!
-//! The daemon wires a hook backed by the rule matcher: it synthesises a
-//! `MemoryWriteAttempted` event from the chunk's kind, source, caller, and
-//! content prefix, runs the rule matcher over it, and returns the
-//! appropriate decision based on what fired (Veto → Redact; LogOnly → Allow
-//! but record the fire).
-//!
-//! Without a hook, providers persist every write — the v1 default for
-//! tests and for daemons that haven't wired the rule matcher path yet.
+//! A production runtime can wire this to any policy engine: synthesize an event
+//! from the chunk's kind, source, caller, and content, then return the
+//! appropriate decision. Without a hook, providers persist every write.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -47,8 +42,8 @@ pub enum WriteDecision {
 /// The hook providers consult before persisting a chunk.
 ///
 /// Implementations must be cheap: this fires on every write through the
-/// memory subsystem. The daemon's matcher-backed hook is `O(rules)` — that's
-/// the v1 budget.
+/// memory subsystem. Keep implementations proportional to the number of rules
+/// or checks they evaluate.
 #[async_trait]
 pub trait MemoryWriteHook: Send + Sync {
     /// Decide what to do with the chunk. Default impl returns `Allow`,
@@ -60,8 +55,7 @@ pub trait MemoryWriteHook: Send + Sync {
 }
 
 /// Convenience wrapper for callers that want to plug a closure in without
-/// declaring a struct. Useful for tests and for the daemon's adapter that
-/// wraps the rule matcher.
+/// declaring a struct. Useful for tests, examples, and small policy adapters.
 pub struct ClosureHook<F>(pub F)
 where
     F: Fn(&NewMemoryChunk) -> WriteDecision + Send + Sync + 'static;

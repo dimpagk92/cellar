@@ -4,8 +4,8 @@
 //! Uses [`fastembed::TextEmbedding`] with the `bge-small-en-v1.5` model
 //! (384 dim) by default. The model file downloads on first instantiation
 //! and caches at `~/.cache/fastembed` (or wherever the user's `XDG_CACHE_HOME`
-//! points). Cellar's production config will point fastembed at
-//! `~/.cellar/models/` once the daemon lifecycle work lands.
+//! points). Use [`FastEmbedEmbedder::with_options`] to choose a different model
+//! or cache directory.
 
 use std::sync::{Arc, Mutex};
 

@@ -11,9 +11,9 @@
 //! contain (AX tree, focus subtree, vision caption) — the source's only job is
 //! to ferry the bytes into the brief at [`Priority::High`].
 //!
-//! The three projections mirror the levels a live perception engine such as
-//! `cel-cortex` typically exposes (full tree / focus subtree / one-line
-//! summary). Other backends should map their own knobs onto these levels.
+//! The three projections mirror common perception levels: full tree, focus
+//! subtree, and one-line summary. Backends should map their own knobs onto
+//! these levels.
 
 use async_trait::async_trait;
 
@@ -52,7 +52,7 @@ pub trait PerceptionSnapshot: Send + Sync {
 /// should be able to skip cleanly without erroring out.
 #[derive(Debug, thiserror::Error)]
 pub enum PerceptionError {
-    /// Backend (Cortex, vision, screen scraper) returned an error.
+    /// Backend (vision, screen scraper, browser adapter, etc.) returned an error.
     #[error("perception backend error: {0}")]
     Backend(String),
 
@@ -65,8 +65,9 @@ pub enum PerceptionError {
 /// Which projection level [`PerceptionSource`] should request from its
 /// [`PerceptionSnapshot`] backend.
 ///
-/// These projection levels live in cel-brief on purpose: the abstraction stays
-/// self-contained; Cortex-side knobs map onto these three buckets.
+/// These projection levels live in `cel-brief` on purpose: the abstraction
+/// stays self-contained and downstream backends map their own knobs onto these
+/// buckets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PerceptionMode {
     /// Call [`PerceptionSnapshot::as_ax_tree`].
@@ -330,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_id_overrides_default() {
-        let src = PerceptionSource::new(fixture()).with_id("cortex");
-        assert_eq!(src.id(), SourceId::new("cortex"));
+        let src = PerceptionSource::new(fixture()).with_id("perception");
+        assert_eq!(src.id(), SourceId::new("perception"));
     }
 }

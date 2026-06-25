@@ -1,9 +1,8 @@
 //! Canonical agent contract — the boundary types every caller (CLI, MCP server,
 //! eval harness, benchmarks) speaks.
 //!
-//! These types live at the cortex/planner boundary so neither side has to
-//! depend on the other. See `docs/canonical-agent-plan.md` for the original
-//! motivation.
+//! These types live at the runner/planner boundary so neither side has to
+//! depend on the other.
 //!
 //! Deliberately minimal. Each new field would be a new knob that the
 //! CLI/eval/MCP paths could drift on. Add one only when a caller genuinely
@@ -70,12 +69,12 @@ pub enum NextMove {
 /// `cdp_eval` only when a CDP client is bound, and steering away
 /// from Safari when our bound browser is Chrome.
 ///
-/// All fields are optional / best-effort; a Cortex that doesn't know
-/// its capabilities returns [`RuntimeCaps::default()`] and the
-/// planner just runs with less context.
+/// All fields are optional / best-effort; a runtime that doesn't know its
+/// capabilities returns [`RuntimeCaps::default()`] and the planner just runs
+/// with less context.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeCaps {
-    /// True when the cortex has a CDP client bound (i.e. `cdp_eval` /
+    /// True when the runtime has a CDP client bound (i.e. `cdp_eval` /
     /// `navigate` will actually dispatch). When false the planner
     /// should not emit those actions.
     pub cdp_bound: bool,
@@ -329,14 +328,14 @@ pub struct RunLimits {
     ///
     /// Mirrors the `cel_perceive start { enable_memory, workflow_id }`
     /// opt-in for sessions; here it's at the runner level so any caller
-    /// of `CanonicalGoalRunner::run` (CLI, MCP, eval harness, worker
-    /// daemon) can opt in independently.
+    /// of `CanonicalGoalRunner::run` (CLI, MCP, eval harness, worker) can opt
+    /// in independently.
     #[serde(default)]
     pub workflow_id_for_memory: Option<String>,
 
     /// PR2 opt-in: SQLite path the canonical runner uses to write the
     /// final outcome memory. Required alongside `workflow_id_for_memory`
-    /// for the auto-write to fire. Typically `~/.cellar/cel-store.db`.
+    /// for the auto-write to fire.
     #[serde(default)]
     pub memory_db_path: Option<String>,
 }

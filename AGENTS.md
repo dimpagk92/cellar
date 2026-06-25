@@ -1,38 +1,39 @@
 # Agent Working Memory
 
-This repository should be built around three layers:
+This repository should be built around four layers:
 
-- `Adapters`
-- `CEL / crates`
+- `Sources / adapters`
+- `CEL OSS contracts`
+- `Cellar/Dilipod runtime`
 - `Agents`
 
-The durable value is in device understanding and execution, not in owning one planner.
+The durable OSS value is the context/memory/brief/receipt data plane, not one planner and not the live runtime itself.
 
-The product direction is CEL as the trust and execution layer for AI-operated computers.
-Agents can plan in many ways; Cellar should make their observations, actions, verifications,
-and receipts reliable.
+The product direction is CEL as the context and trust layer for AI-operated software.
+Agents can plan in many ways; Cellar should make their context, memory, briefs,
+actions, verifications, and receipts reliable.
 
 ## Repo Direction
 
-- Adapters should be easy to build and extend.
-- CEL should own context fusion, stream normalization, execution, and adapter routing.
+- Sources and adapters should be easy to build and extend.
+- OSS CEL should own context snapshots, merge contracts, memory contracts, brief assembly, transport schemas, and receipt schemas.
+- The commercial runtime should own live cortex operation, policy, monitoring, compliance, and hosted execution.
 - Agents should be pluggable: LangGraph, Mastra, Codex, Claude Code, GPT, Gemini, Cursor, n8n, or future in-house runtimes.
 
 ## What CEL Owns
 
-- fused context from AX, CDP, vision, signals, network, audio, and adapters
-- screenshot capture and runtime capability reporting
-- adapter lifecycle and dispatch
-- canonical action execution
-- execution receipts and evidence references for trust/audit (these prove the
-  dispatch / observed-execution path, not task completion)
-- stable MCP / CLI / SDK / N-API surfaces
-- live context fusion and observed effects. The durable cross-turn memory
-  *contract* is the `cel-memory` crate (backend: `cel-memory-sqlite`), and
-  per-turn LLM brief assembly / budgeting is the `cel-brief` crate — the live
-  perception core never owns brief or prompt construction. See
-  [docs/architecture.md](docs/architecture.md) § "Context, memory, and briefing
-  crates".
+- `cel-context`: fused context snapshot and merge contracts
+- `cel-memory` / `cel-memory-sqlite`: durable memory contract and local backend
+- `cel-brief`: per-turn LLM brief assembly / budgeting / brief receipts
+- receipt, event, MCP, CLI, SDK, and N-API schemas
+- the split between dispatch proof, model-input proof, and task completion proof
+
+## What The Commercial Runtime Owns
+
+- live cortex operation, freshness, diffs, anomalies, source prioritization
+- runtime capability reporting
+- adapter lifecycle, dispatch, and policy enforcement in production sessions
+- audit timelines, retention, alerting, compliance exports, and governance workflows
 
 ## What CEL Does Not Need To Own Right Now
 

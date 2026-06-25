@@ -477,9 +477,7 @@ impl Cortex {
     /// is responsible for booting and dropping it per scenario.
     pub fn isolated(id: impl Into<String>) -> (Self, cel_context::ContextMerger) {
         let cortex = Self::new(id.into());
-        let stub: Box<dyn cel_accessibility::AccessibilityTree> =
-            Box::new(cel_accessibility::StubAccessibility);
-        let merger = cel_context::ContextMerger::new(stub);
+        let merger = cel_context::ContextMerger::new();
         (cortex, merger)
     }
 

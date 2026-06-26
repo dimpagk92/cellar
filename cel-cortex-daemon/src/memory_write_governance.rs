@@ -149,7 +149,7 @@ fn source_str(s: cel_memory::ChunkSource) -> &'static str {
         Mcp => "mcp",
         Gateway => "gateway",
         Matcher => "matcher",
-        Cortex => "cortex",
+        Perception => "cortex",
         System => "system",
     }
 }

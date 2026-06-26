@@ -55,14 +55,31 @@ async fn sweeper_runs_daily_rollup_after_time_advance() {
             .with_summarizer(summarizer.clone()),
     );
 
-    // Plant two chunks "yesterday" (2026-05-22) and tick on 2026-05-23.
+    // Use dates relative to wall clock so the aging sweep (30-day horizon
+    // from Utc::now()) does not evict backdated chunks before rollup runs.
+    let today = Utc::now().date_naive();
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let tick_at = Utc
+        .from_utc_datetime(&today.and_hms_opt(4, 0, 0).expect("valid tick time"));
+
+    // Plant two chunks "yesterday" and tick today at the rollup hour.
     let a = provider.write(chat("morning")).await.unwrap();
     let b = provider.write(chat("afternoon")).await.unwrap();
-    backdate(provider.as_ref(), &a.id, at(2026, 5, 22, 12)).await;
-    backdate(provider.as_ref(), &b.id, at(2026, 5, 22, 14)).await;
+    backdate(
+        provider.as_ref(),
+        &a.id,
+        Utc.from_utc_datetime(&yesterday.and_hms_opt(12, 0, 0).expect("valid time")),
+    )
+    .await;
+    backdate(
+        provider.as_ref(),
+        &b.id,
+        Utc.from_utc_datetime(&yesterday.and_hms_opt(14, 0, 0).expect("valid time")),
+    )
+    .await;
 
     let cfg = SweeperConfig::production();
-    let clock = FixedClock::new(at(2026, 5, 23, 4));
+    let clock = FixedClock::new(tick_at);
     let mut state = sweeper::SweeperState::default();
     let fired = sweeper::run_once(provider.as_ref(), &cfg, &clock, &mut state).await;
     assert!(
@@ -70,13 +87,14 @@ async fn sweeper_runs_daily_rollup_after_time_advance() {
         "expected daily rollup; fired: {fired:?}"
     );
 
-    // A rollup chunk now exists for 2026-05-22.
+    // A rollup chunk now exists for yesterday.
     let stats = provider.stats().await.unwrap();
     // 2 original chunks + 1 rollup.
     assert_eq!(stats.total_chunks, 3);
     let calls = summarizer.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].kind_label.as_deref(), Some("day 2026-05-22"));
+    let expected_label = format!("day {yesterday}");
+    assert_eq!(calls[0].kind_label.as_deref(), Some(expected_label.as_str()));
     assert_eq!(calls[0].chunk_ids.len(), 2);
 }
 
@@ -139,11 +157,21 @@ async fn sweeper_skips_re_rollup_via_provider_idempotency() {
             .unwrap()
             .with_summarizer(summarizer.clone()),
     );
+    let today = Utc::now().date_naive();
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let tick_at = Utc
+        .from_utc_datetime(&today.and_hms_opt(4, 0, 0).expect("valid tick time"));
+
     let a = provider.write(chat("morning")).await.unwrap();
-    backdate(provider.as_ref(), &a.id, at(2026, 5, 22, 12)).await;
+    backdate(
+        provider.as_ref(),
+        &a.id,
+        Utc.from_utc_datetime(&yesterday.and_hms_opt(12, 0, 0).expect("valid time")),
+    )
+    .await;
 
     let cfg = SweeperConfig::production();
-    let clock = FixedClock::new(at(2026, 5, 23, 4));
+    let clock = FixedClock::new(tick_at);
 
     // First pass: rollup fires.
     let mut state1 = sweeper::SweeperState::default();

@@ -121,7 +121,7 @@ pub enum ReceiptStatus {
 ///
 /// One receipt per action the runtime executes. Carries the intent (action kind
 /// + target), the actual dispatch route, the observed effect, evidence
-/// references, timing, and terminal status.
+///   references, timing, and terminal status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionReceipt {
     /// Process-unique id, assigned at the emission site.

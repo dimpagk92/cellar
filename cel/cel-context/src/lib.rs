@@ -11,12 +11,11 @@ mod resolve;
 pub mod watchdog;
 
 pub use confidence::{ConfidenceBehavior, ConfidenceThresholds};
-#[allow(deprecated)]
-pub use element::ScreenContext;
 pub use element::{
     classify_content_role, AudioState, Bounds, BoundsRegion, ClipboardState, ConnectionEvent,
     ContentRole, ContextElement, ContextReference, ContextSnapshot, ContextSource, ElementState,
-    FocusedContext, HttpEvent, PowerState, RecentFile, RunningApp, TranscriptEntry, WindowState,
+    FocusedContext, HttpEvent, PowerState, RecentFile, RunningApp, ScreenContext,
+    TranscriptEntry, WindowState,
 };
 pub use events::CelEvent;
 pub use merge::{

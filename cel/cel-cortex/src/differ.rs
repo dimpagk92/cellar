@@ -153,7 +153,7 @@ pub fn is_diff_significant(diff: &ContextDiff) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_accessibility::{Bounds, ElementState};
+    use cel_context::{Bounds, ElementState};
     use cel_context::{ContentRole, ContextSource};
 
     fn make_element(id: &str, label: Option<&str>, value: Option<&str>) -> ContextElement {

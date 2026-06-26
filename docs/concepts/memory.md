@@ -8,8 +8,11 @@
 
 | Crate | Role |
 |---|---|
-| `cel-memory` | Trait, value types, sessions, retrieval queries, write hooks |
+| `cel-memory` | Trait, value types, `Embedder`, sessions, retrieval queries, write hooks, `Summarizer` trait |
 | `cel-memory-sqlite` | SQLite + vector + FTS implementation of the trait |
+| `cel-summarizer` | LLM-backed `Summarizer` implementations (Anthropic + Ollama) |
+
+Published at **0.2.0**. See [../migration-0.2.md](../migration-0.2.md) when upgrading from 0.1.x.
 
 ## Core Types
 
@@ -19,6 +22,8 @@
 - `MemoryQuery` — retrieval request.
 - `RetrievalProfile` — retrieval mode for the caller's intent.
 - `MemoryWriteHook` — governance hook for redaction or veto before persistence.
+- `Embedder` / `MockEmbedder` — embedding seam (defined in `cel-memory` since 0.2.0).
+- `Summarizer` — LLM synthesis seam; production impls in [`cel-summarizer`](https://crates.io/crates/cel-summarizer).
 
 ## Why It Exists
 

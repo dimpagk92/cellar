@@ -28,6 +28,9 @@ examples and shared docs.
 | [`cel-memory-sqlite`](https://github.com/dimpagk92/cel-memory-sqlite) | [crates.io](https://crates.io/crates/cel-memory-sqlite) | Local SQLite + vector + FTS backend | [docs/concepts/memory.md](docs/concepts/memory.md) |
 | [`cel-brief`](https://github.com/dimpagk92/cel-brief) | [crates.io](https://crates.io/crates/cel-brief) | Brief assembly, budgeting, governance, receipts | [docs/concepts/brief.md](docs/concepts/brief.md) |
 | [`cel-contracts`](https://github.com/dimpagk92/cel-contracts) | [crates.io](https://crates.io/crates/cel-contracts) | Action, planning, and execution receipt schemas | [docs/concepts/receipts.md](docs/concepts/receipts.md) |
+| [`cel-summarizer`](https://github.com/dimpagk92/cel-summarizer) | [crates.io](https://crates.io/crates/cel-summarizer) | LLM summarizers for session rollups (Anthropic + Ollama) | [docs/migration-0.2.md](docs/migration-0.2.md) |
+
+Current release line: **0.2.0** on crates.io. Upgrading from 0.1.x? See [docs/migration-0.2.md](docs/migration-0.2.md).
 
 See [docs/crates.md](docs/crates.md) for the full crate matrix.
 

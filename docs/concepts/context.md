@@ -16,6 +16,9 @@ not know each stream's native format. Each source normalizes its facts into
 
 - `ContextElement` — one normalized fact: UI control, log line, metric, alert, ticket, trace span, row, or app event.
 - `ContextSnapshot` — one point-in-time snapshot containing normalized elements, transcripts, and observed events.
+
+  In 0.1.x this type was also available as `ScreenContext`; that alias was
+  removed in **0.2.0**. See [../migration-0.2.md](../migration-0.2.md).
 - `ContextSource` — where an element came from: external stream, accessibility, CDP, native API, OCR, vision, merged.
 - `ContextReference` — resilient targeting data that survives ephemeral element IDs.
 - `ContentRole` — prompt-injection-aware classification: interactive, content, decorative, system.

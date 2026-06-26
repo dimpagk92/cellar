@@ -59,8 +59,7 @@ async fn sweeper_runs_daily_rollup_after_time_advance() {
     // from Utc::now()) does not evict backdated chunks before rollup runs.
     let today = Utc::now().date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
-    let tick_at = Utc
-        .from_utc_datetime(&today.and_hms_opt(4, 0, 0).expect("valid tick time"));
+    let tick_at = Utc.from_utc_datetime(&today.and_hms_opt(4, 0, 0).expect("valid tick time"));
 
     // Plant two chunks "yesterday" and tick today at the rollup hour.
     let a = provider.write(chat("morning")).await.unwrap();
@@ -94,7 +93,10 @@ async fn sweeper_runs_daily_rollup_after_time_advance() {
     let calls = summarizer.calls();
     assert_eq!(calls.len(), 1);
     let expected_label = format!("day {yesterday}");
-    assert_eq!(calls[0].kind_label.as_deref(), Some(expected_label.as_str()));
+    assert_eq!(
+        calls[0].kind_label.as_deref(),
+        Some(expected_label.as_str())
+    );
     assert_eq!(calls[0].chunk_ids.len(), 2);
 }
 
@@ -159,8 +161,7 @@ async fn sweeper_skips_re_rollup_via_provider_idempotency() {
     );
     let today = Utc::now().date_naive();
     let yesterday = today.pred_opt().unwrap_or(today);
-    let tick_at = Utc
-        .from_utc_datetime(&today.and_hms_opt(4, 0, 0).expect("valid tick time"));
+    let tick_at = Utc.from_utc_datetime(&today.and_hms_opt(4, 0, 0).expect("valid tick time"));
 
     let a = provider.write(chat("morning")).await.unwrap();
     backdate(

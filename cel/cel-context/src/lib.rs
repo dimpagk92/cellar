@@ -14,8 +14,8 @@ pub use confidence::{ConfidenceBehavior, ConfidenceThresholds};
 pub use element::{
     classify_content_role, AudioState, Bounds, BoundsRegion, ClipboardState, ConnectionEvent,
     ContentRole, ContextElement, ContextReference, ContextSnapshot, ContextSource, ElementState,
-    FocusedContext, HttpEvent, PowerState, RecentFile, RunningApp, ScreenContext,
-    TranscriptEntry, WindowState,
+    FocusedContext, HttpEvent, PowerState, RecentFile, RunningApp, ScreenContext, TranscriptEntry,
+    WindowState,
 };
 pub use events::CelEvent;
 pub use merge::{

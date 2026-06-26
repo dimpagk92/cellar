@@ -110,7 +110,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_accessibility::{Bounds, ElementState};
+    use cel_context::{Bounds, ElementState};
     use cel_context::{ContentRole, ContextElement, ContextSource};
 
     fn make_element(id: &str, el_type: &str, label: Option<&str>) -> ContextElement {

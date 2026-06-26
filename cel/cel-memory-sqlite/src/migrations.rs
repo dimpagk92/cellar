@@ -1,8 +1,8 @@
 //! Embedded SQL migrations.
 //!
-//! Migrations are bundled into the binary via `include_str!` so the daemon
-//! never reads files from disk to find them. Each migration runs in a
-//! transaction; the schema version is tracked in `_cellar_schema_version`.
+//! Migrations are bundled into the binary via `include_str!` so applications do
+//! not need to ship migration files separately. Each migration runs in a
+//! transaction; the schema version is tracked in `_cel_memory_schema_version`.
 
 use rusqlite::{params, Connection};
 
@@ -30,7 +30,7 @@ pub fn run(conn: &mut Connection) -> Result<(), SqliteMemoryError> {
     // Create the schema-tracking table if it doesn't exist. Standalone
     // statement so we know it executes even on a fresh DB.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS _cellar_schema_version (
+        "CREATE TABLE IF NOT EXISTS _cel_memory_schema_version (
             version INTEGER PRIMARY KEY,
             applied_at INTEGER NOT NULL
         )",
@@ -39,7 +39,7 @@ pub fn run(conn: &mut Connection) -> Result<(), SqliteMemoryError> {
 
     let current: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM _cellar_schema_version",
+            "SELECT COALESCE(MAX(version), 0) FROM _cel_memory_schema_version",
             [],
             |row| row.get(0),
         )
@@ -57,7 +57,7 @@ pub fn run(conn: &mut Connection) -> Result<(), SqliteMemoryError> {
                 source: e,
             })?;
         tx.execute(
-            "INSERT INTO _cellar_schema_version(version, applied_at) VALUES(?, ?)",
+            "INSERT INTO _cel_memory_schema_version(version, applied_at) VALUES(?, ?)",
             params![m.version, chrono::Utc::now().timestamp_millis()],
         )?;
         tx.commit()?;
@@ -84,9 +84,11 @@ mod tests {
         let mut conn = open_with_vec();
         run(&mut conn).unwrap();
         let v: i64 = conn
-            .query_row("SELECT MAX(version) FROM _cellar_schema_version", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT MAX(version) FROM _cel_memory_schema_version",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(v, LATEST_VERSION);
     }
@@ -97,7 +99,7 @@ mod tests {
         run(&mut conn).unwrap();
         run(&mut conn).unwrap();
         let v: i64 = conn
-            .query_row("SELECT COUNT(*) FROM _cellar_schema_version", [], |r| {
+            .query_row("SELECT COUNT(*) FROM _cel_memory_schema_version", [], |r| {
                 r.get(0)
             })
             .unwrap();

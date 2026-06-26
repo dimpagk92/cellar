@@ -4,9 +4,9 @@
 //! agent has done so far, the live perception + screenshot, return the next
 //! move (a batch of steps, or Done, or Fail, or Clarify).
 //!
-//! Lives in cel-contracts so cortex/runner can describe the contract without
-//! depending on cel-planner and so any planner runtime (LangGraph, Mastra,
-//! Codex, in-house) can implement it as a peer.
+//! Lives in `cel-contracts` so a runner can describe the planner contract
+//! without depending on a specific planner implementation, and so any planner
+//! runtime can implement it as a peer.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -19,11 +19,9 @@ use crate::view::PlanningView;
 /// Called by the canonical runner once per turn. Implementations must
 /// be safe to call repeatedly from async contexts.
 ///
-/// **PR1a contract change**: takes `&PlanningView` instead of the legacy
-/// `&ScreenContext` + `&RuntimeCaps` pair. The view is built by the
-/// cortex-side planning-view builder and folds together perception,
-/// adapter facts, capabilities, and run progress in one budgeted shape.
-/// Planners are now pure consumers of this contract — they no longer own
+/// Takes a [`PlanningView`] that folds together perception, adapter facts,
+/// capabilities, selected memory/events, and run progress in one budgeted
+/// shape. Planners are pure consumers of this contract; they do not need to own
 /// context selection logic.
 #[async_trait]
 pub trait PlanProducer: Send + Sync {
@@ -36,10 +34,10 @@ pub trait PlanProducer: Send + Sync {
     ///   (success/error + any extracted data).
     /// * `shared_memory` — free-form JSON bag of extracted data the runner
     ///   has accumulated (e.g. prices scraped from a page).
-    /// * `view` — the budgeted `PlanningView` built by `cel-cortex` from
-    ///   the current `MentalModel`. Includes the goal-relevant elements,
-    ///   adapter facts, capabilities, run progress, and (in later PRs)
-    ///   selected memories / knowledge / events.
+    /// * `view` — the budgeted `PlanningView` built from current runtime
+    ///   context. Includes the goal-relevant elements, adapter facts,
+    ///   capabilities, run progress, and selected memories / knowledge /
+    ///   events.
     /// * `screenshot_png` — optional PNG bytes of the current screen for
     ///   vision-capable models. `None` on headless / no-capture
     ///   environments; planners should still produce a reasonable answer

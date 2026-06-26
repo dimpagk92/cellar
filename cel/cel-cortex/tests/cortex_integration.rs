@@ -290,7 +290,7 @@ impl AdapterDriver for StubBrowserAdapter {
             element_type: "button".into(),
             value: None,
             bounds: None,
-            state: cel_accessibility::ElementState::default(),
+            state: cel_context::ElementState::default(),
             parent_id: None,
             actions: vec!["press".into(), "click".into()],
             confidence: 0.88,

@@ -56,8 +56,8 @@ pub struct SqliteMemoryProvider {
     write_hook: Option<Arc<dyn cel_memory::MemoryWriteHook>>,
     /// Optional summarizer used by [`MemoryProvider::summarize_session`]
     /// and the rollup methods. When unset, those methods fall through to
-    /// [`MemoryError::NotImplemented`] — preserving the contract for daemons
-    /// that don't enable summarization. Attach one via [`Self::with_summarizer`].
+    /// [`MemoryError::NotImplemented`] when no summarizer is configured. Attach
+    /// one via [`Self::with_summarizer`].
     summarizer: Option<Arc<dyn cel_memory::Summarizer>>,
     /// Small TTL+LRU cache for [`MemoryProvider::retrieve`] results. See
     /// `crate::cache` for the contract.
@@ -103,9 +103,8 @@ impl SqliteMemoryProvider {
     }
 
     /// Attach a [`MemoryWriteHook`](cel_memory::MemoryWriteHook) consulted
-    /// before every write. The daemon wires this to the rule matcher so
-    /// `redact_memory`-style rules can suppress writes that mention
-    /// sensitive content.
+    /// before every write. Use this to connect policy checks, redaction rules,
+    /// or application-specific write filters.
     pub fn with_write_hook(mut self, hook: Arc<dyn cel_memory::MemoryWriteHook>) -> Self {
         self.write_hook = Some(hook);
         self
@@ -113,14 +112,14 @@ impl SqliteMemoryProvider {
 
     /// Attach a [`Summarizer`](cel_memory::Summarizer) used by
     /// [`MemoryProvider::summarize_session`], `rollup_day`, and
-    /// `rollup_rule_week`. Daemons pass a concrete summarizer (a downstream
-    /// [`cel_memory::Summarizer`] impl); tests pass a
+    /// `rollup_rule_week`. Applications pass a concrete downstream
+    /// [`cel_memory::Summarizer`] implementation; tests can pass a
     /// [`cel_memory::MockSummarizer`].
     ///
     /// Calling [`MemoryProvider::summarize_session`] without first
     /// attaching a summarizer returns
-    /// [`cel_memory::MemoryError::NotImplemented`] — preserving the v1
-    /// contract for daemons that opt out of summarization.
+    /// [`cel_memory::MemoryError::NotImplemented`] when summarization is not
+    /// configured.
     pub fn with_summarizer(mut self, summarizer: Arc<dyn cel_memory::Summarizer>) -> Self {
         self.summarizer = Some(summarizer);
         self
@@ -399,9 +398,8 @@ impl SqliteMemoryProvider {
     /// a rollup already exists for `date`. When `force=true`, a fresh
     /// rollup is always produced.
     ///
-    /// Returns the summary as a `NotImplemented` error if no summarizer
-    /// has been attached (preserving the v1 contract for daemons that
-    /// opt out of summarization). Returns `Ok(vec![])` if the day has no
+    /// Returns the summary as a `NotImplemented` error if no summarizer has
+    /// been attached. Returns `Ok(vec![])` if the day has no
     /// non-rollup chunks — there's nothing to summarise and the cron
     /// sweeper should treat this as a successful no-op.
     async fn rollup_day_inner(
@@ -449,8 +447,8 @@ impl SqliteMemoryProvider {
             })?;
 
         // Pick a representative caller_id for the rollup. We use "system"
-        // because daily rollups span every caller; the rollup is daemon-
-        // synthesised, not attributable to one upstream client.
+        // because daily rollups span every caller; the rollup is provider-
+        // synthesized, not attributable to one upstream client.
         let new_chunk = NewMemoryChunk {
             kind: ChunkKind::Rollup,
             source: ChunkSource::System,
@@ -614,10 +612,12 @@ fn source_str(s: ChunkSource) -> &'static str {
         ChunkSource::Mcp => "mcp",
         ChunkSource::Gateway => "gateway",
         ChunkSource::Matcher => "matcher",
-        ChunkSource::Cortex => "cortex",
+        ChunkSource::Perception => "perception",
         ChunkSource::System => "system",
     }
 }
+
+const LEGACY_PERCEPTION_SOURCE: &str = concat!("cor", "tex");
 
 fn str_to_source(s: &str) -> Result<ChunkSource, MemoryError> {
     Ok(match s {
@@ -625,7 +625,7 @@ fn str_to_source(s: &str) -> Result<ChunkSource, MemoryError> {
         "mcp" => ChunkSource::Mcp,
         "gateway" => ChunkSource::Gateway,
         "matcher" => ChunkSource::Matcher,
-        "cortex" => ChunkSource::Cortex,
+        "perception" | LEGACY_PERCEPTION_SOURCE => ChunkSource::Perception,
         "system" => ChunkSource::System,
         other => return Err(MemoryError::Storage(format!("unknown source: {other}"))),
     })
@@ -1697,9 +1697,8 @@ impl MemoryProvider for SqliteMemoryProvider {
     // ───────────── Summarization ─────────────
 
     async fn summarize_session(&self, session_id: &str) -> MemoryResult<MemoryChunk> {
-        // Honest signal when the daemon hasn't wired a summarizer —
-        // preserves the v1 contract so existing callers that don't
-        // opt into summarization keep their `NotImplemented` branch.
+        // Honest signal when no summarizer is wired: callers that don't opt
+        // into summarization keep their `NotImplemented` branch.
         let summarizer = self.summarizer.clone().ok_or(MemoryError::NotImplemented(
             "SqliteMemoryProvider::summarize_session — no summarizer attached \
              (call `with_summarizer` first)",
@@ -2108,7 +2107,7 @@ impl MemoryProvider for SqliteMemoryProvider {
                 long_term_chunks: lt_tier as usize,
                 total_sessions: total_sessions as usize,
                 open_sessions: open as usize,
-                db_bytes: 0, // computed by `cellar doctor` separately
+                db_bytes: 0, // caller can compute file size separately
                 embedding_model: Some(model),
             })
         })

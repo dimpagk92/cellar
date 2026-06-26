@@ -392,6 +392,7 @@ impl MentalModel {
                 ContextSource::Cdp => source_summary.cdp += 1,
                 ContextSource::Ocr => source_summary.ocr += 1,
                 ContextSource::Merged => source_summary.merged += 1,
+                ContextSource::External => source_summary.merged += 1,
             }
         }
         source_summary.adapter_backed = self.element_adapter_index.len();

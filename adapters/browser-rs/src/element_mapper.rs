@@ -16,9 +16,8 @@
 //! pure data conversion + 7 unit tests pinning the priority order,
 //! sanitiser edge cases, and confidence-tier invariants.
 
-use cel_accessibility::ElementState;
 use cel_cdp::DomElement;
-use cel_context::{Bounds, ContextElement, ContextSource};
+use cel_context::{Bounds, ContextElement, ContextSource, ElementState};
 
 /// Confidence assigned to a CDP-sourced element. Source of truth lives in
 /// `adapters/browser/manifest.json` (`context.confidence`) and is loaded

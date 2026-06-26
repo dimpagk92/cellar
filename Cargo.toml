@@ -51,7 +51,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/dimpagk92/cellar"
@@ -83,7 +83,7 @@ cel-hotkey = { path = "cel/cel-hotkey" }
 cel-audio = { path = "cel/cel-audio" }
 cel-vision = { path = "cel/cel-vision" }
 cel-network = { path = "cel/cel-network" }
-cel-context = { path = "cel/cel-context" }
+cel-context = { path = "cel/cel-context", version = "0.1.5" }
 cel-contracts = { path = "cel/cel-contracts" }
 cel-store = { path = "cel/cel-store" }
 cel-planner = { path = "cel/cel-planner" }
@@ -93,7 +93,7 @@ cel-adapters = { path = "cel/cel-adapters" }
 cel-boot = { path = "cel/cel-boot" }
 cel-goal-runner = { path = "cel/cel-goal-runner" }
 cel-cdp = { path = "cel/cel-cdp" }
-cel-memory = { path = "cel/cel-memory" }
+cel-memory = { path = "cel/cel-memory", version = "0.1.2" }
 cel-memory-sqlite = { path = "cel/cel-memory-sqlite" }
 cel-summarizer = { path = "cel/cel-summarizer" }
 cel-signals = { path = "cel/cel-signals" }

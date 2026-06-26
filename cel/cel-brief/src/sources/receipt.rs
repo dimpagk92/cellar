@@ -1,14 +1,9 @@
 //! [`ReceiptSource`] — surfaces a run's recent execution receipts into the brief.
 //!
-//! The cortex appends each run-scoped execution receipt to
-//! `<runs_dir>/<run_id>.jsonl` (Receipt-Backed Run Timeline). This source reads
-//! the last `limit` for a given run and contributes a compact "recent actions"
-//! summary, so the next turn's brief reflects what the agent just did and
-//! whether the effects were observed — the `… → evidence → brief` half of the
-//! loop.
-//!
-//! cel-brief stays decoupled from cel-cortex: the receipt is read as untyped
-//! JSON from the shared file, never via a cortex dependency.
+//! A runtime can append each run-scoped execution receipt to
+//! `<runs_dir>/<run_id>.jsonl`. This source reads the last `limit` for a given
+//! run and contributes a compact "recent actions" summary, so the next turn's
+//! brief reflects what the agent just did and whether effects were observed.
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +32,7 @@ impl ReceiptSource {
         }
     }
 
-    /// Convenience constructor pointing at the default `~/.cellar/runs` dir.
+    /// Convenience constructor pointing at `~/.cel/brief/runs`.
     /// Returns `None` when `$HOME` is unset.
     pub fn for_run(run_id: impl Into<String>, limit: usize) -> Option<Self> {
         default_runs_dir().map(|dir| Self::new(dir, run_id, limit))
@@ -117,10 +112,10 @@ fn format_receipt(r: &serde_json::Value) -> String {
 }
 
 fn default_runs_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cellar").join("runs"))
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cel").join("brief").join("runs"))
 }
 
-/// Must match the cortex writer (`cel-cortex` `receipt.rs`) and the CLI reader.
+/// File-safe run id used by the JSONL receipt source.
 fn sanitize_run_id(run_id: &str) -> String {
     run_id
         .chars()

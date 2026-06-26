@@ -1,6 +1,6 @@
 //! Minimal `cel-memory` example using [`BasicMemoryProvider`].
 //!
-//! Runs entirely in-process with no other Cellar crates in scope. Demonstrates:
+//! Runs entirely in-process with no storage backend in scope. Demonstrates:
 //! - Constructing the in-memory reference provider
 //! - Opening a session
 //! - Writing chunks

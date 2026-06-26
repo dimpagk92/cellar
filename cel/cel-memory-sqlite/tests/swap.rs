@@ -2,10 +2,9 @@
 //! the locked `cel_memory::MemoryProvider` trait surface, not just as a
 //! concrete type.
 //!
-//! Daemon-level integration tests (rule + gateway + provider) live in the
-//! downstream Cellar daemon, where they belong — those tests depend on
-//! daemon-only crates that `cel-memory-sqlite` deliberately does not pull as
-//! dev-dependencies, keeping this crate standalone-testable.
+//! Runtime-level integration tests that need policy engines or action gateways
+//! should live downstream. This crate deliberately keeps dev-dependencies small
+//! so it remains standalone-testable.
 
 use std::sync::Arc;
 

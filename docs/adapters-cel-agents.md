@@ -4,25 +4,27 @@ Date: April 24, 2026
 
 ## North Star
 
-Cellar should be built as a three-layer system:
+Cellar should be built as a four-layer system:
 
-1. `Adapters` — app- and domain-specific capabilities
-2. `CEL / crates` — device understanding, context fusion, and execution
-3. `Agents` — pluggable planners and orchestrators
+1. `Sources / adapters` — app- and domain-specific context, facts, and execution evidence
+2. `CEL OSS contracts` — context snapshots, memory, brief assembly, transport schemas, and receipts
+3. `Cellar/Dilipod runtime` — live cortex operation, policy, monitoring, compliance, and hosted execution
+4. `Agents` — pluggable planners and orchestrators
 
 The durable value of the repository is not "our planner."
 The durable value is:
 
-- understanding the device
-- fusing context from multiple streams
-- exposing stable execution primitives
-- routing execution into the right substrate or adapter
-- verifying effects and returning execution receipts
+- defining a common context language
+- fusing context from multiple streams into one snapshot contract
+- deciding what persists across turns
+- governing what the model sees
+- keeping open receipt schemas for what was dispatched and what evidence remains
+- operating the live runtime and governance product above those contracts
 - making those capabilities usable by any agent
 
 For now, planning should be treated as pluggable.
 
-Put another way: CEL is the trust and execution layer for AI-operated computers.
+Put another way: CEL is the context and trust layer for AI-operated software.
 The core loop is `intent -> observation -> dispatch -> observed effect -> evidence -> receipt`.
 See [trust-execution-layer.md](trust-execution-layer.md).
 

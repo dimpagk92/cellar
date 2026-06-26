@@ -1,12 +1,25 @@
 # cel-brief
 
-The per-turn LLM briefing layer. Assemble memory + perception + history + tools + user message into one budgeted, governed, receipted bundle from pluggable streams.
+Composable prompt briefing for AI agents. Gather memory, perception, history,
+tools, and user messages from pluggable sources; enforce token budgets; apply
+governance; and emit receipts.
 
 **Status:** Phases 1–4 shipped — core types, the `Source` trait and all built-in sources, the `Governance` trait, and the `BriefBuilder` (tokenizer + priority/budget pruning + `BriefReceipt`). The crate is feature-complete for assembling per-turn briefs.
 
+## Purpose
+
+Use `cel-brief` when an agent has many possible prompt inputs and needs one
+structured, budgeted, governed package for a model call. Sources contribute
+facts, messages, tools, history, or memory; the builder prunes to budget, runs
+governance, and emits a receipt of what the model saw.
+
 ## Why
 
-Every non-trivial AI agent — chat, code, computer-use, robotics — has to decide what to put in the prompt: memory retrievals, current screen state, recent actions, tool schemas, the user's message. Today everyone solves it inside the agent loop, ad-hoc, with string concatenation and homegrown budget code. `cel-brief` is the abstraction that fills that gap.
+Every non-trivial AI agent — chat, code, computer-use, robotics — has to decide
+what to put in the prompt: memory retrievals, current screen state, recent
+actions, tool schemas, and the user's message. Today many projects solve that
+inside the agent loop with string concatenation and homegrown budget code.
+`cel-brief` makes that step explicit, structured, and inspectable.
 
 ## Three commitments
 
@@ -38,7 +51,7 @@ Every non-trivial AI agent — chat, code, computer-use, robotics — has to dec
 | `ToolCatalogSource` | default | High | Owns `Vec<ToolSchema>`. |
 | `HistorySource<H>` | default | Normal | Window of past N entries from any `HistoryStore`. Redactable. |
 | `MemorySource<P>` | `memory` | Normal | Hybrid retrieval over any `cel_memory::MemoryProvider`. Redactable. |
-| `PerceptionSource<P>` | `perception` | High | Defines the `PerceptionSnapshot` trait; downstream runtimes adapt their own perception engine (e.g. `cel-cortex`) into it. Redactable. |
+| `PerceptionSource<P>` | `perception` | High | Defines the `PerceptionSnapshot` trait; downstream runtimes adapt their own perception engine into it. Redactable. |
 
 ## Quick start
 
@@ -59,12 +72,16 @@ assert_eq!(cs.len(), 1);
 # Ok::<_, BriefError>(())
 ```
 
-See [`examples/no_cellar.rs`](examples/no_cellar.rs) for a self-contained hand-fanout (no other Cellar crates) and [`examples/with_memory.rs`](examples/with_memory.rs) for the `cel-memory` integration:
+See [`examples/standalone.rs`](examples/standalone.rs) for a self-contained hand-fanout and [`examples/with_memory.rs`](examples/with_memory.rs) for the `cel-memory` integration:
 
 ```sh
-cargo run -p cel-brief --example no_cellar
+cargo run -p cel-brief --example standalone
 cargo run -p cel-brief --features memory --example with_memory
+cargo run -p cel-brief --example governance
 ```
+
+The `governance` example shows a custom redaction hook and the resulting
+`BriefReceipt` redaction records.
 
 ## `BriefBuilder`
 
@@ -97,12 +114,12 @@ println!(
 - `Redacted(Vec<RedactionRecord>)` — the hook mutated redactable content; the records describe what changed and which rule did it.
 - `Rejected(String)` — policy violation; the builder returns `BriefError::Rejected`.
 
-The default `NoOpGovernance` always allows. Production callers (e.g. the Cellar daemon's agent runtime) plug in a real implementation that consults their rules engine.
+The default `NoOpGovernance` always allows. Production callers can plug in a real implementation that consults their own rules engine.
 
 ## Features
 
 - `memory` — enable `MemorySource<P>` (depends on [`cel-memory`](../cel-memory)).
-- `perception` — enable the `PerceptionSnapshot` trait + `PerceptionSource<P>`. Perception backends live downstream: a runtime adapts its own live perception engine (e.g. `cel-cortex`) into a `PerceptionSnapshot`. This feature adds no dependency on any perception crate.
+- `perception` — enable the `PerceptionSnapshot` trait + `PerceptionSource<P>`. Perception backends live downstream: a runtime adapts its own live perception engine into a `PerceptionSnapshot`. This feature adds no dependency on any perception crate.
 
 ## Benchmark
 

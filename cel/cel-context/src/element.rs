@@ -31,6 +31,9 @@ pub enum ContextSource {
     Ocr,
     /// Merged from multiple sources.
     Merged,
+    /// From an arbitrary external stream such as logs, traces, metrics,
+    /// tickets, database rows, application events, or domain APIs.
+    External,
 }
 
 /// Content role classification for prompt injection defense.

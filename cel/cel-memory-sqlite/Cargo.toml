@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "SQLite + sqlite-vec implementation of cel-memory's MemoryProvider trait. Local-first, single-file storage with optional FastEmbed-powered embeddings."
+description = "SQLite-backed local memory for AI agents, implementing cel-memory with FTS and vector search."
 keywords = ["ai", "memory", "sqlite", "vector-search", "embedding"]
 categories = ["asynchronous", "database"]
 readme = "README.md"
 
 [dependencies]
 async-trait.workspace = true
-cel-memory = { path = "../cel-memory", version = "0.1.0" }
+cel-memory = { path = "../cel-memory", version = "0.1.5" }
 chrono = { workspace = true, features = ["serde"] }
 rusqlite = { workspace = true, features = ["functions"] }
 serde_json.workspace = true
@@ -35,7 +35,6 @@ fastembed = ["dep:fastembed"]
 chrono = { workspace = true, features = ["serde"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
-# NOTE: daemon-only crates (rule gateway, Cellar event types) are intentionally
-# NOT dev-deps here. Daemon-level integration tests that need them live in the
-# downstream Cellar daemon; keeping them out keeps this crate standalone-testable
-# with only cel-memory + storage deps.
+# NOTE: runtime-only crates are intentionally not dev-deps here. Integration
+# tests that need a full runtime should live downstream; keeping them out keeps
+# this crate standalone-testable with only cel-memory + storage deps.

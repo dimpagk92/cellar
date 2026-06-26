@@ -1,21 +1,17 @@
 //! `BasicMemoryProvider` — the v1 backing implementation.
 //!
-//! In-process, in-memory, deliberately simple. Real bodies for the methods the
-//! embedded agent and NL compiler actually invoke in v1
-//! ([`retrieve`](MemoryProvider::retrieve), [`write`](MemoryProvider::write),
-//! session lifecycle, simple deletes, [`export`](MemoryProvider::export),
-//! [`stats`](MemoryProvider::stats)); `Err(NotImplemented)` for summarization
-//! and re-embed; no-ops for `update_importance` and `supersede` since v1 does
-//! not score importance.
+//! In-process, in-memory, deliberately simple. Implements retrieval, writes,
+//! session lifecycle, simple deletes, export, and stats; returns
+//! `Err(NotImplemented)` for summarization and re-embed; no-ops for
+//! `update_importance` and `supersede`.
 //!
 //! Lexical retrieval only — substring + recency. A full storage backend
 //! (e.g. the `cel-memory-sqlite` crate) replaces this with hybrid
 //! (vector + FTS + recency) retrieval.
 //!
-//! The persistence layer here is `Arc<Mutex<State>>`. The daemon will eventually
-//! back this with a `search_knowledge`-style SQLite table; in this crate's tests
-//! and during the v1 Phase 0 -> Phase 1 transition the in-memory store is
-//! sufficient because no caller depends on durability across daemon restarts.
+//! The persistence layer here is `Arc<Mutex<State>>`. It is useful for tests,
+//! examples, and lightweight agents that do not need durability across process
+//! restarts.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,8 +65,8 @@ impl BasicMemoryProvider {
     }
 
     /// Attach a [`MemoryWriteHook`](crate::MemoryWriteHook) consulted
-    /// before every write. Used by the daemon to wire rule-matcher-driven
-    /// memory redaction.
+    /// before every write. Use this for policy-driven memory redaction or
+    /// application-specific write filtering.
     pub fn with_write_hook(mut self, hook: Arc<dyn crate::MemoryWriteHook>) -> Self {
         self.write_hook = Some(hook);
         self

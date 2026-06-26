@@ -13,13 +13,10 @@
 //!   "require confirmation on first off-device memory call per session."
 //! - return `Err(_)` — the call surfaces as a hard error to the caller.
 //!
-//! The daemon wires a hook backed by the rule matcher: it synthesises a
-//! `MemoryOffdeviceCallAttempted` event from the descriptor, runs the rule
-//! matcher over it, and returns the appropriate decision.
+//! A production runtime can wire this to a policy engine: synthesize an event
+//! from the descriptor, evaluate rules, and return the appropriate decision.
 //!
-//! Without a hook, producers always proceed — the test default and the
-//! correct behavior for daemons that haven't wired the rule matcher path
-//! yet.
+//! Without a hook, producers always proceed.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -40,7 +37,7 @@ pub struct OffdeviceCallDescriptor {
     /// Model id (`"claude-haiku-4-5"`, `"voyage-3-large"`, …). Drives
     /// `data.model`.
     pub model: String,
-    /// Which daemon subsystem initiated the call (`"memory_summarizer"`,
+    /// Which subsystem initiated the call (`"memory_summarizer"`,
     /// `"memory_embedder"`, etc.). Drives `data.subsystem`.
     pub subsystem: String,
     /// Free-form metadata the producer wants to expose to the rule
@@ -94,8 +91,8 @@ pub enum OffdeviceDecision {
 /// The hook producers consult before dispatching an off-device call.
 ///
 /// Implementations must be cheap: this fires on every cloud call made
-/// by the memory subsystem. The daemon's matcher-backed hook is
-/// `O(rules)` — that's the v1 budget.
+/// by the memory subsystem. Keep implementations proportional to the number of
+/// rules or checks they evaluate.
 #[async_trait]
 pub trait OffdeviceCallHook: Send + Sync {
     /// Decide what to do with the call. Default impl returns `Allow`,
@@ -107,8 +104,8 @@ pub trait OffdeviceCallHook: Send + Sync {
 }
 
 /// Convenience wrapper for callers that want to plug a closure in
-/// without declaring a struct. Useful for tests and for the daemon's
-/// adapter that wraps the rule matcher.
+/// without declaring a struct. Useful for tests, examples, and small policy
+/// adapters.
 pub struct ClosureOffdeviceHook<F>(pub F)
 where
     F: Fn(&OffdeviceCallDescriptor) -> OffdeviceDecision + Send + Sync + 'static;

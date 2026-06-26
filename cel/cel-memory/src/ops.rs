@@ -88,9 +88,9 @@ fn default_true() -> bool {
     true
 }
 
-/// Result of [`crate::MemoryProvider::export`]. JSON-serializable; the caller
-/// (Memory tab UI or `cellar memory export` CLI) is responsible for writing it
-/// to disk as `.tar.gz` or `.json`.
+/// Result of [`crate::MemoryProvider::export`]. JSON-serializable; the caller is
+/// responsible for writing it to disk as `.tar.gz`, `.json`, or another archive
+/// format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExportBundle {
     /// Exported chunks.
@@ -146,8 +146,8 @@ pub struct ReEmbedReport {
     pub elapsed_ms: u64,
 }
 
-/// Summary statistics returned by [`crate::MemoryProvider::stats`]. Drives the
-/// Memory tab dashboard and `cellar doctor`'s memory health check.
+/// Summary statistics returned by [`crate::MemoryProvider::stats`]. Useful for
+/// dashboards, health checks, and storage monitoring.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct MemoryStats {
     /// Total chunks across both tiers.

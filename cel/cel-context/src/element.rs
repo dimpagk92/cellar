@@ -1,135 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Screen-space rectangle in pixel coordinates.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct Bounds {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-/// UI element state flags.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ElementState {
-    pub focused: bool,
-    pub enabled: bool,
-    pub visible: bool,
-    pub selected: bool,
-    pub expanded: Option<bool>,
-    pub checked: Option<bool>,
-}
-
-impl Default for ElementState {
-    fn default() -> Self {
-        Self {
-            focused: false,
-            enabled: true,
-            visible: true,
-            selected: false,
-            expanded: None,
-            checked: None,
-        }
-    }
-}
-
-/// A raw TCP/UDP connection observed by any source.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ConnectionEvent {
-    #[serde(default)]
-    pub timestamp_ms: u64,
-    #[serde(default = "default_protocol")]
-    pub protocol: String,
-    #[serde(default)]
-    pub local_addr: String,
-    #[serde(default)]
-    pub local_port: u16,
-    #[serde(default)]
-    pub remote_addr: String,
-    #[serde(default)]
-    pub remote_port: u16,
-    #[serde(default)]
-    pub state: String,
-    pub service: Option<String>,
-    pub process_name: Option<String>,
-    pub pid: Option<u32>,
-}
-
-fn default_protocol() -> String {
-    "tcp".to_string()
-}
-
-/// A real HTTP request/response observed by CDP, proxy, or another source.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HttpEvent {
-    pub timestamp_ms: u64,
-    #[serde(default)]
-    pub method: String,
-    pub url: String,
-    #[serde(alias = "status")]
-    pub status_code: Option<u16>,
-    pub content_type: Option<String>,
-    pub duration_ms: Option<f64>,
-    pub size_bytes: Option<u64>,
-    #[serde(default)]
-    pub source: String,
-}
-
-/// Generic clipboard state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ClipboardState {
-    /// Text content, usually truncated by the source for privacy.
-    pub text: Option<String>,
-    pub has_image: bool,
-    pub has_files: bool,
-}
-
-/// Generic visible-window state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WindowState {
-    pub app_name: String,
-    pub title: String,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub layer: i32,
-    pub is_on_screen: bool,
-    pub pid: u32,
-}
-
-/// Generic audio output state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AudioState {
-    /// System volume, normalized to 0.0-1.0.
-    pub volume: f32,
-    pub is_muted: bool,
-}
-
-/// Generic battery / power state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PowerState {
-    /// Battery percentage, normalized to 0.0-1.0.
-    pub battery_level: Option<f32>,
-    pub is_charging: bool,
-    pub is_plugged_in: bool,
-}
-
-/// Generic running app state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RunningApp {
-    pub name: String,
-    pub is_frontmost: bool,
-}
-
-/// Generic recent file state.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RecentFile {
-    pub name: String,
-    pub directory: String,
-    pub age_secs: u64,
-}
+/// Re-export Bounds and ElementState from the accessibility crate — single source of truth.
+pub use cel_accessibility::Bounds;
+pub use cel_accessibility::ElementState;
 
 /// The source that provided a context element.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -155,11 +29,11 @@ pub enum ContextSource {
     /// from `Vision` (the slower, non-deterministic VLM) so consumers know the
     /// element came from pixel OCR, not a model's semantic read.
     Ocr,
+    /// Merged from multiple sources.
+    Merged,
     /// From an arbitrary external stream such as logs, traces, metrics,
     /// tickets, database rows, application events, or domain APIs.
     External,
-    /// Merged from multiple sources.
-    Merged,
 }
 
 /// Content role classification for prompt injection defense.
@@ -324,7 +198,7 @@ pub struct ContextReference {
 impl ContextElement {
     /// Build the ancestor path by walking parent_id chains.
     /// Returns element_types from root to parent (not including self).
-    pub(crate) fn build_ancestor_path(&self, all_elements: &[ContextElement]) -> Vec<String> {
+    fn build_ancestor_path(&self, all_elements: &[ContextElement]) -> Vec<String> {
         let mut path = Vec::new();
         let mut current_id = self.parent_id.as_deref();
         let mut depth = 0;
@@ -393,7 +267,7 @@ impl ContextElement {
     }
 
     /// Build a resilient reference with ancestor path context.
-    /// `all_elements` is the flattened element list from the ContextSnapshot.
+    /// `all_elements` is the flattened element list from the ScreenContext.
     pub fn to_reference_in_context(
         &self,
         screen_width: u32,
@@ -421,21 +295,21 @@ pub struct TranscriptEntry {
     pub confidence: Option<f32>,
 }
 
-/// A point-in-time context snapshot built from normalized stream facts.
+/// The complete screen context — the unified world model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextSnapshot {
-    /// Human-readable primary app, service, domain, or workflow label.
+pub struct ScreenContext {
+    /// Name of the foreground application.
     pub app: String,
-    /// Human-readable secondary scope label, such as a window, route, incident, or task.
+    /// Title of the active window.
     pub window: String,
-    /// All normalized context elements, sorted by confidence (highest first).
+    /// All detected UI elements, sorted by confidence (highest first).
     pub elements: Vec<ContextElement>,
     /// Recent network connections (TCP/UDP level — honest data from lsof or /proc).
     #[serde(default)]
-    pub network_events: Vec<ConnectionEvent>,
+    pub network_events: Vec<cel_network::ConnectionEvent>,
     /// Real HTTP events from CDP or proxy (never fabricated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub http_events: Vec<HttpEvent>,
+    pub http_events: Vec<cel_network::HttpEvent>,
     /// Timestamp of this context snapshot (ms since epoch).
     pub timestamp_ms: u64,
     /// Screen width in pixels (used for spatial normalization in reference resolution).
@@ -444,34 +318,29 @@ pub struct ContextSnapshot {
     /// Screen height in pixels (used for spatial normalization in reference resolution).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_height: Option<u32>,
-    /// Clipboard state (text, has_image, has_files).
+    /// Clipboard state (text, has_image, has_files). From cel-signals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clipboard: Option<ClipboardState>,
-    /// All visible windows on screen (not just focused app).
+    pub clipboard: Option<cel_signals::ClipboardState>,
+    /// All visible windows on screen (not just focused app). From cel-signals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub window_list: Vec<WindowState>,
-    /// Audio output state (volume, muted).
+    pub window_list: Vec<cel_signals::WindowState>,
+    /// Audio output state (volume, muted). From cel-signals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audio: Option<AudioState>,
-    /// Battery/power state.
+    pub audio: Option<cel_signals::AudioState>,
+    /// Battery/power state. From cel-signals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub power: Option<PowerState>,
-    /// Running GUI applications.
+    pub power: Option<cel_signals::PowerState>,
+    /// Running GUI applications. From cel-signals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub running_apps: Vec<RunningApp>,
-    /// Recently created/modified files.
+    pub running_apps: Vec<cel_signals::RunningApp>,
+    /// Recently created/modified files (Downloads/Desktop, last 60s). From cel-signals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub recent_files: Vec<RecentFile>,
-    /// Transcribed speech segments from any audio stream.
+    pub recent_files: Vec<cel_signals::RecentFile>,
+    /// Transcribed speech segments from the audio capture layer (mic + loopback).
+    /// Populated by cel-cortex when an audio backend is configured.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transcripts: Vec<TranscriptEntry>,
 }
-
-/// Compatibility alias for [`ContextSnapshot`].
-///
-/// Prefer [`ContextSnapshot`] in new code; this name remains for existing
-/// call sites across the Cellar workspace.
-pub type ScreenContext = ContextSnapshot;
 
 /// High-fidelity context for a single element — the "zoom in" view.
 #[derive(Debug, Clone, Serialize, Deserialize)]

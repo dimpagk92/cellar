@@ -870,8 +870,20 @@ dependencies = [
 name = "cel-context"
 version = "0.1.5"
 dependencies = [
+ "async-trait",
+ "cel-accessibility",
+ "cel-display",
+ "cel-input",
+ "cel-network",
+ "cel-ocr",
+ "cel-signals",
+ "cel-vision",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

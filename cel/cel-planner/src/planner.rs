@@ -580,8 +580,8 @@ fn truncate_str(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_context::HttpEvent;
     use cel_context::{ContentRole, ContextElement, ContextSource, ElementState};
+    use cel_network::HttpEvent;
 
     fn make_element(id: &str, etype: &str, label: &str) -> ContextElement {
         ContextElement {

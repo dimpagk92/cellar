@@ -46,8 +46,8 @@ const K: usize = 8;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Use a file-backed provider so the measurement reflects the same
-    // I/O path the daemon uses. Discarded on exit.
+    // Use a file-backed provider so the measurement reflects the normal
+    // on-disk I/O path. Discarded on exit.
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("bench.sqlite");
     let embedder = Arc::new(MockEmbedder::new());

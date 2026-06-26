@@ -1,25 +1,25 @@
 # What CEL Is (and Isn't)
 
-This doc answers: what is CEL, and where does it fit next to Playwright, browser-use, Stagehand, Anthropic computer-use, and OpenClaw? It's the top-of-funnel positioning doc for agent developers, platform architects, and adopters evaluating whether CEL belongs in their stack.
+This doc answers: what is CEL, and where does it fit next to Playwright, browser-use, Stagehand, Anthropic computer-use, OpenClaw, and agent observability stacks? It's the top-of-funnel positioning doc for agent developers, platform architects, and adopters evaluating whether CEL belongs in their stack.
 
 ## One-Sentence Definition
 
-**CEL is the trust and execution layer for AI-operated computers: agent-agnostic perception, execution, verification, receipts, and adapters exposed as stable tools.**
+**CEL is the open context and trust layer for AI-operated software: a common way to fuse context, persist memory, brief models, and inspect what agents saw and did.**
 
 That sentence carries most of the load:
 
-- *Trust and execution layer*: CEL should make it clear what an agent saw, where it dispatched an action, what verification is still required, and what evidence supports the result.
+- *Context and trust layer*: CEL should make it clear what an agent saw, how that context was fused, what entered memory, what was sent to a model, and what evidence supports later claims.
 - *Agent-agnostic*: CEL does not assume a specific planner. LangGraph, Mastra, Codex, Claude, Claude Code, Gemini, Cursor, n8n, and in-house runtimes are all first-class clients. See [adapters-cel-agents.md](adapters-cel-agents.md) for the three-layer architecture.
-- *Infrastructure*: not an end-user product. CEL is what agent platforms build on top of.
-- *Perception, execution, verification, receipts, adapters*: the core capabilities CEL ships and hardens.
-- *MCP tools*: four tools — `cel_see`, `cel_act`, `cel_perceive`, `cel_think` (the last is optional). See [mcp-server.md](mcp-server.md).
+- *Infrastructure*: not an end-user product. CEL is the data plane and contract layer that agent platforms build on top of.
+- *Context, memory, brief, receipts*: the open capabilities CEL stabilizes. The live cortex runtime and governance console are commercial Cellar/Dilipod product layers unless explicitly opened later.
+- *MCP tools*: MCP is an important transport into CEL-shaped data and actions, not the product identity. See [mcp-server.md](mcp-server.md).
 
 ## CEL Is
 
-- **Device understanding on macOS.** Accessibility (AX), Chrome DevTools Protocol (CDP), vision, input/focus/process signals, and audio are fused into one stable `ContextElement` stream. Any single stream lies; the fusion is where trust improves.
-- **A stable action surface.** `cel_act` exposes a canonical set of primitives (click, type, scroll, navigate, key, wait-for, etc.) that behave the same across adapters. Actions return results plus execution receipts with dispatch path, timing, verification requirements, and evidence hints.
-- **A verification boundary.** CEL distinguishes "the input was dispatched" from "the task is complete." Agents should back final claims with adapter readback, CDP/AX state, screenshot evidence, Cortex diffs, or equivalent post-action observations.
-- **An adapter layer for app-specific truth.** AX is a generic substrate; adapters encode application-specific structured truth (a Numbers cell read is not a UI guess — it's a model read). First-party adapters today: `browser` (prod) plus stubs for `excel`, `bloomberg`, `metatrader`, `sap-gui`. Third parties can ship adapters outside this repo.
+- **A common context snapshot.** Accessibility (AX), Chrome DevTools Protocol (CDP), vision, input/focus/process signals, app facts, logs, and external sources can be normalized into one stable `ContextElement` / `ScreenContext` shape. Any single stream lies; the fused context is the shared language.
+- **A memory and briefing layer.** `cel-memory` defines what persists across turns, `cel-memory-sqlite` gives a local backend, and `cel-brief` assembles governed per-turn model input with receipts for what was included, dropped, or redacted.
+- **A verification boundary.** CEL distinguishes "the input was dispatched" from "the task is complete." Agents should back final claims with readback, CDP/AX state, screenshot evidence, runtime diffs, or equivalent post-action observations.
+- **Transport and receipt contracts.** MCP, CLI, SDK, and N-API surfaces can expose CEL-shaped context and action contracts. Receipts are open schemas; audit timelines, policy workflows, alerting, and compliance exports are product surfaces.
 - **A reference planner in-tree, optional.** `cel-goal-runner` and friends exist so the repo is runnable end-to-end, but they are clients of CEL, not CEL's identity. Replacing them with your own agent is the intended path.
 
 ## CEL Is Not
@@ -28,6 +28,7 @@ That sentence carries most of the load:
 - **Tied to one agent framework.** LangGraph, Mastra, and similar are integrations, not dependencies. If Mastra disappears tomorrow, CEL keeps working.
 - **A web-only tool.** The browser is one adapter. CEL is a desktop runtime — native macOS apps are peers of browser contexts, not a stretch goal.
 - **A multi-provider LLM router as a product.** `cel-llm` exists internally to drive the reference planner. It is not exposed, stabilized, or marketed as a model router. Don't depend on it.
+- **A promise that every runtime component is OSS.** The open project is the context/memory/brief/contracts data plane. The live cortex runtime and governance/compliance operations layer may remain commercial.
 
 ## Where CEL Fits
 
@@ -62,17 +63,19 @@ That sentence carries most of the load:
 
 ## The Thesis in One Paragraph
 
-Planning is commoditizing fast. Every frontier LLM can plan, and planning-focused wrappers are a crowded category with shrinking margins. Trustworthy perception and execution on real devices are not commoditizing - they require per-OS, per-app engineering, verification, and audit trails that do not fall out of a bigger model. CEL's durable surface is device mastery plus a stable, agent-agnostic trust loop that outlasts any single framework or model. That is the same shape as Anthropic's computer-use infrastructure, but CEL keeps the boundary self-hosted, adapter-extensible, and planner-neutral.
+Planning is commoditizing fast. Every frontier LLM can plan, and planning-focused wrappers are a crowded category with shrinking margins. What is not commoditizing is the data plane around agents: fusing heterogeneous context, deciding what persists, controlling what the model sees, and retaining evidence of what happened. CEL's durable surface is a stable, agent-agnostic context/memory/brief/audit language. Cellar/Dilipod's commercial surface operates that language continuously: live cortex runtime, policy, monitoring, compliance, and fleet operations.
 
 ## What This Means For You
 
-- **If you already have an agent and need trusted device execution on macOS, CEL is the layer.** Drop it behind your planner over MCP, keep your orchestration, and stop writing per-app scrapers.
+- **If you already have an agent and need a common context/memory/audit layer, CEL is the data plane.** Emit CEL context, brief models through CEL, persist memories through CEL, and keep receipts for later review.
 - **If you're starting from scratch and want a batteries-included browser agent, CEL is probably too low-level.** Use browser-use or Stagehand and come back when you outgrow them.
-- **If you're building an agent platform**, CEL is the closest thing to an unopinionated substrate you can standardize on.
+- **If you're building an agent platform**, CEL gives you the shared contracts; the commercial Cellar/Dilipod product gives you the operated runtime and governance plane.
 
 ## Status and Scope Today
 
-- Single supported OS: **macOS**. Linux worker lands in Phase 1 ([ROADMAP.md](ROADMAP.md)). Windows is explicitly not on the roadmap.
+- Open OSS focus: `cel-context`, `cel-memory`, `cel-memory-sqlite`, `cel-brief`, transport schemas, and receipt contracts.
+- Commercial/runtime focus: live cortex engine, governance console, monitoring, hosted workers, and compliance workflows.
+- Single supported device runtime today: **macOS**. Linux worker lands in Phase 1 ([ROADMAP.md](ROADMAP.md)). Windows is explicitly not on the roadmap.
 - Four MCP tools: `cel_see`, `cel_act`, `cel_perceive`, `cel_think` (optional).
 - First-party adapters: `browser` (prod) + 4 stubs (`excel`, `bloomberg`, `metatrader`, `sap-gui`).
 - Benchmarks: Hybrid suite (5 tasks), general web suite (50+). See [eval-leaderboard.md](eval-leaderboard.md).

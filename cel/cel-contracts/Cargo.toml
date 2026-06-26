@@ -4,7 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CEL boundary contracts — shared types between Cortex, Planner, and Goal Runner. Pure data types and traits with strictly minimal dependencies (cel-context + serde + async-trait)."
+description = "Shared Rust contracts for AI agent actions, planning views, runtime capabilities, and execution receipts."
+keywords = ["ai", "agent", "contracts", "receipts", "automation"]
+categories = ["data-structures"]
+readme = "README.md"
 
 [dependencies]
 cel-context = { workspace = true }

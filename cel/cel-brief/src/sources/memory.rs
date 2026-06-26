@@ -95,9 +95,9 @@ impl MemorySource {
     /// Construct a memory source.
     ///
     /// - `provider` — the backing [`MemoryProvider`], held as a trait object so
-    ///   callers that keep an `Arc<dyn MemoryProvider>` (e.g. the Cellar daemon)
-    ///   can wire it directly. Concrete `Arc<ConcreteProvider>` values coerce
-    ///   automatically at the call site.
+    ///   callers that keep an `Arc<dyn MemoryProvider>` can wire it directly.
+    ///   Concrete `Arc<ConcreteProvider>` values coerce automatically at the
+    ///   call site.
     /// - `caller_id` — value used for `MemoryQuery.caller_id`. This is the
     ///   ID the memory subsystem uses for access logs and scope enforcement;
     ///   it should match the caller name your provider expects (e.g.

@@ -1,12 +1,11 @@
-//! `PlanningView` — the budgeted, agent-facing projection of CEL state.
+//! `PlanningView` — the budgeted, agent-facing projection for one planning call.
 //!
-//! `MentalModel` (in cel-cortex) can be rich. `PlanningView` must be small.
-//! Planners receive this, not the full mental model, so prompts stay under
-//! token budgets and the same context contract works across every planner
-//! runtime (canonical Rust runner, LangGraph, Codex, in-house).
+//! Runtime state can be rich. `PlanningView` must be small. Planners receive
+//! this budgeted projection, not the full runtime state, so prompts stay under
+//! token budgets and the same context contract works across planner
+//! implementations.
 //!
-//! See `COGNITION_LAYER_PLAN.md` for the principle: **store broadly, select
-//! narrowly**.
+//! Principle: **store broadly, select narrowly**.
 //!
 //! Memory / knowledge / event refs are typed here but populated only by
 //! later PRs (memory store + memory-aware selection). PR1a only fills
@@ -21,9 +20,9 @@ use std::collections::BTreeMap;
 
 /// Compact, budgeted projection of CEL state for one planner call.
 ///
-/// Built by `cel-cortex`'s planning-view builder from `MentalModel` plus
-/// active adapter facts. Consumed by every planner — built-in or external —
-/// instead of raw `ScreenContext`.
+/// Built by a runtime or selector from current context, capabilities, memory,
+/// events, and adapter facts. Consumed by every planner instead of the full
+/// uncompressed context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanningView {
     /// The natural-language goal the planner is working on.
@@ -70,7 +69,7 @@ pub struct PlanningView {
     /// planner notices them even if elements are aggressively compressed.
     #[serde(default)]
     pub blockers: Vec<Blocker>,
-    /// Anomalies the cortex flagged (stale state, unexpected window, etc.).
+    /// Anomalies the runtime flagged (stale state, unexpected window, etc.).
     #[serde(default)]
     pub anomalies: Vec<AnomalyRef>,
     /// References back to source records that explain why selection picked
@@ -88,9 +87,8 @@ pub struct PlanningView {
     pub omitted_counts: OmittedCounts,
     /// Transitional pre-rendered "App-Specific Actions" prompt fragment listing the
     /// `{"type": "custom", "adapter": "...", "action": "...", "params": {...}}`
-    /// shapes for every currently-active adapter. The cortex-side step
-    /// executor builds this once per turn from `Cortex::active_adapter_manifests()`
-    /// and the canonical runner stamps it onto the view post-build.
+    /// shapes for every currently-active adapter. A runtime can build this once
+    /// per turn from active adapter manifests and stamp it onto the view.
     /// `None` means no adapter actions are available to the planner this
     /// turn — empty equivalent. Prefer `adapter_actions` for new callers;
     /// this field is retained while prompt-only clients migrate.
@@ -125,7 +123,7 @@ pub struct PlanningBudget {
     #[serde(default = "default_max_knowledge")]
     pub max_knowledge: u32,
     /// Maximum number of `EventRef` entries (Tier A2 selector — pulled
-    /// from cortex `observations` table, ordered by priority then
+    /// from a runtime observations table, ordered by priority then
     /// recency, scoped by workflow). `serde(default)` keeps backward
     /// compat with pre-A2 callers.
     #[serde(default = "default_max_recent_events")]
@@ -259,7 +257,7 @@ pub struct PlanningElementState {
 /// list empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRef {
-    /// Stable id of the memory record in `cortex_memories`.
+    /// Stable id of the selected memory record.
     pub id: i64,
     /// Memory kind: "outcome", "prior", "failure", "preference".
     pub kind: String,
@@ -364,7 +362,7 @@ pub struct EvidenceRef {
     pub summary: String,
 }
 
-/// Reference to an anomaly the cortex flagged that the planner should see.
+/// Reference to an anomaly the runtime flagged that the planner should see.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnomalyRef {
     /// Anomaly kind: "stale_state", "unexpected_window", "missing_target",

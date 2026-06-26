@@ -25,13 +25,12 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use cel_accessibility::ElementState;
 use cel_adapter_sdk::{
     ActionDeclaration, ActionResult, AdapterDriver, AdapterError, AdapterManifest,
     ContextDeclaration,
 };
 use cel_adapter_sdk::{LifecycleDeclaration, VerificationDeclaration};
-use cel_context::{ContentRole, ContextElement, ContextSource};
+use cel_context::{ContentRole, ContextElement, ContextSource, ElementState};
 #[cfg(target_os = "macos")]
 use cel_input::CellWrite;
 use serde_json::{json, Value};

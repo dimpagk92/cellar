@@ -141,13 +141,13 @@ mod tests {
 
     #[tokio::test]
     async fn with_id_rewrites_tool_source() {
-        let src = ToolCatalogSource::new(vec![schema("alpha")]).with_id("cellar_tools");
-        assert_eq!(src.id(), SourceId::new("cellar_tools"));
+        let src = ToolCatalogSource::new(vec![schema("alpha")]).with_id("example_tools");
+        assert_eq!(src.id(), SourceId::new("example_tools"));
         let ctx = BriefContext::new(TokenBudget::default());
         let contributions = src.contribute(&ctx).await.expect("ok");
         match &contributions[0].content {
             ContributionContent::Tool { schema } => {
-                assert_eq!(schema.source, SourceId::new("cellar_tools"));
+                assert_eq!(schema.source, SourceId::new("example_tools"));
             }
             other => panic!("expected Tool, got {other:?}"),
         }

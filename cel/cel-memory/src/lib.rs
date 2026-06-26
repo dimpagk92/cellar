@@ -6,15 +6,9 @@
 //! profiles, caller scopes, write hooks, summaries, rollups, aging, export).
 //! Storage backends implement the trait; callers depend only on it.
 //!
-//! The crate is deliberately narrow. It does **not** observe live device/world
-//! state — that is `cel-cortex`'s job ("what is true now?") — and it does
-//! **not** assemble per-turn LLM prompts — that is `cel-brief`'s job ("what
-//! should the model see this turn?"). cel-memory owns persistence only.
-//!
-//! Cellar is the motivating consumer: its embedded agent runtime, NL rule
-//! compiler, `cel_act` gateway, rule-matcher post-fire hook, and Activity /
-//! Memory tabs all compile against this trait. But nothing here depends on
-//! Cellar — the crate is reusable memory infrastructure for any agent runtime.
+//! The crate is deliberately narrow. It does **not** observe live environment
+//! state and it does **not** assemble per-turn LLM prompts. `cel-memory` owns
+//! persistence only.
 //!
 //! [`BasicMemoryProvider`] is the in-crate reference implementation — real
 //! bodies for [`MemoryProvider::retrieve`], [`MemoryProvider::write`], session

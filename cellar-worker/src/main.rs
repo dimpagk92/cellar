@@ -85,8 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// discovery. Add adapter directories here when the worker needs first-party
 /// adapters (Excel / SAP / etc.) loaded alongside.
 async fn boot_cortex() -> Result<Arc<cel_cortex::Cortex>, String> {
-    let a11y = cel_accessibility::create_tree();
-    let merger = cel_context::ContextMerger::new(a11y);
+    let merger = cel_context::ContextMerger::new();
     let observer = cel_accessibility::create_tree();
 
     // cellar-worker runs as a server process driving the worker's own

@@ -400,8 +400,7 @@ pub async fn decompose_goal(
 mod tests {
     use super::*;
 
-    use cel_accessibility::ElementState;
-    use cel_context::{ContentRole, ContextSource};
+    use cel_context::{ContentRole, ContextSource, ElementState};
 
     fn make_element(id: &str, element_type: &str, label: Option<&str>) -> ContextElement {
         ContextElement {

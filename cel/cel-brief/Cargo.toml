@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Per-turn LLM briefing layer. Assemble memory, perception, history, tools, and user message into a single budgeted, governed, receipted bundle from pluggable streams."
+description = "Composable prompt briefing for AI agents: gather sources, enforce token budgets, apply governance, and emit receipts."
 keywords = ["ai", "llm", "agent", "context", "prompt"]
 categories = ["asynchronous"]
 readme = "README.md"
 
 [dependencies]
 async-trait = "0.1"
-cel-memory = { path = "../cel-memory", version = "0.1.0", optional = true }
+cel-memory = { path = "../cel-memory", version = "0.1.5", optional = true }
 futures-util = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

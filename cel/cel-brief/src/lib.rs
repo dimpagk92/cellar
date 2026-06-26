@@ -6,11 +6,11 @@
 //! assembles into a provider-agnostic [`types::Brief`] plus a
 //! [`receipt::BriefReceipt`] of what was included, dropped, and redacted.
 //!
-//! It is deliberately scoped. cel-brief does **not** discover live device/world
-//! truth itself — a `PerceptionSource` *consumes* a snapshot that some backend
-//! (e.g. `cel-cortex`) produced — and it does **not** store memory; a
-//! `MemorySource` reads from a `cel_memory::MemoryProvider`. cel-brief owns
-//! per-turn briefing assembly only, and never depends on `cel-cortex`.
+//! It is deliberately scoped. `cel-brief` does **not** discover live state
+//! itself — a `PerceptionSource` consumes a snapshot that some backend produced
+//! — and it does **not** store memory; a `MemorySource` reads from a
+//! `cel_memory::MemoryProvider`. `cel-brief` owns per-turn briefing assembly
+//! only.
 //!
 //! **Status (Phases 1 + 2 + 3 + 4):** all core types, traits, sources,
 //! governance, and builder are shipped.

@@ -227,7 +227,7 @@ pub fn build_context_from_elements(
 ) -> napi::Result<String> {
     let elements: Vec<cel_context::ContextElement> = serde_json::from_str(&elements_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid elements JSON: {}", e)))?;
-    let http_events: Vec<cel_network::HttpEvent> = serde_json::from_str(&network_events_json)
+    let http_events: Vec<cel_context::HttpEvent> = serde_json::from_str(&network_events_json)
         .map_err(|e| napi::Error::from_reason(format!("Invalid network events JSON: {}", e)))?;
 
     let context = cel_context::build_from_external(elements, http_events, app_name, window_title);

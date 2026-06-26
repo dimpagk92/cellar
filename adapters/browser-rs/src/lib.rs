@@ -545,9 +545,8 @@ impl AdapterDriver for BrowserAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_accessibility::ElementState;
     use cel_cdp::DomElement;
-    use cel_context::ContextSource;
+    use cel_context::{ContextSource, ElementState};
 
     #[test]
     fn manifest_declares_background_refresh_for_headless() {

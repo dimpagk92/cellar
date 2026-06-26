@@ -35,8 +35,8 @@ pub struct MemoryChunk {
     pub session_id: Option<String>,
     /// Working directory or project this chunk is scoped to, if known.
     pub project_root: Option<String>,
-    /// Normalised caller — `"embedded"`, `"mcp:codex"`, `"gateway"`,
-    /// `"matcher"`, `"cortex"`, `"system"`.
+    /// Normalised caller — for example `"agent"`, `"mcp:codex"`,
+    /// `"gateway"`, `"policy"`, `"perception"`, `"system"`.
     pub caller_id: String,
     /// The human-readable text indexed by FTS and embedded.
     pub content: String,
@@ -102,11 +102,11 @@ pub struct NewMemoryChunk {
 pub enum ChunkKind {
     /// A chat message between the user and an agent.
     Chat,
-    /// A `cel_act` call: attempted, completed, or denied.
+    /// An action call: attempted, completed, or denied.
     Action,
     /// A rule firing.
     Fire,
-    /// A Cortex event the importance scorer flagged as significant.
+    /// A runtime observation the importance scorer flagged as significant.
     Observation,
     /// A user correction or override (confirmation modal Deny, "don't do that
     /// again" chat message, etc.). Highest-signal kind. Never auto-evicted.
@@ -121,23 +121,23 @@ pub enum ChunkKind {
 }
 
 /// Where the chunk came from. Distinct from `caller_id`: `source` is the
-/// *producer* in the daemon; `caller_id` is the *originator* of the underlying
-/// activity (an external MCP client name, the embedded agent, etc.).
+/// producer category, while `caller_id` is the originator of the underlying
+/// activity (for example an agent id, client id, or service name).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkSource {
-    /// The embedded agent runtime in the daemon.
+    /// An embedded or in-process agent.
     Embedded,
     /// An external MCP client (Cursor, Codex, Claude Desktop, etc.). The
     /// specific client lives in `caller_id`.
     Mcp,
-    /// The `cel_act` gateway, recording an attempted/completed/denied action.
+    /// An action gateway, recording an attempted/completed/denied action.
     Gateway,
-    /// The rule matcher post-fire hook.
+    /// A policy or rule matcher post-fire hook.
     Matcher,
-    /// The Cortex perception engine.
-    Cortex,
-    /// System-level metadata (settings changes, daemon lifecycle, etc.).
+    /// A perception or observation runtime.
+    Perception,
+    /// System-level metadata (settings changes, lifecycle events, etc.).
     System,
 }
 

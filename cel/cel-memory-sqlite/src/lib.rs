@@ -5,10 +5,7 @@
 //! local SQLite file (plus `sqlite-vec` for vector search and FTS5 for lexical
 //! search). It owns persistence behavior only — schema, migrations, embeddings,
 //! hybrid retrieval, caching — and depends on `cel-memory` for the trait and
-//! value types. It does not depend on `cel-cortex` or `cel-brief`.
-//!
-//! Cellar is the motivating consumer, but the crate is a drop-in backend for
-//! any agent runtime that speaks `cel_memory::MemoryProvider`.
+//! value types. It does not depend on any prompt builder, planner, or runtime.
 //!
 //! What it delivers:
 //!

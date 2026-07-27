@@ -56,7 +56,7 @@
   "devDependencies": {
     "@cellar/adapter-browser": "workspace:*",
     "@cellar/agent": "workspace:*",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "typescript": "^6.0.3"
   },
   "publishConfig": { "access": "public" },

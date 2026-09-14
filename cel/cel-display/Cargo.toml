@@ -10,7 +10,7 @@ default = []
 xcap = ["dep:xcap"]
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 image = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

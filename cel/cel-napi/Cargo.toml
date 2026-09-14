@@ -43,7 +43,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-base64 = "0.22"
+base64 = "0.23"
 
 # napi-rs bindings
 napi = { version = "3", features = ["async", "serde-json"] }

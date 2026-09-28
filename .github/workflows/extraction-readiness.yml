@@ -39,7 +39,7 @@ jobs:
     name: No-reverse-deps lint guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
@@ -92,7 +92,7 @@ jobs:
     name: Cargo dependency allowlist (extraction-candidate crates)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -106,7 +106,7 @@ jobs:
     name: Standalone builds (extraction-candidate crates)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 

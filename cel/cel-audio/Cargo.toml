@@ -9,7 +9,7 @@ description = "CEL audio capture layer — mic + system output as a live context
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
-parking_lot = "0.12"
+parking_lot = "0.13"
 cpal = "0.15"
 reqwest = { workspace = true, features = ["blocking", "multipart"] }
 serde_json = { workspace = true }
